@@ -17,6 +17,11 @@ import type {
 
 import StrapiModuleService from "../strapi/service";
 import { STRAPI_MODULE } from "../strapi";
+import {
+  atlantaDeliveryRateCents,
+  eligibleSubtotalCents,
+  type AtlantaDeliveryZoneRate,
+} from "./rates";
 
 type InjectedDependencies = {
   logger: Logger;
@@ -26,6 +31,12 @@ type Options = {
   apiKey?: string;
   endpoint?: string;
 };
+
+function strapiRow<T extends Record<string, unknown>>(row: unknown): T | null {
+  if (!row || typeof row !== "object") return null;
+  const value = row as Record<string, unknown>;
+  return ((value.attributes as T | undefined) || (value as T)) ?? null;
+}
 
 export default class GrillersFulfillmentProviderService extends AbstractFulfillmentProviderService {
   static identifier = "grillers-fulfillment"; // => stored as fp_grillers_<id> in DB
@@ -77,12 +88,41 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
         // @ts-ignore
         const zip: string = optionData?.shipping_address?.postal_code;
         const serviceCode: string | any = optionData?.service_code;
+        const items = Array.isArray(optionData?.items) ? optionData.items : [];
 
-        let total = 0;
-        // @ts-ignore
-        optionData?.items?.forEach((item) => {
-          total += item.unit_price * item.quantity;
-        });
+        const total = eligibleSubtotalCents(items);
+
+        if (serviceCode == "ATLANTA_DELIVERY" && zip) {
+          try {
+            const params = new URLSearchParams({
+              "filters[ZipCode][$eq]": zip,
+              "filters[IsActive][$eq]": "true",
+              "pagination[limit]": "1",
+            });
+            const response = await fetch(
+              `${process.env.STRAPI_URL}/api/atlanta-delivery-zones?${params.toString()}`,
+              {
+                method: "GET",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${process.env.STRAPI_TOKEN}`,
+                },
+              }
+            );
+            if (response.ok) {
+              const zone = strapiRow<AtlantaDeliveryZoneRate>(
+                (await response.json())?.data?.[0]
+              );
+              if (zone) {
+                return atlantaDeliveryRateCents(zone, total);
+              }
+            }
+          } catch (error) {
+            this.logger_.warn(
+              `[fulfillment] failed to load structured Atlanta delivery rate for ${zip}; falling back to shipping-zones`
+            );
+          }
+        }
 
         const response = await fetch(
           `${process.env.STRAPI_URL}/api/shipping-zones?populate=*`,
