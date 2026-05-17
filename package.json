@@ -33,7 +33,11 @@
     "@mikro-orm/migrations": "6.4.3",
     "@mikro-orm/postgresql": "6.4.3",
     "awilix": "^8.0.1",
-    "pg": "^8.13.0"
+    "conductor-node": "^14.12.0",
+    "fast-xml-parser": "^5.8.0",
+    "mysql2": "^3.22.3",
+    "pg": "^8.13.0",
+    "scrypt-kdf": "^4.0.0"
   },
   "devDependencies": {
     "@medusajs/test-utils": "2.10.3",
