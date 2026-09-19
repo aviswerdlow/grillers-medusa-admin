@@ -1,3 +1,5 @@
+import { assertQbdPostingReady, persistQbdPosting } from "./qbd-posting-outbox"
+import { persistQbdOrderAudit } from "./qbd-order-metadata"
 import {
   FINALIZATION_CHARGE_ATTEMPTING,
   FINALIZATION_CHARGE_FAILED_HOLD,
@@ -156,6 +158,7 @@ export async function runFinalChargeAndRelease(
   let mayAdoptPersistedFinalizationPaymentIntent = false
 
   try {
+    await assertQbdPostingReady(db, order.id)
     preview = await previewFinalization(db, order, {
       persist: true,
       // Charging must validate the status staff actually approved. A normal
@@ -525,11 +528,12 @@ export async function runFinalChargeAndRelease(
       })
     }
 
-    const metadata = {
+    const confirmedPaymentIntent = paymentIntent
+    const buildPostingMetadata = (current: Record<string, any>) => ({
       ...finalChargeOrderMetadata({
-        order,
+        order: { ...order, metadata: current },
         finalization: finalizationForMetadata,
-        paymentIntent,
+        paymentIntent: confirmedPaymentIntent,
         attemptId: attempt.id,
         actorId: staffActor,
         staffAudit,
@@ -537,13 +541,18 @@ export async function runFinalChargeAndRelease(
       ...(wwexQuote?.metadata || {}),
       ...(wwexBooking.metadata || {}),
       ...finalizedCatchWeightOrderMetadata({
-        order,
+        order: { ...order, metadata: current },
         lines: preview.lines,
         packages: preview.packages,
       }),
-    }
+    })
 
-    await orderModule.updateOrders(order.id, { metadata })
+    const recorded = await persistQbdPosting({
+      db,
+      order,
+      buildMetadata: buildPostingMetadata,
+    })
+    const metadata = recorded.metadata
     await eventBus.emit({
       name: "order.final_charge_succeeded",
       data: {
@@ -634,43 +643,51 @@ export async function runFinalChargeAndRelease(
       ? "blocked_charge_succeeded_recording_failed"
       : "blocked_charge_failed"
     const eventAt = new Date().toISOString()
-    const metadata = appendStaffAudit(
-      {
-        ...metadataObject(order.metadata),
-        finalization_id: preview.finalization.id,
-        finalization_status: failedStatus,
-        catch_weight_status: failedStatus,
-        final_charge_status: failedChargeStatus,
-        ...(succeededPaymentIntent ? {} : { final_charge_failed_at: eventAt }),
-        ...(succeededPaymentIntent
-          ? { final_charge_recording_failed_at: eventAt }
-          : {}),
-        fulfillment_gate_status: failedGateStatus,
-        stripe_payment_intent_id:
-          persistedPaymentIntentId || stripeError.payment_intent?.id || null,
-        stripe_charge_id:
-          persistedChargeId || stripeChargeId(stripeError.payment_intent || {}),
-        stripe_failure_code: succeededPaymentIntent
-          ? null
-          : stripeError.code || null,
-        stripe_failure_message: succeededPaymentIntent ? null : failureMessage,
-        final_charge_recording_failure_message: succeededPaymentIntent
-          ? failureMessage
-          : undefined,
-      },
-      {
-        action: succeededPaymentIntent
-          ? "final_charge_succeeded_recording_failed"
-          : "final_charge_failed",
-        status: failedStatus,
-        charge_attempt_id: attempt.id,
-        ...staffAudit,
-        payment_intent_id:
-          persistedPaymentIntentId || stripeError.payment_intent?.id || null,
-        failure_code: succeededPaymentIntent ? null : stripeError.code || null,
-        failure_message: failureMessage,
-      }
-    )
+    const failureMetadata = (current: Record<string, any>) =>
+      appendStaffAudit(
+        {
+          ...current,
+          finalization_id: preview.finalization.id,
+          finalization_status: failedStatus,
+          catch_weight_status: failedStatus,
+          final_charge_status: failedChargeStatus,
+          ...(succeededPaymentIntent
+            ? {}
+            : { final_charge_failed_at: eventAt }),
+          ...(succeededPaymentIntent
+            ? { final_charge_recording_failed_at: eventAt }
+            : {}),
+          fulfillment_gate_status: failedGateStatus,
+          stripe_payment_intent_id:
+            persistedPaymentIntentId || stripeError.payment_intent?.id || null,
+          stripe_charge_id:
+            persistedChargeId ||
+            stripeChargeId(stripeError.payment_intent || {}),
+          stripe_failure_code: succeededPaymentIntent
+            ? null
+            : stripeError.code || null,
+          stripe_failure_message: succeededPaymentIntent
+            ? null
+            : failureMessage,
+          final_charge_recording_failure_message: succeededPaymentIntent
+            ? failureMessage
+            : undefined,
+        },
+        {
+          action: succeededPaymentIntent
+            ? "final_charge_succeeded_recording_failed"
+            : "final_charge_failed",
+          status: failedStatus,
+          charge_attempt_id: attempt.id,
+          ...staffAudit,
+          payment_intent_id:
+            persistedPaymentIntentId || stripeError.payment_intent?.id || null,
+          failure_code: succeededPaymentIntent
+            ? null
+            : stripeError.code || null,
+          failure_message: failureMessage,
+        }
+      )
 
     await db("gp_order_finalization")
       .where({ id: preview.finalization.id })
@@ -690,7 +707,7 @@ export async function runFinalChargeAndRelease(
           : "stripe_final_charge_failed",
         updated_at: new Date(),
       })
-    await orderModule.updateOrders(order.id, { metadata })
+    const metadata = await persistQbdOrderAudit(db, order.id, failureMetadata)
     // #251: every charge_failed_hold entry must emit an ops alert.
     await emitChargeFailedHoldAlert({
       logger,

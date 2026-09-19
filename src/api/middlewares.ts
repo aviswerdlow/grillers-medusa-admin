@@ -781,6 +781,11 @@ export default defineMiddlewares({
       middlewares: [authenticate("user", ["session", "bearer", "api-key"])],
     },
     {
+      matcher: "/admin/grillers/orders/*/accounting-action",
+      method: ["GET", "POST"],
+      middlewares: [authenticate("user", ["session", "bearer", "api-key"])],
+    },
+    {
       matcher: "/admin/grillers/payments*",
       method: ["POST"],
       middlewares: [authenticate("user", ["session", "bearer", "api-key"])],

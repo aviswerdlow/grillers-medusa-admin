@@ -1,557 +1,140 @@
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { POST } from "../route"
 import { emitOpsAlert } from "../../../../../../../../lib/ops-alert"
+import { assertQbdPostingReady, persistQbdPosting, QbdPostingConflict } from "../../../../../../../../lib/qbd-posting-outbox"
+import { claimStaffRefundRequest, completeStaffRefundRequest, existingStaffRefundRequest, requireStaffRefundReconciliation } from "../../../../../../../../lib/staff-refund-request"
+import { releaseAllocationLineQuantities } from "../../../../../../../../lib/inventory-allocation"
 
-jest.mock("../../../../../../../../lib/ops-alert", () => ({
-  emitOpsAlert: jest.fn(async () => ({ ok: true, skipped: false })),
+jest.mock("../../../../../../../../lib/ops-alert", () => ({ emitOpsAlert: jest.fn() }))
+jest.mock("../../../../../../../../lib/inventory-allocation", () => ({ releaseAllocationLineQuantities: jest.fn() }))
+jest.mock("../../../../../../../../lib/qbd-posting-outbox", () => ({
+  ...jest.requireActual("../../../../../../../../lib/qbd-posting-outbox"),
+  assertQbdPostingReady: jest.fn(), persistQbdPosting: jest.fn(),
+}))
+jest.mock("../../../../../../../../lib/staff-refund-request", () => ({
+  ...jest.requireActual("../../../../../../../../lib/staff-refund-request"),
+  claimStaffRefundRequest: jest.fn(), recordStaffRefundProvider: jest.fn(), existingStaffRefundRequest: jest.fn(),
+  completeStaffRefundRequest: jest.fn(), requireStaffRefundReconciliation: jest.fn(),
 }))
 
-function makeAllocationDb(rows: any[] = []) {
-  const updates: any[] = []
-  const inserts: any[] = []
-  const db: any = jest.fn((table: string) => {
-    const chain: any = {
-      select: jest.fn(() => chain),
-      whereNull: jest.fn(() => chain),
-      where: jest.fn(() => chain),
-      whereIn: jest.fn(() => chain),
-      limit: jest.fn(() => chain),
-      update: jest.fn(async (payload: any) => {
-        updates.push({ table, payload })
-        return 1
-      }),
-      insert: jest.fn(async (payload: any) => {
-        inserts.push({ table, payload })
-        return payload
-      }),
-      then: (resolve: any) =>
-        resolve(table === "gp_inventory_allocation" ? rows : []),
-    }
+const originalFetch = global.fetch
+const originalKey = process.env.STRIPE_API_KEY
+beforeEach(() => {
+  jest.resetAllMocks()
+  process.env.STRIPE_API_KEY = "sk_test_fixture"
+  global.fetch = jest.fn(async () => ({ ok: true, json: async () => ({ id: "re_test", status: "succeeded" }) })) as any
+  ;(existingStaffRefundRequest as jest.Mock).mockResolvedValue(null)
+  ;(claimStaffRefundRequest as jest.Mock).mockResolvedValue({ id: "intent_test", replay: null })
+  ;(requireStaffRefundReconciliation as jest.Mock).mockResolvedValue(undefined)
+  ;(persistQbdPosting as jest.Mock).mockImplementation(async ({ order, buildMetadata }) => ({ metadata: buildMetadata(order.metadata) }))
+})
+afterAll(() => { global.fetch = originalFetch; process.env.STRIPE_API_KEY = originalKey })
 
-    return chain
-  })
-
-  return { db, updates, inserts }
+function fixture() {
+  const order: any = { id: "order_test", currency_code: "usd", total: 100, items: [{ id: "line_test", quantity: 1 }],
+    metadata: { final_charge_status: "succeeded", stripe_payment_intent_id: "pi_test", final_total: 100, final_charge_refunded_amount: 10 } }
+  const orderModule = { listOrderTransactions: jest.fn(async () => [] as any[]), addOrderTransactions: jest.fn(), updateOrders: jest.fn() }
+  const eventBus = { emit: jest.fn() }
+  const db = {}
+  const services: any = { [Modules.ORDER]: orderModule, [Modules.EVENT_BUS]: eventBus,
+    [ContainerRegistrationKeys.QUERY]: { graph: jest.fn(async () => ({ data: [order] })) }, [ContainerRegistrationKeys.PG_CONNECTION]: db }
+  const req: any = { params: { id: order.id }, headers: { "idempotency-key": "intent_test" },
+    body: { amount: 12.5, note: "Synthetic test" }, auth_context: { actor_id: "staff_test" }, scope: { resolve: (key: string) => services[key] } }
+  const res: any = { status: jest.fn(function () { return this }), json: jest.fn() }
+  return { req, res, order, orderModule, eventBus, db }
 }
 
-describe("final-charge refund route", () => {
-  const originalFetch = global.fetch
-  const originalStripeKey = process.env.STRIPE_API_KEY
+it("refunds the final PaymentIntent once and queues its immutable accounting action", async () => {
+  const f = fixture()
+  await POST(f.req, f.res)
+  expect(f.res.status).toHaveBeenCalledWith(200)
+  const init = (global.fetch as jest.Mock).mock.calls[0][1]
+  expect(init.headers["Idempotency-Key"]).toBe("intent_test")
+  expect(init.body.get("payment_intent")).toBe("pi_test")
+  expect(init.body.get("amount")).toBe("1250")
+  const posting = await (persistQbdPosting as jest.Mock).mock.results[0].value
+  expect(posting.metadata).toEqual(expect.objectContaining({ final_charge_refunded_amount: 22.5,
+    qbd_posting_request_key: "refund:re_test", qbd_posting_amount: 1250, stripe_refund_status: "submitted" }))
+  expect(posting.metadata.final_charge_refunds).toEqual([expect.objectContaining({ id: "re_test", idempotency_key: "intent_test" })])
+  expect(f.orderModule.updateOrders).not.toHaveBeenCalled()
+  expect(f.orderModule.addOrderTransactions).toHaveBeenCalledWith(expect.objectContaining({ reference_id: "re_test", amount: -12.5 }))
+  expect(f.eventBus.emit).toHaveBeenCalledWith(expect.objectContaining({ name: "payment.refunded" }))
+  expect(completeStaffRefundRequest).toHaveBeenCalledTimes(1)
+})
 
-  afterEach(() => {
-    global.fetch = originalFetch
-    process.env.STRIPE_API_KEY = originalStripeKey
-    jest.restoreAllMocks()
-  })
+it("returns a durable replay even when the remaining balance is now zero", async () => {
+  const f = fixture()
+  f.order.metadata.final_charge_refunded_amount = 100
+  ;(existingStaffRefundRequest as jest.Mock).mockResolvedValue({ id: "intent_test", replay: { payment: { refunds: [{ id: "re_test" }] } } })
+  await POST(f.req, f.res)
+  expect(f.res.status).toHaveBeenCalledWith(200)
+  expect(global.fetch).not.toHaveBeenCalled()
+  expect(f.eventBus.emit).not.toHaveBeenCalled()
+})
 
-  function makeRes() {
-    return {
-      status: jest.fn(function status() {
-        return this
-      }),
-      json: jest.fn(),
-    } as any
-  }
+it("preserves legacy confirmed-refund replay without reissuing money", async () => {
+  const f = fixture()
+  f.order.metadata.final_charge_refunds = [{ id: "re_old", idempotency_key: "intent_test", amount: 12.5 }]
+  await POST(f.req, f.res)
+  expect(f.res.status).toHaveBeenCalledWith(200)
+  expect(global.fetch).not.toHaveBeenCalled()
+})
 
-  it("refunds the Stripe final PaymentIntent and queues QBD refund posting", async () => {
-    process.env.STRIPE_API_KEY = "sk_test_123"
-    const stripeFetch = jest.fn(async (_url: string, init: any) => {
-      const body = init.body as URLSearchParams
-      expect(body.get("payment_intent")).toBe("pi_final_123")
-      expect(body.get("amount")).toBe("1250")
-      expect(init.headers["Idempotency-Key"]).toBe("refund-key-123")
+it.each([0, -1, 90.01, 1.111])("rejects an invalid amount %s before Stripe", async (amount) => {
+  const f = fixture()
+  f.req.body.amount = amount
+  await POST(f.req, f.res)
+  expect(f.res.status).toHaveBeenCalledWith(422)
+  expect(global.fetch).not.toHaveBeenCalled()
+})
 
-      return {
-        ok: true,
-        json: async () => ({ id: "re_final_123", status: "succeeded" }),
-      } as any
-    })
-    global.fetch = stripeFetch as any
+it.each(["missing_key", "untracked_legacy", "unresolved_attempt"])("blocks %s before Stripe", async (reason) => {
+  const f = fixture()
+  if (reason === "missing_key") f.req.headers = {}
+  if (reason === "untracked_legacy") (assertQbdPostingReady as jest.Mock).mockRejectedValue(new QbdPostingConflict("Legacy request needs reconciliation"))
+  if (reason === "unresolved_attempt") (existingStaffRefundRequest as jest.Mock).mockRejectedValue(new QbdPostingConflict("Refund needs reconciliation"))
+  await POST(f.req, f.res)
+  expect(f.res.status).toHaveBeenCalledWith(409)
+  expect(global.fetch).not.toHaveBeenCalled()
+})
 
-    const orderModule = {
-      retrieveOrder: jest.fn(async () => ({
-        id: "order_123",
-        currency_code: "usd",
-        total: 100,
-        metadata: {
-          final_charge_status: "succeeded",
-          stripe_payment_intent_id: "pi_final_123",
-          final_total: 100,
-          final_charge_refunded_amount: 10,
-          staff_audit_log: "[]",
-        },
-      })),
-      listOrderTransactions: jest.fn(async () => []),
-      addOrderTransactions: jest.fn(async () => undefined),
-      updateOrders: jest.fn(async () => undefined),
-    }
-    const eventBus = { emit: jest.fn(async () => undefined) }
-    const { db } = makeAllocationDb()
-    const req = {
-      params: { id: "order_123" },
-      headers: { "idempotency-key": "refund-key-123" },
-      body: { amount: 12.5, note: "Customer refund test" },
-      scope: {
-        resolve: (key: string) => {
-          if (key === Modules.ORDER) return orderModule
-          if (key === Modules.EVENT_BUS) return eventBus
-          if (key === ContainerRegistrationKeys.PG_CONNECTION) return db
-          throw new Error(`Unknown dependency ${key}`)
-        },
-      },
-      auth_context: { actor_id: "user_123" },
-    } as any
-    const res = makeRes()
+it("retains an uncertain provider attempt for reconciliation", async () => {
+  const f = fixture()
+  ;(global.fetch as jest.Mock).mockRejectedValue(new Error("Provider timeout"))
+  await POST(f.req, f.res)
+  expect(requireStaffRefundReconciliation).toHaveBeenCalledWith(f.db, "intent_test")
+  expect(persistQbdPosting).not.toHaveBeenCalled()
+  expect(f.res.json).toHaveBeenCalledWith({ message: expect.stringContaining("Do not submit another refund") })
+})
 
-    await POST(req, res)
+it("retains the provider receipt and pages when Medusa recording fails", async () => {
+  const f = fixture()
+  ;(persistQbdPosting as jest.Mock).mockRejectedValue(new Error("DB unavailable"))
+  await POST(f.req, f.res)
+  expect(f.res.status).toHaveBeenCalledWith(500)
+  expect(completeStaffRefundRequest).not.toHaveBeenCalled()
+  expect(requireStaffRefundReconciliation).toHaveBeenCalledWith(f.db, "intent_test")
+  expect(emitOpsAlert).toHaveBeenCalledWith(expect.objectContaining({ alertKind: "refund_recorded_mismatch", meta: expect.objectContaining({ stripe_refund_id: "re_test" }) }))
+})
 
-    expect(orderModule.addOrderTransactions).toHaveBeenCalledWith({
-      order_id: "order_123",
-      amount: -12.5,
-      currency_code: "usd",
-      reference: "refund",
-      reference_id: "re_final_123",
-    })
-    expect(orderModule.updateOrders).toHaveBeenCalledWith("order_123", {
-      metadata: expect.objectContaining({
-        final_charge_refunded_amount: 22.5,
-        qbd_posting_required: true,
-        qbd_posting_status: "pending_manual",
-        qbd_posting_action: "card_refund_accounting_record",
-        qbd_posting_amount: 1250,
-        qbd_posting_request_key: "refund:re_final_123",
-        stripe_refund_id: "re_final_123",
-        final_charge_refunds: [
-          expect.objectContaining({
-            id: "re_final_123",
-            amount: 12.5,
-            amount_minor: 1250,
-            idempotency_key: "refund-key-123",
-          }),
-        ],
-      }),
-    })
-    expect(eventBus.emit).toHaveBeenCalledWith({
-      name: "payment.refunded",
-      data: {
-        id: "final_charge:pi_final_123",
-        payment_id: "final_charge:pi_final_123",
-        refund_id: "re_final_123",
-        order_id: "order_123",
-        amount: 12.5,
-        reason: "Customer refund test",
-      },
-    })
-    expect(res.status).toHaveBeenCalledWith(200)
-    expect(res.json).toHaveBeenCalledWith({
-      payment: expect.objectContaining({
-        id: "final_charge:pi_final_123",
-        provider_id: "pp_stripe_final_charge",
-        refunded_amount: 22.5,
-        refunds: [
-          expect.objectContaining({
-            id: "re_final_123",
-            amount: 12.5,
-          }),
-        ],
-      }),
-    })
-  })
+it("does not duplicate an existing order transaction and releases only explicit lines", async () => {
+  const f = fixture()
+  f.orderModule.listOrderTransactions.mockResolvedValue([{ id: "transaction_test" }])
+  f.req.body.allocation_releases = [{ order_id: f.order.id, line_item_id: "line_test", quantity: 1 }]
+  await POST(f.req, f.res)
+  expect(f.orderModule.addOrderTransactions).not.toHaveBeenCalled()
+  expect(releaseAllocationLineQuantities).toHaveBeenCalledWith(expect.objectContaining({ orderId: f.order.id, lines: [{ line_item_id: "line_test", quantity: 1 }] }))
+})
 
-  it("returns an existing final-charge refund for an idempotent replay without touching Stripe", async () => {
-    const stripeFetch = jest.fn()
-    global.fetch = stripeFetch as any
-
-    const orderModule = {
-      retrieveOrder: jest.fn(async () => ({
-        id: "order_123",
-        currency_code: "usd",
-        total: 100,
-        metadata: {
-          final_charge_status: "succeeded",
-          stripe_payment_intent_id: "pi_final_123",
-          final_total: 100,
-          final_charge_refunded_amount: 22.5,
-          final_charge_refunds: [
-            {
-              id: "re_final_123",
-              amount: 12.5,
-              amount_minor: 1250,
-              idempotency_key: "refund-key-123",
-              qbd_posting_request_key: "refund:re_final_123",
-              created_at: "2026-06-12T15:00:00.000Z",
-            },
-          ],
-          qbd_posting_status: "pending_manual",
-          qbd_posting_request_key: "refund:re_final_123",
-        },
-      })),
-      listOrderTransactions: jest.fn(),
-      addOrderTransactions: jest.fn(),
-      updateOrders: jest.fn(),
-    }
-    const eventBus = { emit: jest.fn() }
-    const { db } = makeAllocationDb()
-    const req = {
-      params: { id: "order_123" },
-      headers: { "idempotency-key": "refund-key-123" },
-      body: { amount: 12.5 },
-      scope: {
-        resolve: (key: string) => {
-          if (key === Modules.ORDER) return orderModule
-          if (key === Modules.EVENT_BUS) return eventBus
-          if (key === ContainerRegistrationKeys.PG_CONNECTION) return db
-          throw new Error(`Unknown dependency ${key}`)
-        },
-      },
-    } as any
-    const res = makeRes()
-
-    await POST(req, res)
-
-    expect(stripeFetch).not.toHaveBeenCalled()
-    expect(orderModule.listOrderTransactions).not.toHaveBeenCalled()
-    expect(orderModule.addOrderTransactions).not.toHaveBeenCalled()
-    expect(orderModule.updateOrders).not.toHaveBeenCalled()
-    expect(eventBus.emit).not.toHaveBeenCalled()
-    expect(res.status).toHaveBeenCalledWith(200)
-    expect(res.json).toHaveBeenCalledWith({
-      already_refunded: true,
-      payment: expect.objectContaining({
-        refunded_amount: 22.5,
-        refunds: [expect.objectContaining({ id: "re_final_123", amount: 12.5 })],
-      }),
-    })
-  })
-
-  it("does not silently replay equal-amount refunds when no idempotency header is provided", async () => {
-    process.env.STRIPE_API_KEY = "sk_test_123"
-    const stripeFetch = jest.fn(async (_url: string, init: any) => {
-      expect(init.headers["Idempotency-Key"]).toMatch(
-        /^final-charge-refund:order_123:pi_final_123:12\.5:[0-9a-f-]{36}$/
-      )
-      expect(init.headers["Idempotency-Key"]).not.toBe(
-        "final-charge-refund:order_123:pi_final_123:12.5"
-      )
-
-      return {
-        ok: true,
-        json: async () => ({ id: "re_final_new", status: "succeeded" }),
-      } as any
-    })
-    global.fetch = stripeFetch as any
-
-    const orderModule = {
-      retrieveOrder: jest.fn(async () => ({
-        id: "order_123",
-        currency_code: "usd",
-        total: 100,
-        metadata: {
-          final_charge_status: "succeeded",
-          stripe_payment_intent_id: "pi_final_123",
-          final_total: 100,
-          final_charge_refunded_amount: 12.5,
-          final_charge_refunds: [
-            {
-              id: "re_final_old",
-              amount: 12.5,
-              amount_minor: 1250,
-              idempotency_key:
-                "final-charge-refund:order_123:pi_final_123:12.5",
-              qbd_posting_request_key: "refund:re_final_old",
-              created_at: "2026-06-12T15:00:00.000Z",
-            },
-          ],
-          staff_audit_log: "[]",
-        },
-      })),
-      listOrderTransactions: jest.fn(async () => []),
-      addOrderTransactions: jest.fn(async () => undefined),
-      updateOrders: jest.fn(async () => undefined),
-    }
-    const eventBus = { emit: jest.fn(async () => undefined) }
-    const { db } = makeAllocationDb()
-    const req = {
-      params: { id: "order_123" },
-      body: { amount: 12.5, note: "Second equal amount refund" },
-      scope: {
-        resolve: (key: string) => {
-          if (key === Modules.ORDER) return orderModule
-          if (key === Modules.EVENT_BUS) return eventBus
-          if (key === ContainerRegistrationKeys.PG_CONNECTION) return db
-          throw new Error(`Unknown dependency ${key}`)
-        },
-      },
-    } as any
-    const res = makeRes()
-
-    await POST(req, res)
-
-    expect(stripeFetch).toHaveBeenCalled()
-    expect(orderModule.addOrderTransactions).toHaveBeenCalledWith(
-      expect.objectContaining({
-        reference: "refund",
-        reference_id: "re_final_new",
-      })
-    )
-    expect(orderModule.updateOrders).toHaveBeenCalledWith("order_123", {
-      metadata: expect.objectContaining({
-        final_charge_refunded_amount: 25,
-        stripe_refund_id: "re_final_new",
-        qbd_posting_request_key: "refund:re_final_new",
-        final_charge_refunds: [
-          expect.objectContaining({ id: "re_final_old" }),
-          expect.objectContaining({
-            id: "re_final_new",
-            idempotency_key: expect.stringMatching(
-              /^final-charge-refund:order_123:pi_final_123:12\.5:[0-9a-f-]{36}$/
-            ),
-          }),
-        ],
-      }),
-    })
-    expect(res.status).toHaveBeenCalledWith(200)
-    expect(res.json).toHaveBeenCalledWith({
-      payment: expect.objectContaining({
-        refunded_amount: 25,
-        refunds: [expect.objectContaining({ id: "re_final_new", amount: 12.5 })],
-      }),
-    })
-  })
-
-  it("blocks final-charge refunds while another QBD posting is pending", async () => {
-    process.env.STRIPE_API_KEY = "sk_test_123"
-    const stripeFetch = jest.fn()
-    global.fetch = stripeFetch as any
-
-    const orderModule = {
-      retrieveOrder: jest.fn(async () => ({
-        id: "order_123",
-        currency_code: "usd",
-        total: 100,
-        metadata: {
-          final_charge_status: "succeeded",
-          stripe_payment_intent_id: "pi_final_123",
-          final_total: 100,
-          qbd_posting_status: "pending_manual",
-          qbd_posting_action: "final_card_charge_accounting_record",
-          qbd_posting_request_key: "final_charge:pi_final_123",
-        },
-      })),
-    }
-    const eventBus = { emit: jest.fn() }
-    const { db } = makeAllocationDb()
-    const req = {
-      params: { id: "order_123" },
-      headers: { "idempotency-key": "refund-key-456" },
-      body: { amount: 10 },
-      scope: {
-        resolve: (key: string) => {
-          if (key === Modules.ORDER) return orderModule
-          if (key === Modules.EVENT_BUS) return eventBus
-          if (key === ContainerRegistrationKeys.PG_CONNECTION) return db
-          throw new Error(`Unknown dependency ${key}`)
-        },
-      },
-    } as any
-    const res = makeRes()
-
-    await POST(req, res)
-
-    expect(stripeFetch).not.toHaveBeenCalled()
-    expect(res.status).toHaveBeenCalledWith(409)
-    expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({
-        qbd_posting_request_key: "final_charge:pi_final_123",
-      })
-    )
-  })
-
-  it("rejects sub-cent refund amounts before calling Stripe", async () => {
-    process.env.STRIPE_API_KEY = "sk_test_123"
-    ;(emitOpsAlert as jest.Mock).mockClear()
-    const stripeFetch = jest.fn()
-    global.fetch = stripeFetch as any
-
-    const orderModule = {
-      retrieveOrder: jest.fn(async () => ({
-        id: "order_123",
-        currency_code: "usd",
-        total: 100,
-        metadata: {
-          final_charge_status: "succeeded",
-          stripe_payment_intent_id: "pi_final_123",
-          final_total: 100,
-        },
-      })),
-    }
-    const eventBus = { emit: jest.fn() }
-    const { db } = makeAllocationDb()
-    const req = {
-      params: { id: "order_123" },
-      body: { amount: 12.345 },
-      scope: {
-        resolve: (key: string) => {
-          if (key === Modules.ORDER) return orderModule
-          if (key === Modules.EVENT_BUS) return eventBus
-          if (key === ContainerRegistrationKeys.PG_CONNECTION) return db
-          throw new Error(`Unknown dependency ${key}`)
-        },
-      },
-    } as any
-    const res = makeRes()
-
-    await POST(req, res)
-
-    expect(stripeFetch).not.toHaveBeenCalled()
-    expect(res.status).toHaveBeenCalledWith(422)
-    expect(res.json).toHaveBeenCalledWith({
-      message: "Refund amount cannot include more than 2 decimal places for USD.",
-    })
-    expect(emitOpsAlert).not.toHaveBeenCalled()
-  })
-
-  it("pages when Stripe rejects a final-charge refund before money moves", async () => {
-    process.env.STRIPE_API_KEY = "sk_test_123"
-    ;(emitOpsAlert as jest.Mock).mockClear()
-    const stripeFetch = jest.fn(async () => ({
-      ok: false,
-      json: async () => ({
-        error: {
-          message: "Stripe rejected pi_final_123 for avi@example.com",
-        },
-      }),
-    })) as any
-    global.fetch = stripeFetch
-
-    const orderModule = {
-      retrieveOrder: jest.fn(async () => ({
-        id: "order_123",
-        currency_code: "usd",
-        total: 100,
-        metadata: {
-          final_charge_status: "succeeded",
-          stripe_payment_intent_id: "pi_final_123",
-          final_total: 100,
-          final_charge_refunded_amount: 0,
-          staff_audit_log: "[]",
-        },
-      })),
-      listOrderTransactions: jest.fn(),
-      addOrderTransactions: jest.fn(),
-      updateOrders: jest.fn(),
-    }
-    const eventBus = { emit: jest.fn() }
-    const logger = { warn: jest.fn(), error: jest.fn() }
-    const { db } = makeAllocationDb()
-    const req = {
-      params: { id: "order_123" },
-      headers: { "idempotency-key": "refund-key-stripe-fail" },
-      body: { amount: 25 },
-      scope: {
-        resolve: (key: string) => {
-          if (key === Modules.ORDER) return orderModule
-          if (key === Modules.EVENT_BUS) return eventBus
-          if (key === ContainerRegistrationKeys.PG_CONNECTION) return db
-          if (key === ContainerRegistrationKeys.LOGGER) return logger
-          throw new Error(`Unknown dependency ${key}`)
-        },
-      },
-      auth_context: { actor_id: "user_123" },
-    } as any
-    const res = makeRes()
-
-    await POST(req, res)
-
-    expect(stripeFetch).toHaveBeenCalled()
-    expect(orderModule.listOrderTransactions).not.toHaveBeenCalled()
-    expect(orderModule.updateOrders).not.toHaveBeenCalled()
-    expect(res.status).toHaveBeenCalledWith(402)
-    expect(emitOpsAlert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        alertKind: "final_charge_refund_route_failed",
-        severity: "page",
-        title: "Final-charge refund failed during refund_stripe",
-        path: "src/api/admin/grillers/orders/[id]/finalization/refund-final-charge/route.ts",
-        logger,
-        meta: expect.objectContaining({
-          order_id: "order_123",
-          stage: "refund_stripe",
-          stripe_payment_intent_id: "pi_final_123",
-          actor_id: "user_123",
-          refund_completed: false,
-          error_message: "Stripe rejected [redacted-id] for [redacted-email]",
-        }),
-      })
-    )
-  })
-
-  it("pages refund_recorded_mismatch when Stripe refunded but Medusa recording throws", async () => {
-    process.env.STRIPE_API_KEY = "sk_test_123"
-    ;(emitOpsAlert as jest.Mock).mockClear()
-    const stripeFetch = jest.fn(async () => ({
-      ok: true,
-      json: async () => ({ id: "re_final_999", status: "succeeded" }),
-    })) as any
-    global.fetch = stripeFetch
-
-    const orderModule = {
-      retrieveOrder: jest.fn(async () => ({
-        id: "order_123",
-        currency_code: "usd",
-        total: 100,
-        metadata: {
-          final_charge_status: "succeeded",
-          stripe_payment_intent_id: "pi_final_123",
-          final_total: 100,
-          final_charge_refunded_amount: 0,
-          staff_audit_log: "[]",
-        },
-      })),
-      listOrderTransactions: jest.fn(async () => []),
-      addOrderTransactions: jest.fn(async () => undefined),
-      // Money already left Stripe; the ledger write throws here.
-      updateOrders: jest.fn(async () => {
-        throw new Error("db write failed")
-      }),
-    }
-    const eventBus = { emit: jest.fn(async () => undefined) }
-    const { db } = makeAllocationDb()
-    const req = {
-      params: { id: "order_123" },
-      headers: { "idempotency-key": "refund-key-999" },
-      body: { amount: 25 },
-      scope: {
-        resolve: (key: string) => {
-          if (key === Modules.ORDER) return orderModule
-          if (key === Modules.EVENT_BUS) return eventBus
-          if (key === ContainerRegistrationKeys.PG_CONNECTION) return db
-          throw new Error(`Unknown dependency ${key}`)
-        },
-      },
-      auth_context: { actor_id: "user_123" },
-    } as any
-    const res = makeRes()
-
-    await POST(req, res)
-
-    // Stripe was hit (money moved) and the ledger write failed.
-    expect(stripeFetch).toHaveBeenCalled()
-    expect(emitOpsAlert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        alertKind: "refund_recorded_mismatch",
-        severity: "page",
-        path: "src/api/admin/grillers/orders/[id]/finalization/refund-final-charge/route.ts",
-        meta: expect.objectContaining({
-          stripe_refund_id: "re_final_999",
-          order_id: "order_123",
-        }),
-      })
-    )
-    // Response surfaces the mismatch with the Stripe refund id, unchanged.
-    expect(res.status).toHaveBeenCalledWith(500)
-    expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({ stripe_refund_id: "re_final_999" })
-    )
-  })
+it("does not release another order's allocation or refund an order without a successful final charge", async () => {
+  const f = fixture()
+  f.req.body.allocation_releases = [{ order_id: "another_order", line_item_id: "line_test", quantity: 1 }]
+  await POST(f.req, f.res)
+  expect(global.fetch).not.toHaveBeenCalled()
+  expect(f.res.status).toHaveBeenCalledWith(422)
+  f.req.body.allocation_releases = []
+  f.order.metadata.final_charge_status = "failed"
+  await POST(f.req, f.res)
+  expect(f.res.status).toHaveBeenCalledWith(409)
+  expect(global.fetch).not.toHaveBeenCalled()
 })
