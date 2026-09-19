@@ -47,13 +47,15 @@ function harness(route: (typeof routes)[number], rows: unknown[] = [paidOrder]) 
   // This is the side-effect boundary: the registered chain must never reach
   // the fulfillment/shipment handler for a blocked request.
   const createFulfillmentOrShipment = jest.fn()
-  const registered = middlewares.routes.find((entry) => entry.matcher === route.matcher)
+  const registered = middlewares.routes?.find((entry) => entry.matcher === route.matcher)
+  const handlers = registered?.middlewares
   expect(registered).toBeDefined()
+  if (!handlers) throw new Error(`Missing fulfillment middleware for ${route.matcher}`)
   expect(registered!.methods).toContain("POST")
-  expect(registered!.middlewares[0]).toBe(blockFulfillmentBeforeFinalCharge)
+  expect(handlers[0]).toBe(blockFulfillmentBeforeFinalCharge)
 
   const run = async () => {
-    const chain = [...registered!.middlewares, createFulfillmentOrShipment]
+    const chain = [...handlers, createFulfillmentOrShipment]
     const dispatch = async (index: number): Promise<void> => {
       if (index >= chain.length) return
       await (chain[index] as any)(req, res, () => dispatch(index + 1))
