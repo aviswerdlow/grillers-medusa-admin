@@ -97,8 +97,8 @@ export async function verifyNativeStripeWebhookSignature(
   return next()
 }
 
-// Fail-open guards stay fail-open: they emit an ops alert AND continue. The
-// consumer's dedup window absorbs hot-path volume, so no extra throttling here.
+// Each guard decides whether to block; alert delivery never grants permission.
+// The consumer's dedup window absorbs hot-path volume.
 // NEVER include PII — only the guard's alertKind + the error message (sliced).
 function emitGuardFailureAlert(input: {
   logger: Pick<import("@medusajs/framework/types").Logger, "warn" | "error">
@@ -171,7 +171,7 @@ async function blockInternalRawMaterialLineItems(
   return next()
 }
 
-async function blockFulfillmentBeforeFinalCharge(
+export async function blockFulfillmentBeforeFinalCharge(
   req: MedusaRequest,
   res: MedusaResponse,
   next: MedusaNextFunction
@@ -181,8 +181,12 @@ async function blockFulfillmentBeforeFinalCharge(
     (req.body as Record<string, any> | undefined)?.order_id ||
     (req.body as Record<string, any> | undefined)?.order?.id
 
-  if (!orderId || typeof orderId !== "string") {
-    return next()
+  if (typeof orderId !== "string" || !orderId.trim()) {
+    res.status(400).json({
+      type: "invalid_request",
+      message: "An order ID is required to verify payment before fulfillment.",
+    })
+    return
   }
 
   try {
@@ -193,8 +197,25 @@ async function blockFulfillmentBeforeFinalCharge(
       filters: { id: orderId },
     })
     const order = data?.[0]
+    const metadata =
+      typeof order?.metadata === "string"
+        ? JSON.parse(order.metadata)
+        : order?.metadata
 
-    if (order && orderRequiresFinalCharge(order) && !finalChargeSucceeded(order)) {
+    // An absent, mismatched or incomplete row is not proof of a paid order.
+    // A known null metadata value is valid for older non-catch-weight orders.
+    if (
+      !order ||
+      order.id !== orderId ||
+      metadata === undefined ||
+      (metadata !== null &&
+        (typeof metadata !== "object" || Array.isArray(metadata)))
+    ) {
+      throw new Error("Order payment state could not be established")
+    }
+
+    const verifiedOrder = { ...order, metadata }
+    if (orderRequiresFinalCharge(verifiedOrder) && !finalChargeSucceeded(verifiedOrder)) {
       res.status(409).json({
         type: "payment_required",
         message:
@@ -203,25 +224,31 @@ async function blockFulfillmentBeforeFinalCharge(
       return
     }
   } catch (error) {
+    res.status(503).json({
+      type: "payment_verification_unavailable",
+      message:
+        "Payment status could not be verified. Hold the order and retry fulfillment. If this continues, contact a manager; do not charge the card again to clear this error.",
+      retryable: true,
+    })
     const logger = req.scope.resolve(ContainerRegistrationKeys.LOGGER)
     const message = error instanceof Error ? error.message : String(error)
     logger.warn(`[catch-weight-finalization] fulfillment gate lookup failed: ${message}`)
-    // Page: a fulfillment gate that fails open could let a catch-weight order
-    // slip through BEFORE the final pre-shipment charge — direct money risk.
+    // Page for operator recovery; fulfillment remains blocked even if alert
+    // delivery is unavailable. Never create an automatic bypass here.
     emitGuardFailureAlert({
       logger,
       alertKind: "mw_fulfillment_gate_failed",
       severity: "page",
-      title: "middleware: fulfillment gate lookup failed (failed open)",
+      title: "middleware: fulfillment gate lookup failed (fulfillment blocked)",
       error,
     })
+    return
   }
 
   return next()
 }
 
-// Advisory approval-hold gate. Mirrors blockFulfillmentBeforeFinalCharge's
-// structure exactly. Blocks a fulfillment-creating request ONLY when the order
+// Advisory approval-hold gate. Blocks a fulfillment-creating request only when the order
 // carries an active Slack review hold — i.e. `metadata.fulfillment_hold.held`
 // is strictly the boolean `true`. A Slack "Hold" click sets that field; a
 // "Release" click flips it to false. EVERY normal order has no fulfillment_hold
@@ -229,8 +256,8 @@ async function blockFulfillmentBeforeFinalCharge(
 // blocked here.
 //
 // IMPORTANT contrast with the final-charge gate: that gate PAGES on a lookup
-// failure because failing open there is a money risk (a catch-weight order could
-// ship before its final card charge). This gate is ADVISORY — failing open just
+// failure and blocks fulfillment because unverifiable payment is a money risk.
+// This gate is ADVISORY — failing open just
 // means a held order could ship, which is exactly the pre-existing behavior
 // (holds didn't exist before). Failing CLOSED here would risk blocking ALL
 // fulfillment on a transient query error = a self-inflicted outage. So this gate
@@ -752,7 +779,7 @@ export default defineMiddlewares({
     },
     // Both fulfillment gates run on every fulfillment-creating route, in order:
     // (1) the final-charge money gate, then (2) the advisory Slack-hold gate.
-    // They are independent — either can short-circuit with a 409 and the other
+    // They are independent — either can short-circuit with an error and the other
     // never runs after a sent response.
     {
       matcher: "/admin/orders/:id/fulfillments",
