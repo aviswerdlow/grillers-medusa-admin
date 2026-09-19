@@ -1,3 +1,4 @@
+import { verifiedStaffAuditFields } from "../../../../../../lib/staff-principal"
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { assertQbdPostingReady, listQbdPostings, persistQbdPosting, QbdPostingConflict, qbdMetadata, retryQbdPosting } from "../../../../../../lib/qbd-posting-outbox"
@@ -19,11 +20,15 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     const body = (req.body || {}) as Record<string, any>
     const patch = qbdMetadata(body.patch)
     const entry = qbdMetadata(body.entry)
+    if (Object.keys(patch).some(key => /^(payment_workflow$|final_charge_|finalization_|fulfillment_gate_|catch_weight_|stripe_payment_intent|stripe_setup_intent|staff_audit_log$|staff_actor_)/.test(key))) {
+      return res.status(403).json({ message: "Accounting handoffs cannot change payment, release or audit authority. Use the dedicated action." })
+    }
     if (!entry.action || !req.params.id || req.params.id.startsWith("lgord_")) {
       return res.status(422).json({ message: "An active order and staff action are required." })
     }
-    entry.staff_actor_id = (req as any).auth_context?.actor_id || null
-    if (["refund_payment", "capture_payment", "cancel_order", "edit_order_items"].includes(entry.action) && entry.status === "requested") {
+    Object.assign(entry, verifiedStaffAuditFields(req))
+    const preliminaryAction = ["refund_payment", "capture_payment", "cancel_order", "edit_order_items"].includes(entry.action) && entry.status === "requested"
+    if (preliminaryAction) {
       await assertQbdPostingReady(db, req.params.id)
     }
     const order = await loadQbdOrder(req.scope.resolve(ContainerRegistrationKeys.QUERY), req.params.id)
@@ -42,6 +47,11 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       for (const key of Object.keys(patch)) {
         if (key.startsWith("qbd_posting_") || ["qbd_write_job_id", "qbd_txn_id", "qbd_error"].includes(key)) delete patch[key]
       }
+    }
+    if (preliminaryAction) {
+      // Claim the managed path before a native action emits order.updated.
+      // No accounting obligation exists yet; prevent a competing legacy job.
+      patch.qbd_posting_outbox_version = 1
     }
     const buildMetadata = (current: Record<string, any>) => appendQbdStaffAudit(current, patch, entry)
     const metadata = enqueue
