@@ -6,6 +6,7 @@ import { Modules } from "@medusajs/framework/utils"
 import { isBootstrapStaffIdentity, isStaffGrantMetadataKey, staffAccessStatus, staffRole, staffSessionIsCurrent } from "../../lib/staff-access-policy"
 import { currentStaffCustomer, requestStaffPrincipal, resolveStaffPrincipal, StaffAccessDenied, verifiedStaffAuditFields } from "../../lib/staff-principal"
 import { adminRouteCapability, isServiceRoute } from "../../lib/staff-route-capabilities"
+import { ORDER_PROMISE_READ_PATH } from "../../lib/order-promise-reader"
 
 export async function enforceStaffCapabilities(req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) {
   // Checkout enforcement is independent of the staff observation switch.
@@ -17,7 +18,9 @@ export async function enforceStaffCapabilities(req: MedusaRequest, res: MedusaRe
 
     const capability = adminRouteCapability(req.path, req.method, req.body)
     const allowed = principal.kind === "operator"
-      || (principal.kind === "service" ? isServiceRoute(principal.service_role, req.path, req.method, (req as any).validatedBody || req.body) : capability && principal.capabilities.has(capability))
+      || (principal.kind === "service" ? principal.service_scope === "parity"
+        ? req.method === "GET" && req.path.replace(/\/+$/, "") === ORDER_PROMISE_READ_PATH
+        : isServiceRoute(principal.service_role, req.path, req.method, (req as any).validatedBody || req.body) : capability && principal.capabilities.has(capability))
     if (!allowed) throw new StaffAccessDenied("Your current staff permissions do not allow this action.")
     ;(req as any).gp_staff_principal = principal
     // Native order/payment workflows copy auth_context.actor_id into canceled_by,

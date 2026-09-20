@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readOrderPromisePage } from "../../src/lib/order-promise-reader";
 import { Migration20260920174500 } from "../../src/modules/gp-catch-weight/migrations/Migration20260920174500";
 import {
   acceptOrderPromiseReview,
@@ -124,6 +125,51 @@ async function nativeOrder(snapshotId: string) {
     cart_id: "cart_promise",
   });
 }
+
+const originalWindow = { start: "2026-09-01T00:00:00.000Z", end: "2026-10-01T00:00:00.000Z" };
+const readNow = new Date("2026-10-02T00:00:00Z");
+it("exports only the immutable original while retaining unknown attribution and true zero", async () => {
+  const value = await accepted({ ...promiseFixture(), placement_total: 0 });
+  await nativeOrder(value.snapshot.id);
+  await bindOrderPromise(db, "cart_promise", completedPromiseCart());
+  await db("order").update({ total: 999, metadata: { final_total: 999, email: "new@example.invalid" } });
+  const result = await readOrderPromisePage(db, originalWindow, readNow);
+  expect(result.count).toBe(1);
+  expect(result.orders[0]).toMatchObject({ order_id: "order_promise", placement_total: 0, amount_basis: "accepted_placement_estimate_v1", amount_unit: "major" });
+  expect(result.orders[0].analytics_consent).toEqual(value.promise.attribution.analytics_consent);
+  expect(result.orders[0].test_order).toEqual(value.promise.attribution.test_order);
+  expect(JSON.stringify(result)).not.toMatch(/example.invalid|qbd_list_id|shipping_address|receipt_snapshot_id|payment_consent_text/);
+});
+it("does not turn an unbound native order into a valid empty or inferred-total window", async () => {
+  const value = await accepted(); await nativeOrder(value.snapshot.id);
+  await expect(readOrderPromisePage(db, originalWindow, readNow)).rejects.toMatchObject({ code: "order_promise_original_unavailable" });
+});
+it.each(["deleted", "removed", "retimed"])("retains the original window and fails when native evidence is %s", async change => {
+  const value = await accepted(); await nativeOrder(value.snapshot.id);
+  await bindOrderPromise(db, "cart_promise", completedPromiseCart());
+  if (change === "deleted") await db("order").update({ deleted_at: promiseNow });
+  if (change === "removed") await db("order").delete();
+  if (change === "retimed") await db("order").update({ created_at: new Date("2026-11-01") });
+  await expect(readOrderPromisePage(db, originalWindow, readNow)).rejects.toMatchObject({ status: 503 });
+});
+it("rejects a changed same-count scan and never silently skips an unavailable later page", async () => {
+  const value = await accepted(); await nativeOrder(value.snapshot.id);
+  await bindOrderPromise(db, "cart_promise", completedPromiseCart());
+  await db("order").insert({ id: "order_zlate", customer_id: "cus_late", total: 20, created_at: promiseNow });
+  const first = await readOrderPromisePage(db, { ...originalWindow, limit: 1 }, readNow);
+  expect(first.count).toBe(2);
+  await expect(readOrderPromisePage(db, { ...originalWindow, limit: 1, offset: 1, revision: first.revision }, readNow))
+    .rejects.toMatchObject({ code: "order_promise_original_unavailable" });
+  await db("order").where({ id: "order_zlate" }).update({ customer_id: "cus_changed" });
+  await expect(readOrderPromisePage(db, { ...originalWindow, limit: 1, offset: 1, revision: first.revision }, readNow))
+    .rejects.toMatchObject({ code: "original_read_window_changed", status: 409 });
+});
+it("returns a verified empty window with a stable revision", async () => {
+  const result = await readOrderPromisePage(db, originalWindow, readNow);
+  expect(result).toMatchObject({ contract_version: 1, orders: [], count: 0, offset: 0, limit: 100 });
+  expect(result.revision).toMatch(/^[a-f0-9]{64}$/);
+  expect(await readOrderPromisePage(db, originalWindow, readNow)).toEqual(result);
+});
 
 it("replays a review without extending its expiry and rejects changed reuse", async () => {
   const requestId = randomUUID(),
