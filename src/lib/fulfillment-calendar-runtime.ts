@@ -415,6 +415,11 @@ export async function validateCalendarAcceptance(scope: any, loadedCart: any) {
     calendarHash({ ...accepted, acceptedAt: null }) !==
       calendarHash({ ...c.selection, acceptedAt: null }) ||
     loadedCart.metadata?.qbdDueDate !== c.selection.choice.dispatchDate ||
+    loadedCart.metadata?.fulfillmentDispatchDate !==
+      c.selection.choice.dispatchDate ||
+    loadedCart.metadata?.fulfillmentWindowLabel !==
+      (c.selection.choice.window?.label ?? "") ||
+    loadedCart.metadata?.fulfillmentCalendarTimezone !== "America/New_York" ||
     loadedCart.metadata?.fulfillmentPickDate !== c.selection.choice.pickDate
   )
     throw new FulfillmentCalendarError("calendar_acceptance_changed");

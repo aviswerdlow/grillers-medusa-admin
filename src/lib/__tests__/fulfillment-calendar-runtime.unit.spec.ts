@@ -386,3 +386,17 @@ test("rate preview is server-derived and never makes an unsigned cart acceptable
     currentCalendarSelection(h.scope, h.cart.id, env, () => now),
   ).rejects.toMatchObject({ code: "calendar_selection_required" });
 });
+
+
+test.each([
+  ["fulfillmentDispatchDate", "2026-10-09"],
+  ["fulfillmentWindowLabel", "Invented window"],
+  ["fulfillmentCalendarTimezone", "Pacific/Honolulu"],
+])("native completion rejects a changed %s projection", async (field, value) => {
+  const h = harness();
+  await select(h);
+  await prepareCalendarAcceptance(h.scope, h.cart.id);
+  const loaded = clone(h.cart);
+  loaded.metadata[field] = value;
+  await expect(validateCalendarAcceptance(h.scope, loaded)).rejects.toMatchObject({ code: "calendar_acceptance_changed" });
+});

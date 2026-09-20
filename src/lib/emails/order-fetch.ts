@@ -1,3 +1,4 @@
+import { fulfillmentDates, formatFulfillmentDate } from "../fulfillment-dates";
 import { STRAPI_MODULE } from "../../modules/strapi"
 import StrapiModuleService from "../../modules/strapi/service"
 import { STOREFRONT_URL } from "./layout"
@@ -960,15 +961,20 @@ export const getPaymentLabel = (order: OrderForEmail): string => {
 export const getFulfillmentInfo = (order: OrderForEmail) => {
   const meta = (order.metadata || {}) as Record<string, any>
   const fulfillmentType = meta.fulfillmentType as string | undefined
-  const isPickup = fulfillmentType === "plant_pickup"
-  const isLocalDelivery = fulfillmentType === "local_delivery"
-  const scheduledDate = meta.scheduledDate as string | undefined
-  const requestedDeliveryDate = meta.requestedDeliveryDate as string | undefined
+  const isPickup = fulfillmentType === "plant_pickup" || fulfillmentType === "southeast_pickup"
+  const isLocalDelivery = fulfillmentType === "local_delivery" || fulfillmentType === "atlanta_delivery"
+  const dates = fulfillmentDates(meta)
+  const scheduledDate = formatFulfillmentDate(dates.arrivalDate)
+  const requestedDeliveryDate = scheduledDate
+  const windowLabel = typeof meta.fulfillmentWindowLabel === "string"
+    ? meta.fulfillmentWindowLabel.trim() : ""
+  const scheduledWindow = windowLabel
+    ? `${windowLabel}${meta.fulfillmentCalendarTimezone === "America/New_York" ? " ET" : ""}` : ""
   const fulfillmentZip = meta.fulfillmentZip as string | undefined
 
   const shippingMethodName =
     order.shipping_methods?.[0]?.name ||
-    (isPickup ? "Plant Pickup" : isLocalDelivery ? "Local Delivery" : "Shipping")
+    (fulfillmentType === "southeast_pickup" ? "Regional Pickup" : isPickup ? "Plant Pickup" : isLocalDelivery ? "Local Delivery" : "Shipping")
 
   return {
     fulfillmentType,
@@ -976,6 +982,7 @@ export const getFulfillmentInfo = (order: OrderForEmail) => {
     isLocalDelivery,
     scheduledDate,
     requestedDeliveryDate,
+    scheduledWindow,
     fulfillmentZip,
     shippingMethodName,
   }

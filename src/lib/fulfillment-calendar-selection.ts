@@ -215,7 +215,10 @@ export function calendarSelectionMetadata(
     scheduledTimeWindow: c.window?.id ?? "",
     pickupLocationId: selection.request.routeId ?? "",
     qbdDueDate: c.dispatchDate,
+    fulfillmentDispatchDate: c.dispatchDate,
     fulfillmentPickDate: c.pickDate,
+    fulfillmentWindowLabel: c.window?.label ?? "",
+    fulfillmentCalendarTimezone: "America/New_York",
     fulfillmentCalendarQuoteId: selection.quoteId,
   };
 }

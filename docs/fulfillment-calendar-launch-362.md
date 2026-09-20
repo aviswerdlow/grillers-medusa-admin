@@ -4,8 +4,8 @@ Tracking: https://github.com/aviswerdlow/grillers-pride-strategy/issues/362
 
 This is an **in-progress, coordinated release candidate**. Do not deploy it by
 itself. Source tests are not an approved operating calendar, a native Medusa
-database rehearsal, or a carrier/production receipt. Staff phone entry and
-post-order shipping overrides still need integration. Original acceptance and
+database rehearsal, or a carrier/production receipt. Staff phone-entry source is implemented;
+post-order shipping overrides and the combined native rehearsal remain open. Original acceptance and
 dependencies remain open.
 
 ## Contract and ownership
@@ -110,18 +110,40 @@ approve a route in another time zone without an explicit correct customer promis
 - Staff post-order changes: preserve original accepted promise, validate a proposed
   replacement against the current operating source and record the exception/approval
   history. #368 owns durable operating exceptions and downstream projections.
-- Date fields now use ISO `YYYY-MM-DD`: `requestedDeliveryDate` and `scheduledDate`
-  are customer arrival/pickup; `fulfillmentPickDate` is internal preparation;
-  `qbdDueDate` is dispatch. Audit every downstream parser/display rather than
-  treating a browser-local `Date` conversion as an Eastern civil date. #364 inventory,
-  #368 snapshots, #369 shipping learning and the QBD bridge need this handoff.
+- Date fields use ISO `YYYY-MM-DD`: `requestedDeliveryDate` and `scheduledDate`
+  are customer arrival/pickup; `fulfillmentPickDate` is preparation;
+  `fulfillmentDispatchDate` and compatibility `qbdDueDate` are dispatch.
+  `fulfillmentWindowLabel` / `fulfillmentCalendarTimezone` preserve the approved
+  window for customer views and email instead of reinterpreting a window id.
+  The native hook compares those projections with the signed accepted choice.
+- The finalization queue filters by dispatch, returns `dispatch_date`, `pick_date`
+  and `arrival_date` separately, and keeps older UPS/regional orders lacking
+  dispatch visible in an unfiltered queue. Never relabel their arrival as ship day.
+  Legacy plant/Atlanta same-day dates remain usable. #364 still owns stock needed
+  by preparation; the inventory allocation's requested customer date is unchanged.
+- Confirmation/cart/checkout display civil dates without a browser-timezone shift.
+  U.S. legacy date-only strings remain supported; invalid dates require review.
+  Confirmation email renders arrival/window, recognizes regional pickup and Atlanta
+  delivery, and promises tracking only for shipped orders. #367 still owns payment
+  wording, lifecycle milestones, durable send/delivery evidence and exceptions.
+- The companion QBD bridge candidate on PR 7 gives Sales Orders the explicit dispatch
+  field. A/R invoices must ignore checkout `qbdDueDate`. Calendar orders ignore stale
+  generic due-date aliases and inherit QBD terms unless `qbd_invoice_due_date` is
+  explicitly supplied. #370 owns the trusted source/authority for that optional
+  collection deadline; its presence is not proof of approval. Legacy pre-calendar
+  snake-case A/R aliases remain compatible. Card invoices stay due on transaction day.
+  No existing order, QBD document or live account was rewritten.
+- #368 amendments must update projections only after current-calendar, inventory,
+  repricing and customer-approval consequences pass atomically/durably. The existing
+  free-form `shipping_override` mutation is not that workflow; do not release it as
+  a safe amendment or overwrite the original accepted calendar snapshot.
 - #361 weights and trusted packing snapshot stay required. The forecast's commercial
   price remains separate from carrier transit and calendar eligibility; #331 owns
   price policy and #363 owns seasonal ice/packing calibration.
 
 ## Smallest remaining acceptance set
 
-1. Complete staff post-order amendments and the ISO consumer audit. Staff entry
+1. Complete #331 pricing and #364 inventory interfaces, then #368 post-order amendments and the remaining allocation/report consumers. Staff entry
    source fixtures now cover authority, changed/expired dates and pre-charge refusal;
    real native workflow and provider acceptance remain required.
 2. Review paired CMS/backend/frontend exact-head CI. Do not rerun an equivalent full

@@ -58,6 +58,9 @@ test("a server-signed choice carries the same promise into packing and accepted-
   expect(accepted).toMatchObject({
     requestedDeliveryDate: "2026-10-06",
     qbdDueDate: "2026-10-05",
+    fulfillmentDispatchDate: "2026-10-05",
+    fulfillmentCalendarTimezone: "America/New_York",
+    fulfillmentWindowLabel: "",
     fulfillmentPickDate: "2026-10-05",
   });
 });
