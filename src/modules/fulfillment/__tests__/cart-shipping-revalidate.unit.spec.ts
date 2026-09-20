@@ -28,6 +28,8 @@ function makeContainer({
       resolve: (key: string) => {
         if (key === "logger") return logger
         if (key === "query") return query
+        if (key === Modules.LOCKING)
+          return { execute: async (_key: string, job: any) => job() }
         if (key === Modules.CART) return cartModule
         throw new Error(`unexpected resolve(${key})`)
       },
@@ -62,9 +64,17 @@ describe("cart-shipping-revalidate subscriber", () => {
     const { container, cartModule } = makeContainer({
       cart: {
         id: "cart_1",
-        shipping_address: { postal_code: "38120", city: "Memphis", province: "TN" },
+        shipping_address: {
+          postal_code: "38120",
+          city: "Memphis",
+          province: "TN",
+        },
         shipping_methods: [
-          { id: "sm_atl", name: "Metro Atlanta Delivery", data: { service_code: "ATLANTA_DELIVERY" } },
+          {
+            id: "sm_atl",
+            name: "Metro Atlanta Delivery",
+            data: { service_code: "ATLANTA_DELIVERY" },
+          },
         ],
       },
       deleteShippingMethods,
@@ -79,16 +89,26 @@ describe("cart-shipping-revalidate subscriber", () => {
   it("keeps a valid ATLANTA_DELIVERY method when the ZIP is in area", async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ data: [{ id: 1, ZipCode: "30340", IsActive: true }] }),
+      json: async () => ({
+        data: [{ id: 1, ZipCode: "30340", IsActive: true }],
+      }),
     } as any)
 
     const deleteShippingMethods = jest.fn().mockResolvedValue(undefined)
     const { container, cartModule } = makeContainer({
       cart: {
         id: "cart_1",
-        shipping_address: { postal_code: "30340", city: "Doraville", province: "GA" },
+        shipping_address: {
+          postal_code: "30340",
+          city: "Doraville",
+          province: "GA",
+        },
         shipping_methods: [
-          { id: "sm_atl", name: "Metro Atlanta Delivery", data: { service_code: "ATLANTA_DELIVERY" } },
+          {
+            id: "sm_atl",
+            name: "Metro Atlanta Delivery",
+            data: { service_code: "ATLANTA_DELIVERY" },
+          },
         ],
       },
       deleteShippingMethods,
@@ -105,9 +125,17 @@ describe("cart-shipping-revalidate subscriber", () => {
     const { container, cartModule } = makeContainer({
       cart: {
         id: "cart_1",
-        shipping_address: { postal_code: "38120", city: "Memphis", province: "TN" },
+        shipping_address: {
+          postal_code: "38120",
+          city: "Memphis",
+          province: "TN",
+        },
         shipping_methods: [
-          { id: "sm_ground", name: "UPS Ground Estimated Shipping", data: { service_code: "GROUND" } },
+          {
+            id: "sm_ground",
+            name: "UPS Ground Estimated Shipping",
+            data: { service_code: "GROUND" },
+          },
         ],
       },
       deleteShippingMethods,
@@ -126,9 +154,17 @@ describe("cart-shipping-revalidate subscriber", () => {
     const { container, cartModule } = makeContainer({
       cart: {
         id: "cart_1",
-        shipping_address: { postal_code: "38120", city: "Memphis", province: "TN" },
+        shipping_address: {
+          postal_code: "38120",
+          city: "Memphis",
+          province: "TN",
+        },
         shipping_methods: [
-          { id: "sm_ground", name: "UPS Ground Estimated Shipping", data: { service_code: "GROUND" } },
+          {
+            id: "sm_ground",
+            name: "UPS Ground Estimated Shipping",
+            data: { service_code: "GROUND" },
+          },
         ],
       },
       deleteShippingMethods,
@@ -149,9 +185,17 @@ describe("cart-shipping-revalidate subscriber", () => {
     const { container } = makeContainer({
       cart: {
         id: "cart_1",
-        shipping_address: { postal_code: "38120", city: "Memphis", province: "TN" },
+        shipping_address: {
+          postal_code: "38120",
+          city: "Memphis",
+          province: "TN",
+        },
         shipping_methods: [
-          { id: "sm_atl", name: "Metro Atlanta Delivery", data: { service_code: "ATLANTA_DELIVERY" } },
+          {
+            id: "sm_atl",
+            name: "Metro Atlanta Delivery",
+            data: { service_code: "ATLANTA_DELIVERY" },
+          },
         ],
       },
       deleteShippingMethods,
@@ -180,6 +224,8 @@ describe("cart-shipping-revalidate subscriber", () => {
       resolve: (key: string) => {
         if (key === "logger") return logger
         if (key === "query") return query
+        if (key === Modules.LOCKING)
+          return { execute: async (_key: string, job: any) => job() }
         if (key === Modules.CART) {
           return { deleteShippingMethods: jest.fn() }
         }

@@ -1,4 +1,5 @@
 import { SHIPPING_PRICE_ACCEPTED_KEY } from "../../lib/shipping-price-contract";
+import { ORDER_PROMISE_KEY } from "../../lib/order-promise";
 import type {
   MedusaRequest,
   MedusaResponse,
@@ -24,6 +25,7 @@ const privateKeys = new Set([
   SHIPPING_WEIGHT_SNAPSHOT_KEY,
   SHIPPING_PACKING_PLAN_KEY,
   CALENDAR_ACCEPTED_KEY,
+  ORDER_PROMISE_KEY,
 ]);
 export function publicShippingProjection(value: any): any {
   if (Array.isArray(value)) return value.map(publicShippingProjection);
@@ -32,13 +34,13 @@ export function publicShippingProjection(value: any): any {
   return Object.fromEntries(
     Object.entries(value)
       .filter(([key]) => !privateKeys.has(key))
-      .map(([key, entry]) => [key, publicShippingProjection(entry)]),
+      .map(([key, entry]) => [key, publicShippingProjection(entry)])
   );
 }
 export function hideShippingInternals(
   _req: MedusaRequest,
   res: MedusaResponse,
-  next: MedusaNextFunction,
+  next: MedusaNextFunction
 ) {
   const json = res.json.bind(res);
   res.json = ((body: any) =>
@@ -48,7 +50,7 @@ export function hideShippingInternals(
 export async function prepareNativeShippingAcceptance(
   req: MedusaRequest,
   res: MedusaResponse,
-  next: MedusaNextFunction,
+  next: MedusaNextFunction
 ) {
   try {
     await prepareCalendarAcceptance(req.scope, req.params.id);

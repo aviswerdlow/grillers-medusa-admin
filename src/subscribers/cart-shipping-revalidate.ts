@@ -34,60 +34,71 @@ export default async function cartShippingRevalidateHandler({
   const logger = container.resolve("logger")
 
   try {
-    const query = container.resolve("query")
+    await container.resolve(Modules.LOCKING).execute(
+      data.id,
+      async () => {
+        const query = container.resolve("query")
 
-    const { data: carts } = await query.graph({
-      entity: "cart",
-      fields: [
-        "id",
-        "shipping_address.postal_code",
-        "shipping_address.city",
-        "shipping_address.province",
-        "shipping_methods.id",
-        "shipping_methods.name",
-        "shipping_methods.shipping_option_id",
-        "shipping_methods.data",
-        "shipping_methods.shipping_option.id",
-        "shipping_methods.shipping_option.name",
-        "shipping_methods.shipping_option.data",
-      ],
-      filters: { id: data.id },
-    })
+        const { data: carts } = await query.graph({
+          entity: "cart",
+          fields: [
+            "id",
+            "completed_at",
+            "shipping_address.postal_code",
+            "shipping_address.city",
+            "shipping_address.province",
+            "shipping_methods.id",
+            "shipping_methods.name",
+            "shipping_methods.shipping_option_id",
+            "shipping_methods.data",
+            "shipping_methods.shipping_option.id",
+            "shipping_methods.shipping_option.name",
+            "shipping_methods.shipping_option.data",
+          ],
+          filters: { id: data.id },
+        })
 
-    const cart = carts?.[0] as any
-    if (!cart) return
+        const cart = carts?.[0] as any
+        if (!cart || cart.completed_at) return
 
-    const shippingAddress = cart.shipping_address || null
-    const methods: any[] = Array.isArray(cart.shipping_methods)
-      ? cart.shipping_methods
-      : []
-    if (methods.length === 0) return
+        const shippingAddress = cart.shipping_address || null
+        const methods: any[] = Array.isArray(cart.shipping_methods)
+          ? cart.shipping_methods
+          : []
+        if (methods.length === 0) return
 
-    const invalidMethodIds: string[] = []
-    for (const method of methods) {
-      const serviceCode = resolveServiceCodeFromMethod(method)
-      // Fast path: only restricted services can be unserviceable, so skip the
-      // Strapi round-trip for everything else.
-      if (!ZIP_RESTRICTED_SERVICE_CODES.has(serviceCode)) continue
+        const invalidMethodIds: string[] = []
+        for (const method of methods) {
+          const serviceCode = resolveServiceCodeFromMethod(method)
+          // Fast path: only restricted services can be unserviceable, so skip the
+          // Strapi round-trip for everything else.
+          if (!ZIP_RESTRICTED_SERVICE_CODES.has(serviceCode)) continue
 
-      const serviceable = await isDestinationServiceable(
-        serviceCode,
-        shippingAddress
-      )
-      if (!serviceable && method?.id) {
-        invalidMethodIds.push(method.id)
-      }
-    }
+          const serviceable = await isDestinationServiceable(
+            serviceCode,
+            shippingAddress
+          )
+          if (!serviceable && method?.id) {
+            invalidMethodIds.push(method.id)
+          }
+        }
 
-    // Only act when there is something to remove — this is what makes the
-    // cart.updated -> delete -> cart.updated cycle terminate.
-    if (invalidMethodIds.length === 0) return
+        // Only act when there is something to remove — this is what makes the
+        // cart.updated -> delete -> cart.updated cycle terminate.
+        if (invalidMethodIds.length === 0) return
 
-    const cartModuleService = container.resolve(Modules.CART)
-    await cartModuleService.deleteShippingMethods(invalidMethodIds)
+        const cartModuleService = container.resolve(Modules.CART)
+        await cartModuleService.deleteShippingMethods(invalidMethodIds)
 
-    logger.info(
-      `[cart-shipping-revalidate] removed ${invalidMethodIds.length} unserviceable shipping method(s) from cart ${cart.id}: ${invalidMethodIds.join(", ")}`
+        logger.info(
+          `[cart-shipping-revalidate] removed ${
+            invalidMethodIds.length
+          } unserviceable shipping method(s) from cart ${
+            cart.id
+          }: ${invalidMethodIds.join(", ")}`
+        )
+      },
+      { timeout: 30 }
     )
   } catch (err) {
     // A failure here must never break the cart.

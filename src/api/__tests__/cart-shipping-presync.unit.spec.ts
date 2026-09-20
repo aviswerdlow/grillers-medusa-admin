@@ -27,6 +27,8 @@ function makeScope({
       resolve: (key: string) => {
         if (key === "logger") return logger
         if (key === "query") return query
+        if (key === Modules.LOCKING)
+          return { execute: async (_key: string, run: any) => run() }
         if (key === Modules.CART) return cartModule
         throw new Error(`unexpected resolve(${key})`)
       },
@@ -38,7 +40,9 @@ function makeScope({
 
 describe("resolveCartIdFromRequest", () => {
   it("prefers params.id", () => {
-    expect(resolveCartIdFromRequest({ params: { id: "cart_1" } })).toBe("cart_1")
+    expect(resolveCartIdFromRequest({ params: { id: "cart_1" } })).toBe(
+      "cart_1"
+    )
   })
   it("falls back to params.cart_id", () => {
     expect(resolveCartIdFromRequest({ params: { cart_id: "cart_2" } })).toBe(
@@ -59,19 +63,29 @@ describe("extractAddressFromBody", () => {
   it("reads a nested shipping_address with a postal_code", () => {
     expect(
       extractAddressFromBody({
-        shipping_address: { postal_code: "38120", city: "Memphis", province: "TN" },
+        shipping_address: {
+          postal_code: "38120",
+          city: "Memphis",
+          province: "TN",
+        },
       })
     ).toEqual({ postal_code: "38120", city: "Memphis", province: "TN" })
   })
   it("reads a flat address-update body", () => {
     expect(
-      extractAddressFromBody({ postal_code: "38120", city: "Memphis", province: "TN" })
+      extractAddressFromBody({
+        postal_code: "38120",
+        city: "Memphis",
+        province: "TN",
+      })
     ).toEqual({ postal_code: "38120", city: "Memphis", province: "TN" })
   })
   it("returns null when there is no postal_code (falls back to cart address)", () => {
     expect(extractAddressFromBody({ items: [] })).toBeNull()
     expect(extractAddressFromBody(null)).toBeNull()
-    expect(extractAddressFromBody({ shipping_address: { city: "Memphis" } })).toBeNull()
+    expect(
+      extractAddressFromBody({ shipping_address: { city: "Memphis" } })
+    ).toBeNull()
   })
 })
 
@@ -94,9 +108,17 @@ describe("dropUnserviceableShippingMethods (synchronous front-line heal)", () =>
       cart: {
         id: "cart_1",
         // CURRENT (in-area) address — would have passed; the body must override it.
-        shipping_address: { postal_code: "30340", city: "Doraville", province: "GA" },
+        shipping_address: {
+          postal_code: "30340",
+          city: "Doraville",
+          province: "GA",
+        },
         shipping_methods: [
-          { id: "sm_atl", name: "Metro Atlanta Delivery", data: { service_code: "ATLANTA_DELIVERY" } },
+          {
+            id: "sm_atl",
+            name: "Metro Atlanta Delivery",
+            data: { service_code: "ATLANTA_DELIVERY" },
+          },
         ],
       },
       deleteShippingMethods,
@@ -106,7 +128,11 @@ describe("dropUnserviceableShippingMethods (synchronous front-line heal)", () =>
       scope,
       params: { id: "cart_1" },
       body: {
-        shipping_address: { postal_code: "38120", city: "Memphis", province: "TN" },
+        shipping_address: {
+          postal_code: "38120",
+          city: "Memphis",
+          province: "TN",
+        },
       },
     })
 
@@ -123,9 +149,17 @@ describe("dropUnserviceableShippingMethods (synchronous front-line heal)", () =>
     const { scope, cartModule } = makeScope({
       cart: {
         id: "cart_1",
-        shipping_address: { postal_code: "38120", city: "Memphis", province: "TN" },
+        shipping_address: {
+          postal_code: "38120",
+          city: "Memphis",
+          province: "TN",
+        },
         shipping_methods: [
-          { id: "sm_atl", name: "Metro Atlanta Delivery", data: { service_code: "ATLANTA_DELIVERY" } },
+          {
+            id: "sm_atl",
+            name: "Metro Atlanta Delivery",
+            data: { service_code: "ATLANTA_DELIVERY" },
+          },
         ],
       },
       deleteShippingMethods,
@@ -144,16 +178,26 @@ describe("dropUnserviceableShippingMethods (synchronous front-line heal)", () =>
   it("keeps an in-area ATLANTA_DELIVERY method and removes nothing", async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ data: [{ id: 1, ZipCode: "30340", IsActive: true }] }),
+      json: async () => ({
+        data: [{ id: 1, ZipCode: "30340", IsActive: true }],
+      }),
     } as any)
 
     const deleteShippingMethods = jest.fn().mockResolvedValue(undefined)
     const { scope, cartModule } = makeScope({
       cart: {
         id: "cart_1",
-        shipping_address: { postal_code: "30340", city: "Doraville", province: "GA" },
+        shipping_address: {
+          postal_code: "30340",
+          city: "Doraville",
+          province: "GA",
+        },
         shipping_methods: [
-          { id: "sm_atl", name: "Metro Atlanta Delivery", data: { service_code: "ATLANTA_DELIVERY" } },
+          {
+            id: "sm_atl",
+            name: "Metro Atlanta Delivery",
+            data: { service_code: "ATLANTA_DELIVERY" },
+          },
         ],
       },
       deleteShippingMethods,
@@ -175,9 +219,17 @@ describe("dropUnserviceableShippingMethods (synchronous front-line heal)", () =>
     const { scope, cartModule } = makeScope({
       cart: {
         id: "cart_1",
-        shipping_address: { postal_code: "38120", city: "Memphis", province: "TN" },
+        shipping_address: {
+          postal_code: "38120",
+          city: "Memphis",
+          province: "TN",
+        },
         shipping_methods: [
-          { id: "sm_ground", name: "UPS Ground Estimated Shipping", data: { service_code: "GROUND" } },
+          {
+            id: "sm_ground",
+            name: "UPS Ground Estimated Shipping",
+            data: { service_code: "GROUND" },
+          },
         ],
       },
       deleteShippingMethods,
@@ -217,9 +269,17 @@ describe("dropUnserviceableShippingMethods (synchronous front-line heal)", () =>
     const { scope } = makeScope({
       cart: {
         id: "cart_1",
-        shipping_address: { postal_code: "38120", city: "Memphis", province: "TN" },
+        shipping_address: {
+          postal_code: "38120",
+          city: "Memphis",
+          province: "TN",
+        },
         shipping_methods: [
-          { id: "sm_atl", name: "Metro Atlanta Delivery", data: { service_code: "ATLANTA_DELIVERY" } },
+          {
+            id: "sm_atl",
+            name: "Metro Atlanta Delivery",
+            data: { service_code: "ATLANTA_DELIVERY" },
+          },
         ],
       },
       deleteShippingMethods,
@@ -241,7 +301,9 @@ describe("dropUnserviceableShippingMethods (synchronous front-line heal)", () =>
       resolve: (key: string) => {
         if (key === "logger") return logger
         if (key === "query") {
-          return { graph: jest.fn().mockRejectedValue(new Error("query boom")) }
+          return {
+            graph: jest.fn().mockRejectedValue(new Error("query boom")),
+          }
         }
         if (key === Modules.CART) return { deleteShippingMethods }
         throw new Error(`unexpected resolve(${key})`)

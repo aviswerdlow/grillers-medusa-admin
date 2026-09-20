@@ -158,7 +158,7 @@ export async function enforceStaffCartAuthority(req: MedusaRequest, res: MedusaR
     const isPayment = !isCalendarQuote && req.method === "POST" && (req.path.endsWith("/complete") || req.path.startsWith("/store/payment-collections")
       || req.path.endsWith("/payment-collection") || req.path.startsWith("/store/grillers/checkout/"))
     if (proof && isPayment) {
-      if (cart.completed_at && !req.path.endsWith("/complete")) throw new StaffAccessDenied("This cart already has an order.")
+      if (cart.completed_at && !req.path.endsWith("/complete") && !req.path.endsWith("/place-order")) throw new StaffAccessDenied("This cart already has an order.")
       // Native completion is idempotent. A retry must retrieve the same order,
       // not reject it because that order now owns the stock reservation.
       if (!cart.completed_at) await checkStaffCartBeforePayment(req, cart, proof, secret!)

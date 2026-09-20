@@ -78,6 +78,8 @@ export const orderPromiseSchema = z
             pricing_mode: z.enum(["fixed_price", "per_lb"]),
             estimated_unit_price: money,
             estimated_line_total: money,
+            estimated_line_subtotal: money,
+            estimated_line_tax: money,
             rate_per_lb: money.nullable(),
             estimated_weight_lb: z.number().finite().positive().nullable(),
             weight_snapshot: jsonRecord.nullable(),
@@ -117,6 +119,8 @@ export const orderPromiseSchema = z
         window_label: z.string().max(500),
         timezone: text,
         service_code: text,
+        service_label: text,
+        pickup_location: text.nullable(),
         calendar_revision: text,
         calendar_selection: jsonRecord,
         packing_plan: jsonRecord.nullable(),
@@ -127,17 +131,17 @@ export const orderPromiseSchema = z
       .object({
         review_version: text,
         sale_terms_revision: text,
-        payment_mode: z.enum(["card", "invoice"]),
-        final_charge_consent_version: text.nullable(),
-        final_charge_consent_text: text.nullable(),
+        sale_terms_document: jsonRecord,
+        payment_mode: z.enum(["card", "card_at_placement", "invoice"]),
+        payment_consent_version: text.nullable(),
+        payment_consent_text: text.nullable(),
         invoice_terms: text.nullable(),
       })
       .strict()
       .superRefine((terms, ctx) => {
         if (
-          terms.payment_mode === "card" &&
-          (!terms.final_charge_consent_version ||
-            !terms.final_charge_consent_text)
+          terms.payment_mode !== "invoice" &&
+          (!terms.payment_consent_version || !terms.payment_consent_text)
         )
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
@@ -156,7 +160,8 @@ export const orderPromiseSchema = z
             z
               .object({
                 experiment_id: text,
-                version: text,
+                version: text.nullable(),
+                assignment_id: text.optional(),
                 variant: text,
               })
               .strict()
@@ -168,8 +173,8 @@ export const orderPromiseSchema = z
                 .size === assignments.length,
             "An experiment may have only one accepted assignment"
           ),
-        analytics_consent: z.boolean(),
-        test_order: z.boolean(),
+        analytics_consent: z.boolean().nullable(),
+        test_order: z.boolean().nullable(),
       })
       .strict(),
   })
@@ -216,7 +221,7 @@ export function normalizedOrderPromise(value: unknown): OrderPromise {
   copy.attribution.experiment_assignments.sort(
     (a: any, b: any) =>
       a.experiment_id.localeCompare(b.experiment_id) ||
-      a.version.localeCompare(b.version)
+      String(a.version ?? "").localeCompare(String(b.version ?? ""))
   );
   return copy;
 }

@@ -47,6 +47,8 @@ export function promiseFixture(
         pricing_mode: "per_lb",
         estimated_unit_price: 10,
         estimated_line_total: 60,
+        estimated_line_subtotal: 60,
+        estimated_line_tax: 0,
         rate_per_lb: 10,
         estimated_weight_lb: 6,
         weight_snapshot: { revision: "synthetic-weight-1", physical_lb: 3 },
@@ -58,6 +60,8 @@ export function promiseFixture(
       window_label: "",
       timezone: "America/New_York",
       service_code: "03",
+      service_label: "UPS Ground",
+      pickup_location: null,
       calendar_revision: "synthetic-calendar-1",
       calendar_selection: {
         quoteId: "synthetic-calendar-quote",
@@ -73,9 +77,13 @@ export function promiseFixture(
     terms: {
       review_version: "synthetic-review-1",
       sale_terms_revision: "synthetic-terms-1",
+      sale_terms_document: {
+        Title: "Synthetic terms",
+        Content: "Fixture only",
+      },
       payment_mode: "card",
-      final_charge_consent_version: "synthetic-consent-1",
-      final_charge_consent_text: "Synthetic consent for this fixture only.",
+      payment_consent_version: "synthetic-consent-1",
+      payment_consent_text: "Synthetic consent for this fixture only.",
       invoice_terms: null,
     },
     attribution: {

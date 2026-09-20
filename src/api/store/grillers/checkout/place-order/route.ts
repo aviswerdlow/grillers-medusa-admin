@@ -1,4 +1,13 @@
-import { prepareReceiptSnapshot } from "../../../../../lib/receipt-email-orders";
+import {
+  acceptCheckoutReview,
+  assertReviewOwner,
+  readReviewAcceptance,
+  reviewCart,
+  reviewErrorResponse,
+  withReviewCartLock,
+} from "../../../../../lib/order-review-checkout";
+import { completeReviewedCart } from "../../../../../lib/order-review-completion";
+import { OrderPromiseError } from "../../../../../lib/order-promise";
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http";
 import {
   ContainerRegistrationKeys,
@@ -6,7 +15,6 @@ import {
   remoteQueryObjectFromString,
 } from "@medusajs/framework/utils";
 import {
-  completeCartWorkflow,
   createPaymentCollectionForCartWorkflow,
   createPaymentSessionsWorkflow,
 } from "@medusajs/core-flows";
@@ -43,16 +51,14 @@ import {
 } from "../../../../../lib/gp-credit-limit";
 import { sanitizeOrderSmsConsentMetadata } from "../../../../../lib/communications/transactional-sms";
 
-import { prepareShippingAcceptance } from "../../../../../lib/shipping-acceptance";
 import { ShippingInputError } from "../../../../../lib/shipping-weights";
-import { prepareCalendarAcceptance } from "../../../../../lib/fulfillment-calendar-runtime";
 import { FulfillmentCalendarError } from "../../../../../lib/fulfillment-calendar";
 
 const PLACE_ORDER_PATH = "store/grillers/checkout/place-order";
 
 export const sanitizeCheckoutOrderSmsConsent = (
   metadata: unknown,
-  staffTargetCustomerId?: string | null,
+  staffTargetCustomerId?: string | null
 ) =>
   sanitizeOrderSmsConsentMetadata(metadata, {
     forceRemove: Boolean(staffTargetCustomerId),
@@ -84,11 +90,14 @@ const redactedErrorMessage = (message?: string | null) =>
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted-email]")
     .replace(
       /\b(?:order|cart|pi|pm|py|pay|refund|re|fin|attempt|prod|variant|seti)_[A-Za-z0-9_]+/g,
-      "[redacted-id]",
+      "[redacted-id]"
     )
     .slice(0, 300);
 
 type PlaceOrderBody = {
+  review_id?: string;
+  request_id?: string;
+  analytics_consent?: boolean | null;
   cart_id?: string;
   payment_method_id?: string;
   setup_intent_id?: string | null;
@@ -161,7 +170,10 @@ const fulfillmentTypeFromMetadata = (metadata: unknown): string | undefined => {
 
 const allocationSourceFromMetadata = (metadata: unknown): AllocationSource => {
   const record = metadataObject(metadata);
-  if (record.staff_phone_order === true || record.source === "staff_phone_order") {
+  if (
+    record.staff_phone_order === true ||
+    record.source === "staff_phone_order"
+  ) {
     return "staff_phone_order";
   }
   return "customer_web";
@@ -223,7 +235,7 @@ const ORDER_FIELDS = [
 
 async function fetchCartForInventory(
   req: MedusaRequest,
-  cartId: string,
+  cartId: string
 ): Promise<CheckoutCartForInventory | null> {
   const query = req.scope.resolve(ContainerRegistrationKeys.QUERY);
   const { data } = await query.graph({
@@ -234,7 +246,9 @@ async function fetchCartForInventory(
   return (data?.[0] as CheckoutCartForInventory | undefined) || null;
 }
 
-function cartInventoryLines(cart: CheckoutCartForInventory): AvailabilityLineInput[] {
+function cartInventoryLines(
+  cart: CheckoutCartForInventory
+): AvailabilityLineInput[] {
   return (cart.items || []).reduce<AvailabilityLineInput[]>((lines, item) => {
     const metadata = metadataObject(item.metadata);
     const variant = item.variant || {};
@@ -249,7 +263,7 @@ function cartInventoryLines(cart: CheckoutCartForInventory): AvailabilityLineInp
       qbd_list_id: qbdListIdFromMetadata(
         metadata,
         variant.metadata,
-        product.metadata,
+        product.metadata
       ),
       sku:
         textValue(metadata.sku) ||
@@ -305,7 +319,8 @@ async function assertCartInventoryAvailable({
     record_snapshots: true,
   });
   const unresolved = availability.filter(
-    (line) => line.decision !== "available" && line.decision !== "future_allowed",
+    (line) =>
+      line.decision !== "available" && line.decision !== "future_allowed"
   );
 
   if (unresolved.length) {
@@ -347,19 +362,19 @@ async function verifyStripeSetupIntent(input: {
 
   const response = await fetch(
     `https://api.stripe.com/v1/setup_intents/${encodeURIComponent(
-      input.setupIntentId,
+      input.setupIntentId
     )}`,
     {
       headers: {
         Authorization: `Bearer ${apiKey}`,
       },
-    },
+    }
   );
   const json = await response.json();
 
   if (!response.ok) {
     throw new Error(
-      json?.error?.message || "Could not verify saved card setup.",
+      json?.error?.message || "Could not verify saved card setup."
     );
   }
 
@@ -369,7 +384,7 @@ async function verifyStripeSetupIntent(input: {
 
   if (json.payment_method !== input.paymentMethodId) {
     throw new Error(
-      "Saved card setup does not match the selected payment method.",
+      "Saved card setup does not match the selected payment method."
     );
   }
 }
@@ -386,7 +401,7 @@ async function ensurePaymentCollection(req: MedusaRequest, cartId: string) {
           "payment_collection.payment_sessions.id",
           "payment_collection.payment_sessions.provider_id",
         ],
-      }),
+      })
     );
     return relation?.payment_collection || null;
   };
@@ -424,7 +439,7 @@ async function retrieveOrder(req: MedusaRequest, orderId: string) {
 async function computeOpenInvoiceBalance(
   req: MedusaRequest,
   customerId: string,
-  excludeOrderId: string,
+  excludeOrderId: string
 ): Promise<number> {
   const query = req.scope.resolve(ContainerRegistrationKeys.QUERY);
   const { data } = await query.graph({
@@ -447,7 +462,7 @@ async function computeOpenInvoiceBalance(
 /** #286 — the cart's current (estimated) total, used to evaluate the credit limit pre-completion. */
 async function getCartTotal(
   req: MedusaRequest,
-  cartId: string,
+  cartId: string
 ): Promise<number> {
   const query = req.scope.resolve(ContainerRegistrationKeys.QUERY);
   const { data } = await query.graph({
@@ -480,9 +495,14 @@ async function getCartTotal(
 async function placeInvoiceOrder(
   req: MedusaRequest,
   res: MedusaResponse,
-  ctx: { cartId: string; customer: any; staffTargetCustomerId?: string | null },
+  ctx: {
+    cartId: string;
+    customer: any;
+    staffTargetCustomerId?: string | null;
+    paymentTerms: string;
+  }
 ) {
-  const { cartId, customer, staffTargetCustomerId } = ctx;
+  const { cartId, customer, staffTargetCustomerId, paymentTerms } = ctx;
   const cartModule = req.scope.resolve(Modules.CART);
   const orderModule = req.scope.resolve(Modules.ORDER);
   const db = req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION);
@@ -492,7 +512,7 @@ async function placeInvoiceOrder(
   });
   const existingMetadata = sanitizeCheckoutOrderSmsConsent(
     existingCart?.metadata,
-    staffTargetCustomerId,
+    staffTargetCustomerId
   );
 
   if (staffTargetCustomerId) {
@@ -500,7 +520,11 @@ async function placeInvoiceOrder(
       existingMetadata.staff_target_customer_id ||
       existingMetadata.staff_selected_customer_id;
     if (metadataTarget && metadataTarget !== customer.id) {
-      return jsonError(res, 403, "This customer context does not match the cart.");
+      return jsonError(
+        res,
+        403,
+        "This customer context does not match the cart."
+      );
     }
   }
 
@@ -513,10 +537,6 @@ async function placeInvoiceOrder(
   if (!inventoryReady) return;
 
   const customerMeta = metadataObject(customer.metadata);
-  const paymentTerms =
-    typeof customerMeta.gp_payment_terms === "string"
-      ? customerMeta.gp_payment_terms
-      : "Net 10";
 
   // Invoice markers carried on the cart (copied to the order on completion) AND re-stamped on
   // the order. payment_workflow=INVOICE_AR keeps orderRequiresFinalCharge() false; the rest
@@ -578,19 +598,29 @@ async function placeInvoiceOrder(
       action: "checkout_pay_by_invoice",
       status: "order_ready_invoice",
       customer_id: customer.id,
-    },
+    }
   );
 
-  await cartModule.updateCarts(cartId, {
-    customer_id: customer.id,
-    email: customer.email || existingCart.email,
-    metadata: checkoutMetadata,
+  await withReviewCartLock(req.scope, cartId, async () => {
+    const current = await cartModule.retrieveCart(cartId, {
+      select: ["id", "customer_id", "email", "metadata", "completed_at"],
+    });
+    if (current.completed_at || current.customer_id !== customer.id)
+      throw new OrderPromiseError("order_review_changed_refresh_required");
+    const preserved = Object.fromEntries(
+      Object.entries(current.metadata || {}).filter(
+        ([key]) =>
+          key.startsWith("gp_order_promise_") ||
+          key === "receipt_contact_snapshot_id"
+      )
+    );
+    await cartModule.updateCarts(cartId, {
+      metadata: { ...current.metadata, ...checkoutMetadata, ...preserved },
+    });
   });
 
   // A no-amount SYSTEM payment session is still required for completeCartWorkflow to produce an
   // order; it carries no Stripe data and authorizes no charge.
-  await prepareCalendarAcceptance(req.scope, cartId);
-  await prepareShippingAcceptance(req.scope, cartId);
   const paymentCollection = await ensurePaymentCollection(req, cartId);
   await createPaymentSessionsWorkflow(req.scope).run({
     input: {
@@ -601,22 +631,20 @@ async function placeInvoiceOrder(
     },
   });
 
-  await prepareReceiptSnapshot(req.scope, cartId);
-  const { errors, result } = await completeCartWorkflow(req.scope).run({
-    input: { id: cartId },
-    context: { transactionId: cartId },
-    throwOnError: false,
-  });
+  const { errors, result } = await completeReviewedCart(req.scope, cartId);
 
   if (errors?.[0]) {
     const message =
-      errors[0].error?.message || "Could not place the order. Please try again.";
+      errors[0].error?.message ||
+      "Could not place the order. Please try again.";
     await emitOpsAlert({
       alertKind: "place_order_error",
       severity: "page",
       path: PLACE_ORDER_PATH,
       title: "place-order (invoice) complete-cart 400",
-      fingerprint: `place_order:invoice_complete_cart:${errors[0].error?.name || ""}`,
+      fingerprint: `place_order:invoice_complete_cart:${
+        errors[0].error?.name || ""
+      }`,
       meta: {
         cart_id: cartId,
         workflow_error: redactedErrorMessage(errors[0].error?.message),
@@ -655,7 +683,7 @@ async function placeInvoiceOrder(
   // re-stamp it here idempotently alongside the finalization fields.
   const metadata = {
     ...withoutCardPaymentMetadata(
-      sanitizeCheckoutOrderSmsConsent(order.metadata, staffTargetCustomerId),
+      sanitizeCheckoutOrderSmsConsent(order.metadata, staffTargetCustomerId)
     ),
     ...invoiceFields,
     ...creditMeta,
@@ -682,11 +710,46 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   }
 
   try {
-    const { customer, staffTargetCustomerId } =
-      await getPaymentContextCustomer(req);
+    const { customer, staffTargetCustomerId } = await getPaymentContextCustomer(
+      req
+    );
     if (!customer) {
       return jsonError(res, 401, "You must be signed in to place this order.");
     }
+
+    const ownedCart = await reviewCart(req.scope, cartId);
+    const reviewOwner = await assertReviewOwner(req, ownedCart);
+    if (ownedCart.customer_id !== customer.id)
+      throw new OrderPromiseError("order_review_cart_unavailable", 403);
+    const accepted = await acceptCheckoutReview(
+      req.scope,
+      cartId,
+      customer.id,
+      readReviewAcceptance({
+        ...body,
+        analytics_consent: reviewOwner.staff ? null : body.analytics_consent,
+      }),
+      wantsInvoice ? "invoice" : "card"
+    );
+    if (accepted.completed) {
+      const completion = await completeReviewedCart(req.scope, cartId);
+      if (completion.errors?.length)
+        throw new OrderPromiseError(
+          "order_review_completion_recovery_required",
+          503
+        );
+      const originalOrder = await retrieveOrder(req, completion.result.id);
+      if (!originalOrder)
+        throw new OrderPromiseError(
+          "order_review_completion_recovery_required",
+          503
+        );
+      return res.status(200).json({ type: "order", order: originalOrder });
+    }
+    // Consent comes from the server-issued review the customer just accepted.
+    body.consent_version =
+      accepted.snapshot.promise.terms.payment_consent_version;
+    body.consent_text = accepted.snapshot.promise.terms.payment_consent_text;
 
     // #283: approved B2B accounts can place a no-card invoice order. Fail closed — a
     // non-approved customer asking to pay by invoice is rejected, never silently let through.
@@ -695,13 +758,14 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         return jsonError(
           res,
           403,
-          "This account is not approved to pay by invoice.",
+          "This account is not approved to pay by invoice."
         );
       }
       return await placeInvoiceOrder(req, res, {
         cartId,
         customer,
         staffTargetCustomerId,
+        paymentTerms: accepted.snapshot.promise.terms.invoice_terms!,
       });
     }
 
@@ -720,7 +784,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     const belongsToCustomer = await assertPaymentMethodBelongsToCustomer(
       req,
       customer,
-      paymentMethodId,
+      paymentMethodId
     );
 
     if (!belongsToCustomer) {
@@ -736,7 +800,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     });
     const existingMetadata = sanitizeCheckoutOrderSmsConsent(
       existingCart?.metadata,
-      staffTargetCustomerId,
+      staffTargetCustomerId
     );
 
     if (staffTargetCustomerId) {
@@ -748,7 +812,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         return jsonError(
           res,
           403,
-          "This customer context does not match the cart.",
+          "This customer context does not match the cart."
         );
       }
     }
@@ -781,17 +845,27 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         action: "checkout_saved_card_for_final_charge",
         status: "order_ready_for_no_amount_completion",
         customer_id: customer.id,
-      },
+      }
     );
 
-    await cartModule.updateCarts(cartId, {
-      customer_id: customer.id,
-      email: customer.email || existingCart.email,
-      metadata: checkoutMetadata,
+    await withReviewCartLock(req.scope, cartId, async () => {
+      const current = await cartModule.retrieveCart(cartId, {
+        select: ["id", "customer_id", "email", "metadata", "completed_at"],
+      });
+      if (current.completed_at || current.customer_id !== customer.id)
+        throw new OrderPromiseError("order_review_changed_refresh_required");
+      const preserved = Object.fromEntries(
+        Object.entries(current.metadata || {}).filter(
+          ([key]) =>
+            key.startsWith("gp_order_promise_") ||
+            key === "receipt_contact_snapshot_id"
+        )
+      );
+      await cartModule.updateCarts(cartId, {
+        metadata: { ...current.metadata, ...checkoutMetadata, ...preserved },
+      });
     });
 
-    await prepareCalendarAcceptance(req.scope, cartId);
-    await prepareShippingAcceptance(req.scope, cartId);
     const paymentCollection = await ensurePaymentCollection(req, cartId);
 
     await createPaymentSessionsWorkflow(req.scope).run({
@@ -808,12 +882,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       },
     });
 
-    await prepareReceiptSnapshot(req.scope, cartId);
-    const { errors, result } = await completeCartWorkflow(req.scope).run({
-      input: { id: cartId },
-      context: { transactionId: cartId },
-      throwOnError: false,
-    });
+    const { errors, result } = await completeReviewedCart(req.scope, cartId);
 
     if (errors?.[0]) {
       const message =
@@ -863,7 +932,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       return jsonError(
         res,
         500,
-        "Order was created but could not be retrieved.",
+        "Order was created but could not be retrieved."
       );
     }
 
@@ -905,12 +974,21 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       order,
     });
   } catch (error) {
+    if (error instanceof OrderPromiseError)
+      return reviewErrorResponse(res, error);
     if (error instanceof FulfillmentCalendarError) {
-      res.status(error.status).json({ type: "fulfillment_date_review_required", message: error.message });
+      res
+        .status(error.status)
+        .json({
+          type: "fulfillment_date_review_required",
+          message: error.message,
+        });
       return;
     }
     if (error instanceof ShippingInputError) {
-      res.status(409).json({ type: "shipping_review_required", message: error.message });
+      res
+        .status(409)
+        .json({ type: "shipping_review_required", message: error.message });
       return;
     }
     const logger = req.scope.resolve(ContainerRegistrationKeys.LOGGER);
