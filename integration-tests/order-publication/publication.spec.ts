@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { Migration20260920223000 } from "../../src/modules/gp-communications/migrations/Migration20260920223000";
+import { pinRehearsalRoute } from "../../src/lib/order-publication-rehearsal";
 import { Migration20260920174500 } from "../../src/modules/gp-catch-weight/migrations/Migration20260920174500";
 import { Migration20260531183000 } from "../../src/modules/gp-catch-weight/migrations/Migration20260531183000";
 import { Migration20260526120000 } from "../../src/modules/gp-communications/migrations/Migration20260526120000";
@@ -77,6 +79,7 @@ beforeAll(async () => {
     Migration20260526123000,
     Migration20260526133000,
     Migration20260920214500,
+    Migration20260920223000,
   ]) {
     const sql: string[] = [];
     await migration.prototype.up.call({
@@ -520,4 +523,77 @@ it("retries automation with one attribution, excludes future touches and retains
     .havingRaw("count(*) > 1");
   expect(duplicate).toHaveLength(0);
   expect(await db("gp_message_log")).toHaveLength(2); // Only the two input fixtures; no sends.
+});
+
+it("isolates test delivery receipts from production and marketing across retry", async () => {
+  await bound("rehearsal", 0, { test_order: true });
+  await ready();
+  expect(await db("gp_order_publication_delivery")).toHaveLength(6);
+  const calls: any[] = [];
+  await deliverOrderPublications(
+    db,
+    async (claim) => {
+      calls.push(claim);
+      if (claim.target === "jitsu_rehearsal")
+        throw new Error("ambiguous transport");
+      return { status: "accepted" };
+    },
+    now
+  );
+  expect(calls.map((c) => c.target).sort()).toEqual([
+    "communications",
+    "gp_analytics_rehearsal",
+    "jitsu_rehearsal",
+  ]);
+  expect(calls.every((c) => c.properties.test_order === true)).toBe(true);
+  const completed = await db("gp_order_publication_delivery").whereIn(
+    "target",
+    ["jitsu", "gp_analytics", "communications_automation"]
+  );
+  expect(completed.every((r: any) => r.status === "excluded")).toBe(true);
+  const retry = jest.fn(async (_claim: any) => accepted());
+  await deliverOrderPublications(db, retry, later());
+  expect(retry).toHaveBeenCalledTimes(1);
+  expect(retry.mock.calls[0][0].target).toBe("jitsu_rehearsal");
+  expect((await db("gp_order_publication").first()).properties.test_order).toBe(
+    true
+  );
+});
+it("pins rehearsal destinations concurrently and refuses retargeting", async () => {
+  expect(
+    await Promise.all([
+      pinRehearsalRoute(db, "jitsu_rehearsal", "first"),
+      pinRehearsalRoute(db, "jitsu_rehearsal", "first"),
+    ])
+  ).toEqual([true, true]);
+  expect(await pinRehearsalRoute(db, "jitsu_rehearsal", "changed")).toBe(false);
+  expect(
+    await pinRehearsalRoute(db, "gp_analytics_rehearsal", "independent")
+  ).toBe(true);
+  expect(await db("gp_order_publication_route")).toHaveLength(2);
+});
+it("backfills only known test receipts without reopening production delivery", async () => {
+  await bound("prod", 1);
+  await bound("test", 0, { test_order: true });
+  await ready();
+  await db("gp_order_publication_delivery")
+    .whereIn("target", ["jitsu_rehearsal", "gp_analytics_rehearsal"])
+    .delete();
+  await db("gp_order_publication_delivery").update({ status: "excluded" });
+  const sql: string[] = [];
+  await Migration20260920223000.prototype.up.call({
+    addSql: (s: string) => sql.push(s),
+  } as any);
+  // Apply the migration's actual backfill after existing receipt dispositions.
+  await db.raw(
+    sql[0].slice(sql[0].indexOf("insert into gp_order_publication_delivery"))
+  );
+  const rows = await db("gp_order_publication_delivery").where({
+    status: "pending",
+  });
+  expect(rows).toHaveLength(2);
+  expect(rows.every((r: any) => r.event_id.includes("order_test:"))).toBe(true);
+  expect(
+    await db("gp_order_publication_delivery").where({ status: "excluded" })
+  ).toHaveLength(8);
 });

@@ -6,6 +6,8 @@ import type {
 } from "@medusajs/types"
 import { createHash, randomUUID } from "crypto"
 import { emitOpsAlert } from "../../lib/ops-alert"
+import { publicationEligibility, type DeliveryResult, type PublicationTarget } from "../../lib/order-publication"
+import { rehearsalRoute, type RehearsalOptions, type RehearsalTarget } from "../../lib/order-publication-rehearsal"
 
 type InjectedDependencies = {
   logger: Logger
@@ -17,6 +19,7 @@ type Options = {
   gpAnalyticsEndpoint?: string
   gpAnalyticsServerKey?: string
   gpAnalyticsDualRun?: boolean
+  rehearsal?: RehearsalOptions
 }
 
 const UUID_RE =
@@ -579,24 +582,38 @@ class GpAnalyticsProviderService extends AbstractAnalyticsProviderService {
 
   /** Await a bounded transport acknowledgment. The publication journal, not
    * track(), owns retries and per-target status for accepted order events. */
-  async deliverOrderPublication(target: "jitsu" | "gp_analytics", data: ProviderTrackAnalyticsEventDTO): Promise<{ status: "accepted" | "held"; reason?: string }> {
+  publicationRehearsalRoute(target: RehearsalTarget) {
+    return rehearsalRoute(target, this.options_.rehearsal, this.options_)
+  }
+
+  async deliverOrderPublication(target: Exclude<PublicationTarget, "communications" | "communications_automation">, data: ProviderTrackAnalyticsEventDTO): Promise<DeliveryResult> {
     const p = data.properties || {}
     if (!p.idempotency_key || !Number.isFinite(p.event_timestamp_ms) || !["order_completed", "order_finalized"].includes(data.event)) throw new Error("publication_transport_contract_invalid")
+    const ineligible = publicationEligibility(target, p)
+    if (ineligible) return ineligible
+    const rehearsal = target === "jitsu_rehearsal" || target === "gp_analytics_rehearsal"
+      ? this.publicationRehearsalRoute(target) : undefined
+    if (target.endsWith("_rehearsal") && !rehearsal) return { status: "held", reason: "rehearsal_isolation_not_configured" }
+    const properties = rehearsal ? { ...p, analytics_environment: "rehearsal", rehearsal_id: rehearsal.id } : p
     let url: string, headers: Record<string, string>, body: any
-    if (target === "jitsu") {
+    if (target === "jitsu" || target === "jitsu_rehearsal") {
       if (!this.options_.jitsuHost || !this.options_.jitsuServerSecret) return { status: "held", reason: "jitsu_not_configured" }
-      url = `${this.options_.jitsuHost.replace(/\/$/, "")}/api/v1/s2s/event`
-      headers = { "Content-Type": "application/json", "X-Auth-Token": this.options_.jitsuServerSecret }
-      body = this.buildPayload(data.event, data.actor_id, { ...p, event_id: uuidV5(p.idempotency_key) })
+      url = rehearsal?.url || `${this.options_.jitsuHost.replace(/\/$/, "")}/api/v1/s2s/event`
+      headers = { "Content-Type": "application/json", "X-Auth-Token": rehearsal?.key || this.options_.jitsuServerSecret }
+      body = this.buildPayload(data.event, data.actor_id, { ...properties, event_id: uuidV5(p.idempotency_key) })
     } else {
-      if (!this.options_.gpAnalyticsEndpoint || !this.options_.gpAnalyticsServerKey || this.options_.gpAnalyticsDualRun === false) return { status: "held", reason: "gp_analytics_not_enabled" }
-      url = `${this.options_.gpAnalyticsEndpoint.replace(/\/$/, "")}/v1/track`
-      headers = { "Content-Type": "application/json", Authorization: `Bearer ${this.options_.gpAnalyticsServerKey}` }
-      body = this.gpAnalyticsPayload(data.event, data.actor_id, p)
+      if (!this.options_.gpAnalyticsEndpoint || !this.options_.gpAnalyticsServerKey || (!rehearsal && this.options_.gpAnalyticsDualRun === false)) return { status: "held", reason: "gp_analytics_not_enabled" }
+      url = rehearsal?.url || `${this.options_.gpAnalyticsEndpoint.replace(/\/$/, "")}/v1/track`
+      headers = { "Content-Type": "application/json", Authorization: `Bearer ${rehearsal?.key || this.options_.gpAnalyticsServerKey}` }
+      body = this.gpAnalyticsPayload(data.event, data.actor_id, properties)
     }
-    const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000) })
+    const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000), redirect: "error" })
     // Never persist response bodies; they can include secrets or customer data.
     if (!response.ok) throw new Error("publication_transport_not_acknowledged")
+    if (target === "gp_analytics_rehearsal" && (
+      response.headers.get("x-gp-analytics-environment") !== "rehearsal" ||
+      response.headers.get("x-gp-rehearsal-id") !== rehearsal?.id
+    )) throw new Error("rehearsal_receiver_not_acknowledged")
     return { status: "accepted" }
   }
 

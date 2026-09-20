@@ -15,6 +15,10 @@ const event = {
     order_id: "order_fixture",
     cart_id: "cart_fixture",
     value: 0,
+    test_order: false,
+    analytics_consent: true,
+    experiment_context_status: "complete",
+    experiment_assignments: [],
   },
 };
 const originalFetch = global.fetch;
@@ -66,12 +70,10 @@ it("awaits the actual transport response", async () => {
 it.each(["jitsu", "gp_analytics"] as const)(
   "rejects failure from %s without persisting response data",
   async (target) => {
-    global.fetch = jest
-      .fn()
-      .mockResolvedValue({
-        ok: false,
-        text: () => "secret@example.invalid",
-      }) as any;
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      text: () => "secret@example.invalid",
+    }) as any;
     await expect(
       new Service({ logger } as any, options).deliverOrderPublication(
         target,
@@ -103,4 +105,127 @@ it("forwards finalization distinctly to Jitsu as well as the mirror", async () =
   expect(
     JSON.parse((global.fetch as jest.Mock).mock.calls[0][1].body).event_type
   ).toBe("order_finalized");
+});
+
+const rehearsalOptions = {
+  ...options,
+  rehearsal: {
+    id: "launch-test",
+    jitsuHost: "https://jitsu-rehearsal.example.invalid",
+    jitsuServerSecret: "jitsu-rehearsal-key",
+    gpAnalyticsEndpoint: "https://gp-rehearsal.example.invalid",
+    gpAnalyticsServerKey: "gp-rehearsal-key",
+  },
+};
+const testEvent = {
+  ...event,
+  properties: { ...event.properties, test_order: true },
+};
+it.each(["jitsu_rehearsal", "gp_analytics_rehearsal"] as const)(
+  "keeps test flags and stable identity through %s with no production fallback",
+  async (target) => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue({
+        ok: true,
+        headers: new Headers({
+          "x-gp-analytics-environment": "rehearsal",
+          "x-gp-rehearsal-id": "launch-test",
+        }),
+      }) as any;
+    const service = new Service({ logger } as any, rehearsalOptions);
+    expect(await service.deliverOrderPublication(target, testEvent)).toEqual({
+      status: "accepted",
+    });
+    await service.deliverOrderPublication(target, testEvent);
+    const calls = (global.fetch as jest.Mock).mock.calls;
+    expect(calls[0][0]).toContain("-rehearsal.example.invalid/");
+    expect(calls[0][1].redirect).toBe("error");
+    expect(calls[0][1].body).toBe(calls[1][1].body);
+    const envelope = JSON.parse(calls[0][1].body);
+    expect(envelope.eventn_ctx || envelope.properties).toMatchObject({
+      test_order: true,
+      analytics_environment: "rehearsal",
+      rehearsal_id: "launch-test",
+      value: 0,
+    });
+    expect(testEvent.properties).not.toHaveProperty("analytics_environment");
+  }
+);
+it.each(["jitsu", "gp_analytics"] as const)(
+  "refuses test orders on production %s even when called directly",
+  async (target) => {
+    expect(
+      await new Service(
+        { logger } as any,
+        rehearsalOptions
+      ).deliverOrderPublication(target, testEvent)
+    ).toEqual({ status: "excluded", reason: "test_order" });
+    expect(global.fetch).not.toHaveBeenCalled();
+  }
+);
+it.each(["jitsu_rehearsal", "gp_analytics_rehearsal"] as const)(
+  "refuses production orders on %s",
+  async (target) => {
+    expect(
+      await new Service(
+        { logger } as any,
+        rehearsalOptions
+      ).deliverOrderPublication(target, event)
+    ).toEqual({ status: "excluded", reason: "production_order" });
+    expect(global.fetch).not.toHaveBeenCalled();
+  }
+);
+it("holds absent, same-origin, same-key and malformed rehearsal routes without sending", async () => {
+  for (const rehearsal of [
+    undefined,
+    {
+      ...rehearsalOptions.rehearsal,
+      gpAnalyticsEndpoint: options.gpAnalyticsEndpoint + "/test",
+    },
+    {
+      ...rehearsalOptions.rehearsal,
+      gpAnalyticsServerKey: options.gpAnalyticsServerKey,
+    },
+    { ...rehearsalOptions.rehearsal, id: "../production" },
+  ]) {
+    expect(
+      await new Service({ logger } as any, {
+        ...options,
+        rehearsal,
+      }).deliverOrderPublication("gp_analytics_rehearsal", testEvent)
+    ).toMatchObject({ status: "held" });
+  }
+  expect(global.fetch).not.toHaveBeenCalled();
+});
+it("does not accept a 2xx from a receiver with the wrong rehearsal identity", async () => {
+  global.fetch = jest
+    .fn()
+    .mockResolvedValue({
+      ok: true,
+      headers: new Headers({ "x-gp-analytics-environment": "production" }),
+    }) as any;
+  await expect(
+    new Service({ logger } as any, rehearsalOptions).deliverOrderPublication(
+      "gp_analytics_rehearsal",
+      testEvent
+    )
+  ).rejects.toThrow("rehearsal_receiver_not_acknowledged");
+});
+it.each([
+  { analytics_consent: false },
+  { analytics_consent: null },
+  { experiment_context_status: "unverified" },
+  { test_order: null },
+])("preserves measurement eligibility for rehearsal %j", async (patch) => {
+  expect(
+    await new Service(
+      { logger } as any,
+      rehearsalOptions
+    ).deliverOrderPublication("gp_analytics_rehearsal", {
+      ...testEvent,
+      properties: { ...testEvent.properties, ...patch },
+    })
+  ).not.toMatchObject({ status: "accepted" });
+  expect(global.fetch).not.toHaveBeenCalled();
 });

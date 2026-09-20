@@ -9,6 +9,7 @@ import {
 } from "../lib/order-publication";
 import { deliverPublicationToCommunications } from "../lib/order-publication-communications";
 import { emitOpsAlert } from "../lib/ops-alert";
+import { pinRehearsalRoute } from "../lib/order-publication-rehearsal";
 
 export default async function gpOrderPublication(container: MedusaContainer) {
   if (process.env.GP_ORDER_PUBLICATION_ENABLED !== "true") return;
@@ -29,6 +30,18 @@ export default async function gpOrderPublication(container: MedusaContainer) {
         gpAnalyticsEndpoint: process.env.GP_ANALYTICS_ENDPOINT,
         gpAnalyticsServerKey: process.env.GP_ANALYTICS_SERVER_KEY,
         gpAnalyticsDualRun: process.env.GP_ANALYTICS_DUAL_RUN !== "false",
+        rehearsal:
+          process.env.GP_ORDER_REHEARSAL_ENABLED === "true"
+            ? {
+                id: process.env.GP_REHEARSAL_ID,
+                jitsuHost: process.env.GP_REHEARSAL_JITSU_HOST,
+                jitsuServerSecret: process.env.GP_REHEARSAL_JITSU_SERVER_SECRET,
+                gpAnalyticsEndpoint:
+                  process.env.GP_REHEARSAL_ANALYTICS_ENDPOINT,
+                gpAnalyticsServerKey:
+                  process.env.GP_REHEARSAL_ANALYTICS_SERVER_KEY,
+              }
+            : undefined,
       }
     );
     const delivery = await deliverOrderPublications(
@@ -39,6 +52,19 @@ export default async function gpOrderPublication(container: MedusaContainer) {
           claim.target === "communications_automation"
         )
           return deliverPublicationToCommunications(db, claim);
+        if (
+          claim.target === "jitsu_rehearsal" ||
+          claim.target === "gp_analytics_rehearsal"
+        ) {
+          const route = analytics.publicationRehearsalRoute(claim.target);
+          if (!route)
+            return {
+              status: "held",
+              reason: "rehearsal_isolation_not_configured",
+            };
+          if (!(await pinRehearsalRoute(db, claim.target, route.hash)))
+            return { status: "held", reason: "rehearsal_route_changed" };
+        }
         return analytics.deliverOrderPublication(claim.target, {
           event:
             claim.kind === "placed" ? "order_completed" : "order_finalized",

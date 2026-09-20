@@ -8,6 +8,8 @@ export type PublicationKind = "placed" | "finalized";
 export type PublicationTarget =
   | "jitsu"
   | "gp_analytics"
+  | "jitsu_rehearsal"
+  | "gp_analytics_rehearsal"
   | "communications"
   | "communications_automation";
 export type DeliveryResult = {
@@ -273,7 +275,12 @@ export async function materializeOrderPublications(
             });
           await read("gp_order_publication_delivery")
             .insert(
-              PUBLICATION_TARGETS.map((target) => ({
+              [
+                ...PUBLICATION_TARGETS,
+                ...(properties.test_order === true
+                  ? ["jitsu_rehearsal", "gp_analytics_rehearsal"]
+                  : []),
+              ].map((target) => ({
                 event_id: intent.event_id,
                 target,
                 next_attempt_at: now,
@@ -306,9 +313,13 @@ export function publicationEligibility(
   properties: any
 ): DeliveryResult | null {
   if (target === "communications") return null; // Operational truth is not marketing consent.
-  if (properties.test_order === true)
+  const rehearsal =
+    target === "jitsu_rehearsal" || target === "gp_analytics_rehearsal";
+  if (rehearsal && properties.test_order === false)
+    return { status: "excluded", reason: "production_order" };
+  if (!rehearsal && properties.test_order === true)
     return { status: "excluded", reason: "test_order" };
-  if (properties.test_order !== false)
+  if (properties.test_order !== (rehearsal ? true : false))
     return { status: "held", reason: "test_classification_unknown" };
   if (target === "communications_automation") return null; // Existing purpose consent, suppressions and holdouts still apply.
   if (properties.analytics_consent === false)
@@ -317,6 +328,7 @@ export function publicationEligibility(
     return { status: "held", reason: "analytics_consent_unknown" };
   if (
     properties.experiment_context_status !== "complete" ||
+    !Array.isArray(properties.experiment_assignments) ||
     properties.experiment_assignments.some((a: any) => !a.version)
   )
     return { status: "held", reason: "experiment_context_unknown" };
