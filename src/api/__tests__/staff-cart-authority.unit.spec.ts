@@ -181,7 +181,7 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     await prepared(); const receipt = carts.cart_1.metadata[STAFF_CART_AUTHORITY]
     carts.cart_other = { ...carts.cart_1, id: "cart_other", metadata: { ...carts.cart_1.metadata } }
     expect((await request("/store/carts/cart_other/complete", {}, true)).status).toBe(403)
-    for (const metadata of [{ staff_actor_customer_id: "cus_other" }, { [STAFF_CART_AUTHORITY]: receipt + "x" }, { payment_workflow: "invoice_ar" }, null]) {
+    for (const metadata of [{ staff_actor_customer_id: "cus_other" }, { [STAFF_CART_AUTHORITY]: receipt + "x" }, { payment_workflow: "invoice_ar" }, { gp_order_promise_snapshot_id: "gpos_forged" }, null]) {
       expect((await request("/store/carts/cart_1", { metadata })).status).toBe(403)
     }
     delete carts.cart_1.metadata[STAFF_CART_AUTHORITY]

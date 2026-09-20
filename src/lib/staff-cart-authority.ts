@@ -72,7 +72,7 @@ export function serverOwnedCartKey(key: string): boolean {
   return key.startsWith("gp_staff_") || key === "cart_id" || key.startsWith("payment_")
     || key.startsWith("final_charge_") || key.startsWith("finalization_") || key.startsWith("catch_weight_final") || key.startsWith("fulfillment_gate_")
     || key.startsWith("qbd_posting_") || key.startsWith("quickbooks_posting_") || key.startsWith("gp_credit_")
-    || key.startsWith("gp_payment_") || key.startsWith("gp_offline_")
+    || key.startsWith("gp_payment_") || key.startsWith("gp_offline_") || key.startsWith("gp_order_promise_")
 }
 
 export function staffCartMetadataKey(key: string, value?: unknown): boolean {
