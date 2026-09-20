@@ -115,7 +115,7 @@ test("the installed Medusa line conversion carries the prepared snapshot into th
   await prepareShippingAcceptance(h.container, h.cart.id);
   const { prepareLineItemData } = require(path.join(path.dirname(require.resolve("@medusajs/core-flows")), "cart/utils/prepare-line-item-data.js"));
   const line = h.cart.items[0];
-  const orderLine = prepareLineItemData({item:line,variant:line.variant,cartId:h.cart.id,unitPrice:10,isTaxInclusive:false,taxLines:[],adjustments:[]});
+  const orderLine = prepareLineItemData({item:line,variant:{...line.variant,product:{id:"product_fixture",title:"Synthetic product",is_giftcard:false}},cartId:h.cart.id,unitPrice:10,isTaxInclusive:false,taxLines:[],adjustments:[]});
   expect(orderLine.metadata[SHIPPING_WEIGHT_SNAPSHOT_KEY]).toEqual(line.metadata[SHIPPING_WEIGHT_SNAPSHOT_KEY]);
   expect(orderLine.variant_id).toBe(line.variant_id);
 });
