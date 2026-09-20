@@ -1,5 +1,6 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { emitQbSyncDashboardFailureAlert } from "../../../../../lib/qb-sync-dashboard-alerts"
+import { validQbSyncStatus } from "../../../../../lib/qb-sync-status-contract"
 
 const DEFAULT_PER_PAGE = "25"
 const ALLOWED_QUERY_KEYS = [
@@ -13,9 +14,7 @@ const ALLOWED_QUERY_KEYS = [
 
 function syncBaseUrl() {
   const raw =
-    process.env.QB_SYNC_STATUS_URL ||
-    process.env.QB_SYNC_ORDER_IMPORT_URL ||
-    ""
+    process.env.QB_SYNC_STATUS_URL || process.env.QB_SYNC_ORDER_IMPORT_URL || ""
   const trimmed = raw.trim().replace(/\/+$/, "")
 
   if (!trimmed) {
@@ -73,13 +72,16 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     return
   }
 
-  const url = `${baseUrl}/api/dashboard/sync-queue?${forwardedQuery(req).toString()}`
+  const url = `${baseUrl}/api/dashboard/sync-queue?${forwardedQuery(
+    req
+  ).toString()}`
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 12_000)
 
   try {
     const response = await fetch(url, {
       method: "GET",
+      cache: "no-store",
       headers: {
         Accept: "application/json",
         "X-QB-Sync-Token": token,
@@ -107,6 +109,23 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
         error: payload,
         logger,
       })
+    }
+
+    if (response.ok && !validQbSyncStatus(payload)) {
+      await emitQbSyncDashboardFailureAlert({
+        req,
+        operation: "status",
+        reason: "invalid_response",
+        baseUrl,
+        status: 502,
+        error: "Missing or invalid QuickBooks status/freshness contract.",
+        logger,
+      })
+      res.status(502).json({
+        error:
+          "QuickBooks status is unavailable: its response could not be verified.",
+      })
+      return
     }
 
     res.status(response.ok ? 200 : response.status).json(payload)
