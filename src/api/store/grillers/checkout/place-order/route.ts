@@ -42,6 +42,9 @@ import {
 } from "../../../../../lib/gp-credit-limit";
 import { sanitizeOrderSmsConsentMetadata } from "../../../../../lib/communications/transactional-sms";
 
+import { prepareShippingAcceptance } from "../../../../../lib/shipping-acceptance";
+import { ShippingInputError } from "../../../../../lib/shipping-weights";
+
 const PLACE_ORDER_PATH = "store/grillers/checkout/place-order";
 
 export const sanitizeCheckoutOrderSmsConsent = (
@@ -583,6 +586,7 @@ async function placeInvoiceOrder(
 
   // A no-amount SYSTEM payment session is still required for completeCartWorkflow to produce an
   // order; it carries no Stripe data and authorizes no charge.
+  await prepareShippingAcceptance(req.scope, cartId);
   const paymentCollection = await ensurePaymentCollection(req, cartId);
   await createPaymentSessionsWorkflow(req.scope).run({
     input: {
@@ -781,6 +785,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       metadata: checkoutMetadata,
     });
 
+    await prepareShippingAcceptance(req.scope, cartId);
     const paymentCollection = await ensurePaymentCollection(req, cartId);
 
     await createPaymentSessionsWorkflow(req.scope).run({
@@ -893,6 +898,10 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       order,
     });
   } catch (error) {
+    if (error instanceof ShippingInputError) {
+      res.status(409).json({ type: "shipping_review_required", message: error.message });
+      return;
+    }
     const logger = req.scope.resolve(ContainerRegistrationKeys.LOGGER);
     const err = error as { name?: string; message?: string } | undefined;
     const message = error instanceof Error ? error.message : String(error);

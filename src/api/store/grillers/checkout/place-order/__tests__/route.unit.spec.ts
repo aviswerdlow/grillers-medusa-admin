@@ -3,6 +3,7 @@ import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { emitOpsAlert } from "../../../../../../lib/ops-alert"
 import { checkInventoryAvailability } from "../../../../../../lib/inventory-allocation"
 import { getPaymentContextCustomer } from "../../../../payment-methods/utils"
+import { ShippingInputError } from "../../../../../../lib/shipping-weights"
 import {
   ORDER_SMS_CONSENT_DISCLOSURE,
   ORDER_SMS_CONSENT_METHOD,
@@ -193,6 +194,16 @@ describe("place-order route ops alerting", () => {
     expect(meta).not.toHaveProperty("setup_intent_id")
     expect(JSON.stringify(meta)).not.toContain("pm_test_123")
     expect(JSON.stringify(meta)).not.toContain("avi@example.com")
+  })
+
+  it("surfaces shipping review as a recoverable conflict without a payment session", async () => {
+    ;(getPaymentContextCustomer as jest.Mock).mockRejectedValueOnce(new ShippingInputError("unreviewed_shipping_weight"))
+    const { req, res } = makeReqRes()
+    await POST(req, res)
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({type:"shipping_review_required"}))
+    expect(createPaymentSessionsWorkflow).not.toHaveBeenCalled()
+    expect(emitOpsAlert).not.toHaveBeenCalled()
   })
 
   it("blocks checkout before payment session creation when server-side ATP is unresolved", async () => {

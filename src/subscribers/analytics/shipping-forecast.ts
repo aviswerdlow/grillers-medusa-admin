@@ -1,37 +1,14 @@
 import type { SubscriberArgs, SubscriberConfig } from "@medusajs/framework"
 import { emitAnalyticsSubscriberFailureAlert } from "../../lib/analytics/subscriber-alerts"
-import {
-  estimatePackagingCost,
-  packagingConfigFromEnv,
-  type PackagingCostConfig,
-} from "../../lib/packaging-cost"
-import { getPackagingConfig } from "../../lib/packaging-cost-strapi"
-import { shippingForecastInputFromFulfillmentData } from "../../lib/shipping-cost-forecast"
+import { SHIPPING_PACKING_PLAN_KEY, type ShippingPackingPlan } from "../../lib/shipping-packing-plan"
 import {
   isUpsServiceCode,
   normalizeGrillersUpsServiceCode,
 } from "../../modules/fulfillment/wwex-speedship"
 
-/**
- * Emits a `shipping_forecast` analytics event once per completed order so the
- * shipping charge can be dashboarded against its cost over time.
- *
- * For every UPS-shipped order it decomposes the charged shipping total into its
- * two known components — the freight forecast and the additive packaging cost
- * (dry ice + shipper box, Peter 2026-06-16, gated ON in prod via
- * GRILLERS_SHIPPING_FORECAST_INCLUDE_PACKAGING). The freight component is
- * recovered as `charged_shipping - packaging_cost`, mirroring how the
- * fulfillment provider builds the charge (`charge = freight + packaging`).
- *
- * Joined later to the Unishippers actuals, the warehouse stream answers
- * charged-vs-freight-vs-packaging today and charge-vs-actual-cost drift once
- * the actual carrier invoice lands.
- *
- * Pickup / local-delivery / flat orders carry no UPS service code and are
- * skipped — there is no freight to forecast or reconcile for them.
- *
- * Fire-and-forget: never throws (a failure here must not break order placement).
- */
+/** Reports the accepted packing estimate without recomputing old orders from
+ * current catalog/CMS settings. Price decomposition awaits the versioned quote
+ * contract (#331/#368); carrier freight must never be inferred by subtraction. */
 
 const STAFF_SOURCES = new Set([
   "staff",
@@ -113,16 +90,6 @@ function roundMoney(value: number): number {
 function normalizeZip(value: unknown): string {
   const match = firstText(value).match(/\d{5}/)
   return match?.[0] || ""
-}
-
-function envFlag(
-  env: Record<string, string | undefined>,
-  key: string,
-  fallback = false
-): boolean {
-  const value = env[key]
-  if (value == null || value === "") return fallback
-  return ["1", "true", "yes", "on"].includes(String(value).toLowerCase())
 }
 
 function latestShippingMethod(order: Record<string, any>): Record<string, any> {
@@ -221,8 +188,6 @@ function routeMarketForAnalytics(
  */
 export function buildShippingForecastEvent(
   order: Record<string, any>,
-  env: Record<string, string | undefined> = process.env,
-  packagingConfig: PackagingCostConfig = packagingConfigFromEnv(env)
 ): {
   event: "shipping_forecast"
   actor_id?: string
@@ -231,70 +196,22 @@ export function buildShippingForecastEvent(
   const method = latestShippingMethod(order)
   const service = upsServiceCodeForMethod(method)
   // Skip pickup / local-delivery / flat: no UPS freight to forecast or reconcile.
-  if (!service) return null
+  if (!service || !order.items?.length) return null
 
   const metadata = metadataObject(order.metadata)
   const shippingAddress = metadataObject(order.shipping_address)
 
-  // Derive the SAME estimated product weight + ship state the forecast charge
-  // used, by reusing the shared fulfillment-input helper (single source of truth
-  // for the per-item AvgPackWeight-style weight math).
-  const forecastInput = shippingForecastInputFromFulfillmentData(service, {
-    items: order.items,
-    shipping_address: shippingAddress,
-    service_code: service,
-  })
-  const estimatedWeightLb = forecastInput?.estimated_product_weight_lb ?? 0
-
-  // Guard: an order with NO line items at all (e.g. a pure gift-card / store-credit
-  // order with a UPS method somehow attached) has nothing to ship or reconcile —
-  // skip it like pickup/local/flat. (`shippingForecastInputFromFulfillmentData`
-  // returns null when items is empty.)
-  //
-  // NOTE: we deliberately do NOT skip on estimated_weight_lb === 0. Real food
-  // orders frequently carry NO per-item weight metadata (the live order
-  // order_01KVHNQ2MNQ1P50DVB62D7F3CC / display 135 is exactly this: 9 catch-weight
-  // food lines, zero avg_pack_weight metadata). For those the packaging estimator
-  // intentionally falls back to a 1-box floor, so a zero-weight forecast is the
-  // correct, expected output — suppressing it would drop the very orders this
-  // subscriber exists to reconcile.
-  if (!forecastInput) return null
-  const shipPostalCode =
-    forecastInput?.ship_postal_code ||
-    firstText(shippingAddress.postal_code, shippingAddress.zip)
-  const shipState =
-    forecastInput?.ship_state ||
-    firstText(
-      shippingAddress.province_code,
-      shippingAddress.province,
-      shippingAddress.state
-    ).toUpperCase()
-
-  const pkg = estimatePackagingCost(
-    {
-      estimatedProductWeightLb: estimatedWeightLb,
-      service,
-      shipPostalCode,
-    },
-    packagingConfig
-  )
+  const stored = metadata[SHIPPING_PACKING_PLAN_KEY] as ShippingPackingPlan | undefined
+  const pkg = stored?.version === 1 && stored.service === service && stored.id && stored.packages?.length ? stored : null
+  const estimatedWeightLb = pkg?.weights.physicalWeightLb ?? null
+  const shipPostalCode = normalizeZip(shippingAddress.postal_code || shippingAddress.zip)
+  const shipState = firstText(shippingAddress.province_code, shippingAddress.province, shippingAddress.state).toUpperCase().replace(/^US-/, "")
 
   // Charged shipping = what the customer actually paid for shipping. Prefer the
   // chosen method's amount, fall back to the order's shipping_total.
   const chargedShipping = roundMoney(
     numberValue(method.amount) ?? numberValue(order.shipping_total) ?? 0
   )
-
-  // The charge is built as `freight + packaging` (packaging gated ON in prod).
-  // Recover the freight component by subtracting the packaging estimate. When
-  // packaging is gated OFF, charged == freight and packaging_cost is 0.
-  const packagingIncludedInCharge = envFlag(
-    env,
-    "GRILLERS_SHIPPING_FORECAST_INCLUDE_PACKAGING",
-    false
-  )
-  const packagingCost = packagingIncludedInCharge ? pkg.total : 0
-  const freight = roundMoney(chargedShipping - packagingCost)
 
   const customerId = order.customer_id || undefined
   const orderId = order.id
@@ -315,17 +232,22 @@ export function buildShippingForecastEvent(
       ship_state: shipState,
       dest_postal_code: shipPostalCode,
       service,
-      transit_days: pkg.transitDays,
-      estimated_weight_lb: roundMoney(estimatedWeightLb),
-      boxes: pkg.boxes,
-      box_tier: pkg.boxTier,
-      dry_ice_lb: pkg.dryIceLb,
-      box_cost: pkg.boxCost,
-      dry_ice_cost: pkg.dryIceCost,
-      packaging_cost: packagingCost,
+      estimate_status: pkg ? "accepted_snapshot" : "unavailable_legacy_snapshot",
+      packing_plan_id: pkg?.id ?? null,
+      packing_policy_version: pkg?.policyVersion ?? null,
+      transit_days: pkg?.transitDays ?? null,
+      estimated_weight_lb: estimatedWeightLb,
+      boxes: pkg?.boxes ?? null,
+      box_tier: pkg?.packages[0]?.boxTier ?? null,
+      dry_ice_lb: pkg?.dryIceLb ?? null,
+      box_cost: pkg?.boxCost ?? null,
+      dry_ice_cost: pkg?.dryIceCost ?? null,
+      estimated_packaging_cost: pkg?.total ?? null,
       charged_shipping: chargedShipping,
-      freight,
-      packaging_included_in_charge: packagingIncludedInCharge,
+      price_decomposition_status: "awaiting_versioned_quote_contract",
+      packaging_cost: null,
+      freight: null,
+      packaging_included_in_charge: null,
       source: sourceForAnalytics(metadata),
       customer_type: customerTypeForAnalytics(order, metadata),
       route_market: routeMarketForAnalytics(order, metadata),
@@ -366,10 +288,6 @@ export default async function shippingForecastHandler({
         "items.metadata",
         "items.variant.*",
         "items.variant.product.*",
-        // The weight estimator (metadataValue in shipping-cost-forecast) reads
-        // avg_pack_weight_lb from product metadata as a fallback, but `.product.*`
-        // does not expand the JSON metadata column in query.graph — request it
-        // explicitly or per-lb weight can be under-counted on some orders.
         "items.variant.product.metadata",
         "shipping_methods.*",
         "shipping_methods.shipping_option_id",
@@ -382,11 +300,7 @@ export default async function shippingForecastHandler({
     const order = orders?.[0] as any
     if (!order) return
 
-    // Use the same Strapi-layered configuration that produced the checkout
-    // charge, so freight + packaging analytics continue to reconcile after an
-    // operator edits the dry-ice or box table.
-    const packagingConfig = await getPackagingConfig(process.env)
-    const payload = buildShippingForecastEvent(order, process.env, packagingConfig)
+    const payload = buildShippingForecastEvent(order)
     // Not a UPS order (pickup / local / flat): nothing to forecast or reconcile.
     if (!payload) return
 

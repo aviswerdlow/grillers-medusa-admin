@@ -1,3 +1,6 @@
+import { ShippingInputError } from "../../lib/shipping-weights"
+import type { ShippingPackingPlan } from "../../lib/shipping-packing-plan"
+
 type LoggerLike = {
   info?: (message: string) => void
   warn?: (message: string) => void
@@ -48,6 +51,7 @@ export type WwexPackageInput = {
 }
 
 export type WwexRateInput = {
+  estimatedPackingPlan?: ShippingPackingPlan
   serviceCode: string
   shippingAddress: WwexAddressInput
   items?: Array<Record<string, any>>
@@ -117,7 +121,6 @@ type WwexSpeedshipConfig = {
   billToType?: string | null
   packageDimensions: Record<string, PackageDimensions>
   defaultPackage: PackageDimensions
-  defaultPackageWeightLb: number
   maxPackageWeightLb: number
   insuranceRequestFlag: boolean
   handlingCharge?: { value: string; unit: "AMOUNT" | "PERCENT" } | null
@@ -148,7 +151,8 @@ const DEFAULT_PACKAGE: PackageDimensions = {
 }
 
 const numberOrNull = (value: unknown): number | null => {
-  if (value === undefined || value === null || value === "") return null
+  if (value && typeof value === "object" && "value" in value) return numberOrNull((value as any).value)
+  if ((typeof value !== "number" && typeof value !== "string") || value === "" || (typeof value === "string" && !value.trim())) return null
   const parsed =
     typeof value === "object" && value !== null && "value" in value
       ? Number((value as Record<string, unknown>).value)
@@ -340,40 +344,12 @@ function dimensionsForPackage(
     width: positiveNumber(pkg.width_in),
     height: positiveNumber(pkg.height_in),
   }
-  if (explicit.length || explicit.width || explicit.height) {
+  if ([pkg.length_in,pkg.width_in,pkg.height_in].some(v=>v!==undefined && v!==null)) {
     return explicit
   }
 
   const key = packageTypeKey(pkg.package_type)
   return config.packageDimensions[key] || config.defaultPackage
-}
-
-function estimatedItemWeight(item: Record<string, any>): number {
-  const metadata = item?.metadata || {}
-  const quantity =
-    positiveNumber(item.quantity) ??
-    positiveNumber(item.raw_quantity?.value) ??
-    1
-  const direct =
-    positiveNumber(item.actual_weight_total) ??
-    positiveNumber(item.estimated_weight_total) ??
-    positiveNumber(metadata.actual_weight_total) ??
-    positiveNumber(metadata.estimated_weight_total) ??
-    positiveNumber(metadata.estimated_pack_weight) ??
-    positiveNumber(metadata.approximate_pack_weight)
-
-  if (direct) return direct
-
-  const each =
-    positiveNumber(item.weight) ??
-    positiveNumber(item.weight_lb) ??
-    positiveNumber(metadata.actual_weight_each) ??
-    positiveNumber(metadata.estimated_weight_each) ??
-    positiveNumber(metadata.AvgPackWeight) ??
-    positiveNumber(metadata.avg_pack_weight) ??
-    positiveNumber(metadata.average_pack_weight)
-
-  return each ? each * quantity : 0
 }
 
 function estimatedPackages(
@@ -384,20 +360,9 @@ function estimatedPackages(
     return input.packages
   }
 
-  const estimatedWeight =
-    (input.items || []).reduce((sum, item) => sum + estimatedItemWeight(item), 0) ||
-    config.defaultPackageWeightLb
-  const packageCount = Math.max(
-    1,
-    Math.ceil(estimatedWeight / config.maxPackageWeightLb)
-  )
-  const weightEach = Math.max(1, Math.ceil((estimatedWeight / packageCount) * 10) / 10)
-
-  return Array.from({ length: packageCount }).map((_, index) => ({
-    package_type: "Estimated cold-chain shipper",
-    packed_weight_lb: weightEach,
-    reference: `Estimate ${index + 1}`,
-  }))
+  const plan = input.estimatedPackingPlan
+  if (!plan?.packages.length) throw new ShippingInputError("missing_packing_plan")
+  return plan.packages.map((p,index)=>({package_type:p.boxName,packed_weight_lb:p.grossWeightLb,dry_ice_lb:p.dryIceLb,length_in:p.lengthIn,width_in:p.widthIn,height_in:p.heightIn,reference:`Estimate ${index+1}`}))
 }
 
 function handlingUnit(
@@ -407,7 +372,9 @@ function handlingUnit(
   input: WwexRateInput
 ) {
   const dimensions = dimensionsForPackage(pkg, config)
-  const weight = positiveNumber(pkg.packed_weight_lb) || config.defaultPackageWeightLb
+  const weight = positiveNumber(pkg.packed_weight_lb)
+  if (!weight || weight > config.maxPackageWeightLb) throw new ShippingInputError("invalid_packed_gross_weight")
+  if (!dimensions.length || !dimensions.width || !dimensions.height) throw new ShippingInputError("missing_package_dimensions")
   const referenceBase = truncate(
     pkg.reference ||
       pkg.id ||
@@ -489,7 +456,7 @@ function buildShipment(
     shipperReleaseFlag: false,
     totalHandlingUnitCount: handlingUnitList.length,
     totalWeight: {
-      value: totalWeight || config.defaultPackageWeightLb,
+      value: totalWeight,
       unit: "LB",
     },
     returnDescription: "Return Package",
@@ -840,8 +807,6 @@ export function createWwexSpeedshipClientFromEnv(
         width: positiveNumber(env.WWEX_DEFAULT_PACKAGE_WIDTH_IN),
         height: positiveNumber(env.WWEX_DEFAULT_PACKAGE_HEIGHT_IN),
       },
-      defaultPackageWeightLb:
-        positiveNumber(env.WWEX_DEFAULT_PACKAGE_WEIGHT_LB) || 1,
       maxPackageWeightLb:
         positiveNumber(env.WWEX_MAX_PACKAGE_WEIGHT_LB) || 40,
       insuranceRequestFlag: envBool(env, "WWEX_INSURANCE_ENABLED", false),
@@ -861,7 +826,8 @@ export function createWwexSpeedshipClientFromEnv(
 
 export function wwexRateInputFromFulfillmentData(
   serviceCode: string,
-  data: Record<string, any>
+  data: Record<string, any>,
+  estimatedPackingPlan?: ShippingPackingPlan
 ): WwexRateInput | null {
   const shippingAddress = data.shipping_address || data.shippingAddress || {}
   const postalCode = cleanPostalCode(shippingAddress.postal_code)
@@ -879,10 +845,12 @@ export function wwexRateInputFromFulfillmentData(
 
   const metadata = data.metadata || data.cart?.metadata || data.order?.metadata || {}
   return {
+    estimatedPackingPlan,
     serviceCode,
     shippingAddress,
     items: Array.isArray(data.items) ? data.items : [],
-    packages: Array.isArray(data.packages) ? data.packages : undefined,
+    // Checkout estimates never trust caller-supplied measured packages.
+    packages: estimatedPackingPlan ? undefined : Array.isArray(data.packages) ? data.packages : undefined,
     shipmentDate:
       data.shipmentDate ||
       data.shipment_date ||
@@ -896,4 +864,3 @@ export function wwexRateInputFromFulfillmentData(
     residentialDelivery: true,
   }
 }
-

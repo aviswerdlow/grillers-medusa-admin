@@ -1,3 +1,5 @@
+import { shippingLine, weightRecord } from "./__fixtures__/shipping-inputs"
+import { SHIPPING_WEIGHT_KEY } from "../shipping-weights"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -33,11 +35,13 @@ describe("shipping cost forecast", () => {
       shipping_address: { province: "va" },
       items: [
         {
+          ...shippingLine({variant:{id:"variant_fixture",metadata:{qbd_list_id:"fixture-list-id",[SHIPPING_WEIGHT_KEY]:weightRecord({physical_weight:1.1})}}}),
           unit_price: 12,
           quantity: 2,
           metadata: { pricing_mode: "per lb", estimated_weight_lb: 1.1 },
         },
         {
+          ...shippingLine({variant:{id:"variant_fixture",metadata:{qbd_list_id:"fixture-list-id",[SHIPPING_WEIGHT_KEY]:weightRecord({physical_weight:16,physical_unit:"oz"})}}}),
           unit_price: 18,
           quantity: 1,
           metadata: { pricing_mode: "per pack", estimated_weight_oz: 16 },
@@ -67,7 +71,7 @@ describe("shipping cost forecast", () => {
     const state = (address: Record<string, any>) =>
       shippingForecastInputFromFulfillmentData("GROUND", {
         shipping_address: address,
-        items: [{ unit_price: 10, quantity: 1, metadata: {} }],
+        items: [shippingLine()],
       })?.ship_state
 
     expect(state({ province_code: "us-ga" })).toBe("GA")

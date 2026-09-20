@@ -2,6 +2,9 @@ import {
   createWwexSpeedshipClientFromEnv,
   normalizeGrillersUpsServiceCode,
 } from "../wwex-speedship"
+import { wwexRateInputFromFulfillmentData } from "../wwex-speedship"
+import { createShippingPackingPlan } from "../../../lib/shipping-packing-plan"
+import { shippingLine,packingConfig } from "../../../lib/__tests__/__fixtures__/shipping-inputs"
 
 const env = {
   WWEX_AUTH_URL: "https://auth.example.test/oauth/token",
@@ -101,7 +104,7 @@ describe("WwexSpeedshipClient", () => {
         last_name: "Customer",
         phone: "2148798521",
       },
-      packages: [{ package_type: "Micro", packed_weight_lb: 5 }],
+      packages: [{ package_type: "Micro", packed_weight_lb: 5, length_in:10, width_in:11, height_in:12 }],
       shipmentDate: "2026-06-16",
     })
 
@@ -131,5 +134,29 @@ describe("WwexSpeedshipClient", () => {
   it("stays disabled until the required environment is present", () => {
     expect(createWwexSpeedshipClientFromEnv({})).toBeNull()
   })
-})
 
+  it("uses the shared plan's physical contents plus ice/tare and ignores forged checkout packages",()=>{
+    const plan=createShippingPackingPlan([shippingLine({quantity:2})],{service:"GROUND",postalCode:"30340",validatedTransit:{days:1,revision:"test"}},packingConfig());
+    const data={shipping_address:{postal_code:"30340",city:"Doraville",province:"GA"},items:[shippingLine({quantity:2})],packages:[{packed_weight_lb:1}]};
+    const input=wwexRateInputFromFulfillmentData("GROUND",data,plan)!;
+    const request=createWwexSpeedshipClientFromEnv(env)!.buildShopRequest(input);
+    expect(request.request.shipment.totalWeight).toEqual({value:9,unit:"LB"});
+    expect(request.request.shipment.handlingUnitList).toHaveLength(2);
+    expect(input.packages).toBeUndefined();
+    const measured={...input,packages:[{packed_weight_lb:14,length_in:15,width_in:14,height_in:13}]};
+    expect(createWwexSpeedshipClientFromEnv(env)!.buildShopRequest(measured).request.shipment.totalWeight).toEqual({value:14,unit:"LB"});
+    expect(plan.packages[0].grossWeightLb).toBe(4.5);
+  });
+
+  it.each([undefined,0,-1,"n/a"])("rejects missing/invalid measured gross %p instead of defaulting to one pound",weight=>{
+    const input:any={serviceCode:"GROUND",shippingAddress:{postal_code:"30340",city:"Doraville",province:"GA"},packages:[{packed_weight_lb:weight,length_in:10,width_in:10,height_in:10}]};
+    expect(()=>createWwexSpeedshipClientFromEnv(env)!.buildShopRequest(input)).toThrow();
+  });
+
+  it("rejects missing package dimensions or an absent estimate",()=>{
+    const input:any={serviceCode:"GROUND",shippingAddress:{postal_code:"30340",city:"Doraville",province:"GA"},items:[{quantity:1}]};
+    const client=createWwexSpeedshipClientFromEnv(env)!;
+    expect(()=>client.buildShopRequest(input)).toThrow();
+    expect(()=>client.buildShopRequest({...input,packages:[{packed_weight_lb:5}]})).toThrow();
+  });
+})

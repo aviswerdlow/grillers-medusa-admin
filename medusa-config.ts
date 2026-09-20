@@ -23,6 +23,7 @@ module.exports = defineConfig({
   modules: [
     {
       resolve: "@medusajs/medusa/fulfillment",
+      dependencies: ["query"],
       options: {
         providers: [
           // default provider
