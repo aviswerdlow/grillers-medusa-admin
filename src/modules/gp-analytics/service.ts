@@ -6,7 +6,7 @@ import type {
 } from "@medusajs/types"
 import { createHash, randomUUID } from "crypto"
 import { emitOpsAlert } from "../../lib/ops-alert"
-import { publicationEligibility, type DeliveryResult, type PublicationTarget } from "../../lib/order-publication"
+import { PUBLICATION_EVENTS, publicationEligibility, type DeliveryResult, type PublicationTarget } from "../../lib/order-publication"
 import { rehearsalRoute, type RehearsalOptions, type RehearsalTarget } from "../../lib/order-publication-rehearsal"
 
 type InjectedDependencies = {
@@ -588,7 +588,7 @@ class GpAnalyticsProviderService extends AbstractAnalyticsProviderService {
 
   async deliverOrderPublication(target: Exclude<PublicationTarget, "communications" | "communications_automation">, data: ProviderTrackAnalyticsEventDTO): Promise<DeliveryResult> {
     const p = data.properties || {}
-    if (!p.idempotency_key || !Number.isFinite(p.event_timestamp_ms) || !["order_completed", "order_finalized"].includes(data.event)) throw new Error("publication_transport_contract_invalid")
+    if (!p.idempotency_key || !Number.isFinite(p.event_timestamp_ms) || !Object.values(PUBLICATION_EVENTS).includes(data.event as any)) throw new Error("publication_transport_contract_invalid")
     const ineligible = publicationEligibility(target, p)
     if (ineligible) return ineligible
     const rehearsal = target === "jitsu_rehearsal" || target === "gp_analytics_rehearsal"

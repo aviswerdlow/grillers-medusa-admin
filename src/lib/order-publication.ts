@@ -3,8 +3,18 @@ import {
   orderPromiseAnalytics,
   readOriginalOrderPromise,
 } from "./order-promise";
+import {
+  LIFECYCLE_EVENTS,
+  readLifecyclePublication,
+  reconcileLifecyclePublications,
+} from "./order-publication-lifecycle";
 
-export type PublicationKind = "placed" | "finalized";
+export const PUBLICATION_EVENTS = {
+  placed: "order_completed",
+  finalized: "order_finalized",
+  ...LIFECYCLE_EVENTS,
+} as const;
+export type PublicationKind = keyof typeof PUBLICATION_EVENTS;
 export type PublicationTarget =
   | "jitsu"
   | "gp_analytics"
@@ -46,10 +56,17 @@ const cents = (value: unknown) => {
   return n;
 };
 
-export function publicationIdentity(kind: PublicationKind, orderId: string) {
-  return kind === "placed"
-    ? `order.placed:${orderId}:order_completed`
-    : `order.final_charge_succeeded:${orderId}:order_finalized`;
+export function publicationIdentity(
+  kind: PublicationKind,
+  orderId: string,
+  sourceId?: string
+) {
+  if (kind === "placed") return `order.placed:${orderId}:order_completed`;
+  if (kind === "finalized")
+    return `order.final_charge_succeeded:${orderId}:order_finalized`;
+  if (!sourceId || !/^[a-zA-Z0-9_-]{1,200}$/.test(sourceId))
+    throw new Error("publication_source_invalid");
+  return `order.lifecycle:${kind}:${orderId}:${sourceId}`;
 }
 
 /** Subscriber persists only an intent. No mutable-order fallback or network. */
@@ -61,12 +78,12 @@ export async function requestOrderPublication(
 ) {
   if (
     !/^[a-zA-Z0-9_-]{1,200}$/.test(orderId) ||
-    !["placed", "finalized"].includes(kind)
+    !Object.prototype.hasOwnProperty.call(PUBLICATION_EVENTS, kind)
   )
     throw new Error("publication_identity_invalid");
   await db("gp_order_publication")
     .insert({
-      event_id: publicationIdentity(kind, orderId),
+      event_id: publicationIdentity(kind, orderId, sourceId),
       kind,
       order_id: orderId,
       source_id: sourceId || null,
@@ -131,7 +148,18 @@ export async function reconcileOrderPublications(
     .select("f.order_id", "f.id");
   for (const f of finals)
     await requestOrderPublication(db, "finalized", f.order_id, f.id);
-  return { placements: bindings.length, finalizations: finals.length };
+  const lifecycle = await reconcileLifecyclePublications(
+    db,
+    starts,
+    (kind, orderId, sourceId) =>
+      requestOrderPublication(db, kind, orderId, sourceId),
+    limit
+  );
+  return {
+    placements: bindings.length,
+    finalizations: finals.length,
+    lifecycle,
+  };
 }
 
 export function originalPublicationProperties(original: any) {
@@ -257,6 +285,40 @@ export async function materializeOrderPublications(
               payment_evidence: "recorded_successful_final_charge",
               finalization_id: f.id,
             });
+          } else if (
+            Object.prototype.hasOwnProperty.call(LIFECYCLE_EVENTS, intent.kind)
+          ) {
+            const fact = await readLifecyclePublication(read, intent);
+            at = iso(fact.at);
+            if (
+              new Date(at) > now ||
+              new Date(at) < new Date(properties.placed_at)
+            )
+              throw new Error("publication_lifecycle_time_invalid");
+            if (
+              "currency" in fact.properties &&
+              fact.properties.currency !== properties.currency
+            )
+              throw new Error("publication_lifecycle_currency_mismatch");
+            // These facts are separate from gross placement. In particular a
+            // cancellation/delivery must not look like another order's value,
+            // and a refund must not claim all original line items were returned.
+            for (const field of [
+              "value",
+              "total",
+              "estimated_value",
+              "tax",
+              "shipping",
+              "discount",
+              "items",
+              "item_count",
+            ])
+              delete properties[field];
+            Object.assign(properties, {
+              amount_basis: "non_monetary_lifecycle_v1",
+              payment_evidence: "not_implied_by_lifecycle",
+              ...fact.properties,
+            });
           }
           Object.assign(properties, {
             idempotency_key: intent.event_id,
@@ -295,7 +357,12 @@ export async function materializeOrderPublications(
           .where({ event_id: intent.event_id })
           .update({
             attempts: intent.attempts + 1,
-            reason: "original_or_finalization_evidence_unavailable",
+            reason: Object.prototype.hasOwnProperty.call(
+              LIFECYCLE_EVENTS,
+              intent.kind
+            )
+              ? "original_or_lifecycle_evidence_unavailable"
+              : "original_or_finalization_evidence_unavailable",
             next_attempt_at: retryAt(now, intent.attempts + 1),
           });
         return "waiting";

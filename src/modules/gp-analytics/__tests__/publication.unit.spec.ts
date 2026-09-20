@@ -121,18 +121,45 @@ const testEvent = {
   ...event,
   properties: { ...event.properties, test_order: true },
 };
+it.each([
+  "order_canceled",
+  "fulfillment_created",
+  "order_shipped",
+  "order_delivered",
+  "return_created",
+  "order_refunded",
+])(
+  "delivers %s through the same classified durable transport",
+  async (name) => {
+    const service = new Service({ logger } as any, options);
+    await service.deliverOrderPublication("gp_analytics", {
+      ...event,
+      event: name,
+    });
+    const payload = JSON.parse(
+      (global.fetch as jest.Mock).mock.calls[0][1].body
+    );
+    expect(payload.event).toBe(name);
+    expect(payload.properties.test_order).toBe(false);
+    expect(
+      await service.deliverOrderPublication("jitsu", {
+        ...testEvent,
+        event: name,
+      })
+    ).toEqual({ status: "excluded", reason: "test_order" });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  }
+);
 it.each(["jitsu_rehearsal", "gp_analytics_rehearsal"] as const)(
   "keeps test flags and stable identity through %s with no production fallback",
   async (target) => {
-    global.fetch = jest
-      .fn()
-      .mockResolvedValue({
-        ok: true,
-        headers: new Headers({
-          "x-gp-analytics-environment": "rehearsal",
-          "x-gp-rehearsal-id": "launch-test",
-        }),
-      }) as any;
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      headers: new Headers({
+        "x-gp-analytics-environment": "rehearsal",
+        "x-gp-rehearsal-id": "launch-test",
+      }),
+    }) as any;
     const service = new Service({ logger } as any, rehearsalOptions);
     expect(await service.deliverOrderPublication(target, testEvent)).toEqual({
       status: "accepted",
@@ -199,12 +226,10 @@ it("holds absent, same-origin, same-key and malformed rehearsal routes without s
   expect(global.fetch).not.toHaveBeenCalled();
 });
 it("does not accept a 2xx from a receiver with the wrong rehearsal identity", async () => {
-  global.fetch = jest
-    .fn()
-    .mockResolvedValue({
-      ok: true,
-      headers: new Headers({ "x-gp-analytics-environment": "production" }),
-    }) as any;
+  global.fetch = jest.fn().mockResolvedValue({
+    ok: true,
+    headers: new Headers({ "x-gp-analytics-environment": "production" }),
+  }) as any;
   await expect(
     new Service({ logger } as any, rehearsalOptions).deliverOrderPublication(
       "gp_analytics_rehearsal",

@@ -2,7 +2,11 @@ import { recordCommunicationEvent } from "./communications/core";
 import { syncCartLifecycleFromEvent } from "./communications/cart-lifecycle";
 import { attributeOrderFromEvent } from "./communications/attribution";
 import { evaluateFlowsForEvent } from "./communications/flows";
-import type { DeliveryResult } from "./order-publication";
+import {
+  PUBLICATION_EVENTS,
+  type PublicationKind,
+  type DeliveryResult,
+} from "./order-publication";
 
 /** Locks the live lease while SQL consumers commit. A stale worker may not
  * record a receipt or increment counters after another owner takes over. */
@@ -22,6 +26,14 @@ export async function deliverPublicationToCommunications(
       .first();
     if (!lease) throw new Error("publication_lease_lost");
     const p = claim.properties;
+    // Preserve existing communications trigger names without creating a second
+    // event or transport. Analytics uses order_shipped/order_delivered.
+    const eventName =
+      claim.kind === "shipped"
+        ? "shipment_created"
+        : claim.kind === "delivered"
+        ? "delivery_created"
+        : PUBLICATION_EVENTS[claim.kind as PublicationKind];
     if (claim.target === "communications_automation") {
       const recorded = await trx("gp_order_publication_delivery")
         .where({
@@ -50,8 +62,7 @@ export async function deliverPublicationToCommunications(
       trx,
       {
         event_id: claim.event_id,
-        event_name:
-          claim.kind === "placed" ? "order_completed" : "order_finalized",
+        event_name: eventName,
         source: "medusa-server",
         medusa_customer_id: claim.actor_id,
         order_id: claim.order_id,
@@ -62,11 +73,7 @@ export async function deliverPublicationToCommunications(
       },
       { deferSideEffects: true }
     );
-    if (
-      event.order_id !== claim.order_id ||
-      event.event_name !==
-        (claim.kind === "placed" ? "order_completed" : "order_finalized")
-    )
+    if (event.order_id !== claim.order_id || event.event_name !== eventName)
       throw new Error("publication_communications_identity_conflict");
     await syncCartLifecycleFromEvent(trx, event);
     if (claim.kind === "placed" && p.test_order === false && event.profile_id) {

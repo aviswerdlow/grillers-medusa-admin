@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { Migration20260920235000 } from "../../src/modules/gp-communications/migrations/Migration20260920235000";
 import { Migration20260920223000 } from "../../src/modules/gp-communications/migrations/Migration20260920223000";
 import { pinRehearsalRoute } from "../../src/lib/order-publication-rehearsal";
 import { Migration20260920174500 } from "../../src/modules/gp-catch-weight/migrations/Migration20260920174500";
@@ -67,11 +68,22 @@ beforeAll(async () => {
     "create table cart (id text primary key, customer_id text, email text, metadata jsonb, completed_at timestamptz, deleted_at timestamptz, updated_at timestamptz)"
   );
   await db.raw(
-    'create table "order" (id text primary key, customer_id text, metadata jsonb, total numeric, created_at timestamptz, deleted_at timestamptz)'
+    'create table "order" (id text primary key, customer_id text, metadata jsonb, total numeric, created_at timestamptz, deleted_at timestamptz, status text, canceled_at timestamptz)'
   );
   await db.raw(
     "create table order_cart (order_id text primary key, cart_id text unique, deleted_at timestamptz)"
   );
+  for (const sql of [
+    "create table fulfillment (id text primary key, created_at timestamptz, shipped_at timestamptz, delivered_at timestamptz, deleted_at timestamptz)",
+    "create table order_fulfillment (id text primary key, order_id text, fulfillment_id text, deleted_at timestamptz)",
+    'create table "return" (id text primary key, order_id text, requested_at timestamptz, deleted_at timestamptz)',
+    "create table payment (id text primary key, payment_collection_id text, currency_code text, deleted_at timestamptz)",
+    "create table order_payment_collection (id text primary key, order_id text, payment_collection_id text, deleted_at timestamptz)",
+    "create table refund (id text primary key, payment_id text, amount numeric, deleted_at timestamptz)",
+    "create table order_transaction (id text primary key, order_id text, reference text, reference_id text, amount numeric, currency_code text, created_at timestamptz, deleted_at timestamptz)",
+    "create table gp_staff_refund_request (id text primary key, order_id text, payment_id text, status text, provider_refund_id text, response jsonb)",
+  ])
+    await db.raw(sql);
   for (const migration of [
     Migration20260920174500,
     Migration20260531183000,
@@ -80,6 +92,7 @@ beforeAll(async () => {
     Migration20260526133000,
     Migration20260920214500,
     Migration20260920223000,
+    Migration20260920235000,
   ]) {
     const sql: string[] = [];
     await migration.prototype.up.call({
@@ -188,6 +201,287 @@ async function ready() {
   await materializeOrderPublications(db, starts, now);
 }
 const accepted = async () => ({ status: "accepted" as const });
+
+const actionTime = () => new Date(promiseNow.getTime() + 120_000);
+async function refundFixture(
+  order: string,
+  id: string,
+  value = 12.5,
+  transaction = true
+) {
+  await db("payment")
+    .insert({
+      id: `pay_${order}`,
+      payment_collection_id: `pc_${order}`,
+      currency_code: "usd",
+    })
+    .onConflict("id")
+    .ignore();
+  await db("order_payment_collection")
+    .insert({
+      id: `link_${order}`,
+      order_id: order,
+      payment_collection_id: `pc_${order}`,
+    })
+    .onConflict("id")
+    .ignore();
+  await db("refund").insert({ id, payment_id: `pay_${order}`, amount: value });
+  if (transaction)
+    await db("order_transaction").insert({
+      id: `tx_${id}`,
+      order_id: order,
+      reference: "refund",
+      reference_id: id,
+      amount: -value,
+      currency_code: "usd",
+      created_at: actionTime(),
+    });
+}
+async function directRefundFixture(order: string, status: string) {
+  const id = `re_${order}`,
+    paymentId = `final_charge:pi_${order}`;
+  await db("gp_staff_refund_request").insert({
+    id: `request_${order}`,
+    order_id: order,
+    payment_id: paymentId,
+    status: "succeeded",
+    provider_refund_id: id,
+    response: {
+      payment: {
+        id: paymentId,
+        currency_code: "usd",
+        refunds: [
+          {
+            id,
+            amount: 12.5,
+            data: {
+              id,
+              status,
+              amount: 1250,
+              currency: "usd",
+              payment_intent: `pi_${order}`,
+            },
+          },
+        ],
+      },
+    },
+  });
+  await db("order_transaction").insert({
+    id: `tx_${id}`,
+    order_id: order,
+    reference: "refund",
+    reference_id: id,
+    amount: -12.5,
+    currency_code: "usd",
+    created_at: actionTime(),
+  });
+}
+
+it("recovers lifecycle facts without transient events and does not equate completed with delivered", async () => {
+  const x = await bound();
+  await db("order").where({ id: x.order }).update({ status: "completed" });
+  await ready();
+  expect(await db("gp_order_publication")).toHaveLength(1);
+  await db("fulfillment").insert({ id: "ful_1", created_at: actionTime() });
+  await ready(); // A fulfillment without its native order link is not evidence.
+  expect(await db("gp_order_publication")).toHaveLength(1);
+  await db("order_fulfillment").insert({
+    id: "link_ful",
+    order_id: x.order,
+    fulfillment_id: "ful_1",
+  });
+  await ready();
+  expect(
+    (
+      await db("gp_order_publication")
+        .where({ kind: "fulfillment_created" })
+        .first()
+    ).properties
+  ).toMatchObject({ fulfillment_id: "ful_1", lifecycle_scope: "fulfillment" });
+  expect(
+    await db("gp_order_publication").whereIn("kind", ["shipped", "delivered"])
+  ).toHaveLength(0);
+  await db("fulfillment")
+    .where({ id: "ful_1" })
+    .update({ shipped_at: actionTime(), delivered_at: actionTime() });
+  await db("order")
+    .where({ id: x.order })
+    .update({ status: "canceled", canceled_at: actionTime(), total: 8888 });
+  await db("return").insert({
+    id: "return_1",
+    order_id: x.order,
+    requested_at: actionTime(),
+  });
+  await Promise.all([
+    reconcileOrderPublications(db, starts),
+    reconcileOrderPublications(db, starts),
+  ]);
+  await materializeOrderPublications(db, starts, now);
+  const rows = await db("gp_order_publication");
+  expect(rows).toHaveLength(6);
+  for (const row of rows.filter((r: any) => r.kind !== "placed")) {
+    expect(row.state).toBe("ready");
+    expect(row.properties).toMatchObject({
+      test_order: false,
+      analytics_consent: true,
+      placement_total: 91.25,
+      event_timestamp_ms: actionTime().getTime(),
+    });
+    expect(row.properties).not.toHaveProperty("value");
+    expect(row.properties).not.toHaveProperty("tax");
+  }
+  expect(rows.find((r: any) => r.kind === "placed").properties.value).toBe(
+    91.25
+  );
+});
+
+it("keeps equal partial refunds distinct, waits for native transactions and preserves original test context", async () => {
+  const x = await bound("test", 91.25, { test_order: true });
+  await refundFixture(x.order, "ref_1", 12.5, false);
+  await ready();
+  expect(
+    await db("gp_order_publication").where({ kind: "refunded" })
+  ).toHaveLength(0);
+  await db("order_transaction").insert({
+    id: "tx_ref_1",
+    order_id: x.order,
+    reference: "refund",
+    reference_id: "ref_1",
+    amount: -12.5,
+    currency_code: "usd",
+    created_at: actionTime(),
+  });
+  await refundFixture(x.order, "ref_2");
+  await ready();
+  await ready();
+  const refunds = await db("gp_order_publication")
+    .where({ kind: "refunded" })
+    .orderBy("source_id");
+  expect(refunds).toHaveLength(2);
+  expect(new Set(refunds.map((r: any) => r.event_id)).size).toBe(2);
+  for (const row of refunds) {
+    expect(row.properties).toMatchObject({
+      value: 12.5,
+      refund_status: "recorded",
+      refund_provider_status: "unverified",
+      test_order: true,
+      analytics_consent: true,
+      amount_basis: "recorded_refund_v1",
+    });
+    expect(row.properties).not.toHaveProperty("items");
+    expect(
+      await db("gp_order_publication_delivery").where({
+        event_id: row.event_id,
+      })
+    ).toHaveLength(6);
+  }
+  await deliverOrderPublications(db, accepted, now, 100);
+  for (const row of refunds) {
+    expect(
+      (
+        await db("gp_order_publication_delivery")
+          .where({ event_id: row.event_id, target: "jitsu" })
+          .first()
+      ).reason
+    ).toBe("test_order");
+    expect(
+      (
+        await db("gp_order_publication_delivery")
+          .where({ event_id: row.event_id, target: "jitsu_rehearsal" })
+          .first()
+      ).status
+    ).toBe("accepted");
+  }
+});
+
+it("holds a conflicting refund amount and recovers only after the native evidence agrees", async () => {
+  const x = await bound();
+  await refundFixture(x.order, "ref_1");
+  await db("order_transaction").update({ amount: -99 });
+  await ready();
+  const row = await db("gp_order_publication")
+    .where({ kind: "refunded" })
+    .first();
+  expect(row.state).toBe("waiting");
+  expect(row.reason).toBe("original_or_lifecycle_evidence_unavailable");
+  expect(
+    await db("gp_order_publication_delivery").where({ event_id: row.event_id })
+  ).toHaveLength(0);
+  await db("order_transaction").update({ amount: -12.5 });
+  await materializeOrderPublications(db, starts, later());
+  expect(
+    (await db("gp_order_publication").where({ event_id: row.event_id }).first())
+      .properties.value
+  ).toBe(12.5);
+});
+
+it.each(["pending", "succeeded"])(
+  "preserves direct-provider refund status %s without claiming bank settlement",
+  async (status) => {
+    const x = await bound();
+    await directRefundFixture(x.order, status);
+    await ready();
+    const row = await db("gp_order_publication")
+      .where({ kind: "refunded" })
+      .first();
+    expect(row.state).toBe("ready");
+    expect(row.properties).toMatchObject({
+      value: 12.5,
+      refund_provider_status: status,
+      payment_evidence: "recorded_refund_not_bank_settlement",
+    });
+    expect(JSON.stringify(row.properties)).not.toContain(`pi_${x.order}`);
+  }
+);
+
+it.each(["failed", "canceled"])(
+  "does not publish a completed staff request when its provider receipt is %s",
+  async (status) => {
+    const x = await bound();
+    await directRefundFixture(x.order, status);
+    await ready();
+    expect(
+      (await db("gp_order_publication").where({ kind: "refunded" }).first())
+        .state
+    ).toBe("waiting");
+  }
+);
+
+it("does not discover pre-epoch lifecycle facts or publish a return without a confirmed request", async () => {
+  const x = await bound();
+  await refundFixture(x.order, "ref_1");
+  await db("return").insert({ id: "return_1", order_id: x.order });
+  await reconcileOrderPublications(db, later());
+  expect(await db("gp_order_publication")).toHaveLength(0);
+  await ready();
+  expect(
+    await db("gp_order_publication").where({ kind: "return_requested" })
+  ).toHaveLength(0);
+});
+
+it("allows separate fulfillment sources while retaining the original event uniqueness after migration", async () => {
+  const x = await bound();
+  await requestOrderPublication(db, "shipped", x.order, "ful_1");
+  await requestOrderPublication(db, "shipped", x.order, "ful_2");
+  await requestOrderPublication(db, "placed", x.order);
+  await expect(
+    db("gp_order_publication").insert({
+      event_id: "different_placement",
+      order_id: x.order,
+      kind: "placed",
+    })
+  ).rejects.toThrow();
+  await expect(
+    db("gp_order_publication").insert({
+      event_id: "missing_source",
+      order_id: x.order,
+      kind: "shipped",
+    })
+  ).rejects.toThrow();
+  expect(
+    await db("gp_order_publication").where({ kind: "shipped" })
+  ).toHaveLength(2);
+});
 
 it("retains an event-before-binding without emitting, then publishes once after native success", async () => {
   const x = await prepared();
@@ -369,6 +663,49 @@ it.each([
     );
   }
 );
+it("records lifecycle communications once with compatible triggers and unchanged gross purchase counters", async () => {
+  const x = await bound();
+  await refundFixture(x.order, "ref_1");
+  await refundFixture(x.order, "ref_2");
+  await db("fulfillment").insert({
+    id: "ful_1",
+    created_at: actionTime(),
+    shipped_at: actionTime(),
+    delivered_at: actionTime(),
+  });
+  await db("order_fulfillment").insert({
+    id: "link_ful",
+    order_id: x.order,
+    fulfillment_id: "ful_1",
+  });
+  await db("order")
+    .where({ id: x.order })
+    .update({ status: "canceled", canceled_at: actionTime() });
+  await ready();
+  const send = (claim: any) =>
+    claim.target === "communications"
+      ? deliverPublicationToCommunications(db, claim)
+      : accepted();
+  await deliverOrderPublications(db, send, now, 100);
+  await deliverOrderPublications(db, send, later(), 100);
+  const events = await db("gp_communication_event");
+  expect(events).toHaveLength(7);
+  expect(
+    events.filter((e: any) => e.event_name === "order_refunded")
+  ).toHaveLength(2);
+  expect(events.map((e: any) => e.event_name)).toEqual(
+    expect.arrayContaining([
+      "shipment_created",
+      "delivery_created",
+      "order_canceled",
+    ])
+  );
+  const profile = await db("gp_customer_profile").first();
+  expect(Number(profile.total_orders)).toBe(1);
+  expect(Number(profile.total_revenue)).toBe(91.25);
+  expect(await db("gp_order_publication_profile")).toHaveLength(1);
+});
+
 it("records communications, original profile totals and recovery atomically on crash/replay", async () => {
   const x = await bound();
   await ready();

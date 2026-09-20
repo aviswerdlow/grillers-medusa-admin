@@ -48,13 +48,14 @@ describe("communications commerce event subscriber alerts", () => {
     mockRecordCommunicationEvent.mockRejectedValueOnce(
       new Error("insert failed for shopper@example.com")
     )
-    const { container, logger } = makeContainer()
+    const { container, logger, query } = makeContainer()
+    query.graph.mockResolvedValue({ data: [{ id: "cus_123", email: "shopper@example.com" }] })
 
     await communicationsCommerceEvents({
       event: {
-        name: "delivery.created",
+        name: "customer.updated",
         data: {
-          id: "delivery_123",
+          id: "cus_123",
           cart_id: "cart_123",
           customer_id: "cus_123",
           email: "shopper@example.com",
@@ -64,19 +65,19 @@ describe("communications commerce event subscriber alerts", () => {
     } as any)
 
     expect(logger.warn).toHaveBeenCalledWith(
-      "[communications] failed to record commerce event delivery.created: insert failed for [redacted-email]"
+      "[communications] failed to record commerce event customer.updated: insert failed for [redacted-email]"
     )
     expect(mockEmitOpsAlert).toHaveBeenCalledWith(
       expect.objectContaining({
         alertKind: "communications_commerce_event_record_failed",
         severity: "warn",
-        title: "Communications commerce event failed for delivery.created",
+        title: "Communications commerce event failed for customer.updated",
         path: "src/subscribers/communications-commerce-events.ts",
         source: "medusa-server",
         logger,
         meta: expect.objectContaining({
-          medusa_event_name: "delivery.created",
-          source_event_id: "delivery_123",
+          medusa_event_name: "customer.updated",
+          source_event_id: "cus_123",
           order_id: null,
           cart_id: "cart_123",
           medusa_customer_id: "cus_123",

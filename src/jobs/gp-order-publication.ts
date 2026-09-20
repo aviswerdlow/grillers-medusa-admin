@@ -6,6 +6,8 @@ import {
   materializeOrderPublications,
   publicationEpoch,
   reconcileOrderPublications,
+  PUBLICATION_EVENTS,
+  type PublicationKind,
 } from "../lib/order-publication";
 import { deliverPublicationToCommunications } from "../lib/order-publication-communications";
 import { emitOpsAlert } from "../lib/ops-alert";
@@ -66,8 +68,7 @@ export default async function gpOrderPublication(container: MedusaContainer) {
             return { status: "held", reason: "rehearsal_route_changed" };
         }
         return analytics.deliverOrderPublication(claim.target, {
-          event:
-            claim.kind === "placed" ? "order_completed" : "order_finalized",
+          event: PUBLICATION_EVENTS[claim.kind as PublicationKind],
           actor_id: claim.actor_id,
           properties: claim.properties,
         });

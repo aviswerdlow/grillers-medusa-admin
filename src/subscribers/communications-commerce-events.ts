@@ -105,9 +105,9 @@ export default async function communicationsCommerceEvents({
   event: { name, data },
   container,
 }: SubscriberArgs<EventData>) {
-  // One owner for purchase/finalization: the durable order publication journal.
+  // One owner for all order lifecycle events: the durable publication journal.
   // Also guard direct/in-flight invocations from an older subscriber registry.
-  if (name === "order.placed" || name === "order.final_charge_succeeded") return
+  if (name !== "customer.created" && name !== "customer.updated") return
   const logger = container.resolve("logger")
   const db = container.resolve(ContainerRegistrationKeys.PG_CONNECTION)
 
@@ -119,8 +119,6 @@ export default async function communicationsCommerceEvents({
     let email = data.email
     let medusaCustomerId = data.customer_id
     let orderId = data.order_id
-
-    if (name === "order.canceled") orderId = data.id
 
     if (orderId) {
       order = await fetchOrderContext(container, orderId)
@@ -160,7 +158,7 @@ export default async function communicationsCommerceEvents({
 
     const orderMetadata = metadataObject(order?.metadata)
     await recordCommunicationEvent(db, {
-      event_name: name === "payment.refunded" ? "order_refunded" : eventName,
+      event_name: eventName,
       event_id: `${name}:${data.id}:${data.order_id || ""}:${data.amount || ""}`,
       source: "medusa-server",
       profile_id: customer?.id || null,
@@ -200,11 +198,6 @@ export default async function communicationsCommerceEvents({
 
 export const config: SubscriberConfig = {
   event: [
-    "order.canceled",
-    "order.fulfilled",
-    "shipment.created",
-    "delivery.created",
-    "payment.refunded",
     "customer.created",
     "customer.updated",
   ],

@@ -61,14 +61,19 @@ it("retains subscriber retry on database failure without exposing raw errors", a
     "secret@example.invalid"
   );
 });
-it.each(["order.placed", "order.final_charge_succeeded"])(
-  "disables the old communications purchase producer for %s",
-  async (name) => {
-    expect(commsConfig.event).not.toContain(name);
-    await communicationsHandler({
-      event: { name, data: { id: "order_1" } },
-      container: { resolve },
-    } as any);
-    expect(resolve).not.toHaveBeenCalled();
-  }
-);
+it.each([
+  "order.placed",
+  "order.final_charge_succeeded",
+  "order.canceled",
+  "order.fulfilled",
+  "shipment.created",
+  "delivery.created",
+  "payment.refunded",
+])("disables the old communications order producer for %s", async (name) => {
+  expect(commsConfig.event).not.toContain(name);
+  await communicationsHandler({
+    event: { name, data: { id: "order_1" } },
+    container: { resolve },
+  } as any);
+  expect(resolve).not.toHaveBeenCalled();
+});
