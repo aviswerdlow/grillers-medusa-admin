@@ -60,7 +60,7 @@ export async function readOrderPromisePage(db: any, input: unknown, now = new Da
       throw new OrderPromiseError("original_read_window_changed", 409);
     if (query.offset > manifest.length)
       throw new OrderPromiseError("invalid_original_read_offset", 400);
-    const orders = [];
+    const orders: ReturnType<typeof orderPromiseAnalytics>[] = [];
     for (const item of manifest.slice(query.offset, query.offset + query.limit)) {
       const original = await readOriginalOrderPromise(trx, item.id);
       const projected = orderPromiseAnalytics(original);
