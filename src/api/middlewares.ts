@@ -18,6 +18,7 @@ import {
 } from "../modules/fulfillment/serviceability"
 import { emitOpsAlert, type OpsAlertSeverity } from "../lib/ops-alert"
 import { opsErrorHandler } from "./middlewares/ops-error-handler"
+import { protectCustomerStaffAuthority } from "./middlewares/customer-staff-authority"
 import {
   rawStripeWebhookBody,
   stripeSignatureHeader,
@@ -630,6 +631,16 @@ export default defineMiddlewares({
     { matcher: "/store/grillers/checkout/place-order", method: ["POST"], middlewares: [guardCompletedCart] },
     { matcher: "/store/gp-inventory/availability", method: ["POST"], middlewares: [guardInventoryVariants] },
     { matcher: "/store/gp-inventory/resolution", method: ["POST"], middlewares: [guardInventoryResolution] },
+    {
+      matcher: "/store/customers",
+      method: ["POST"],
+      middlewares: [protectCustomerStaffAuthority],
+    },
+    {
+      matcher: "/store/customers/me",
+      method: ["POST"],
+      middlewares: [protectCustomerStaffAuthority],
+    },
     {
       matcher: "/store/shipping-options",
       method: ["GET"],

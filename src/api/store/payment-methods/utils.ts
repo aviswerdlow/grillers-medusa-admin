@@ -1,6 +1,7 @@
 import type { MedusaRequest } from "@medusajs/framework/http";
 import { Modules } from "@medusajs/framework/utils";
 import { emitOpsAlert } from "../../../lib/ops-alert";
+import { canManageCustomerPaymentMethods } from "../../../lib/staff-access-policy";
 
 export const STRIPE_PROVIDER_ID = "pp_stripe_stripe";
 export const DEFAULT_PAYMENT_METHOD_METADATA_KEY = "default_payment_method_id";
@@ -22,87 +23,12 @@ type StoreCustomerWithAccountHolders = {
   }>;
 };
 
-const STAFF_TRUE_VALUES = new Set([
-  "1",
-  "true",
-  "yes",
-  "y",
-  "staff",
-  "admin",
-  "ops",
-  "operator",
-  "customer_service",
-]);
-
-const STAFF_ROLES = new Set([
-  "staff",
-  "office",
-  "picker",
-  "packer",
-  "manager",
-  "admin",
-  "ops",
-  "operator",
-  "customer_service",
-  "customer-service",
-  "phone_orders",
-  "phone-orders",
-  "super_admin",
-  "super-admin",
-  "owner",
-]);
-
-const BOOTSTRAP_SUPER_ADMIN_EMAILS = new Set([
-  "aviswerdlow@gmail.com",
-  "peterswerdlow@gmail.com",
-  "peter@grillerspride.com",
-]);
+export class PaymentMethodAccessDenied extends Error {}
 
 function normalizedHeaderValue(req: MedusaRequest, name: string) {
   const value = req.headers?.[name] || req.headers?.[name.toLowerCase()];
   if (Array.isArray(value)) return String(value[0] || "").trim();
   return String(value || "").trim();
-}
-
-function normalizedEmail(email: unknown) {
-  return String(email || "")
-    .trim()
-    .toLowerCase();
-}
-
-function truthyStaffValue(value: unknown) {
-  if (value === true) return true;
-  if (typeof value === "number") return value === 1;
-  if (typeof value !== "string") return false;
-  return STAFF_TRUE_VALUES.has(value.trim().toLowerCase());
-}
-
-function isStaffCustomer(customer: StoreCustomerWithAccountHolders | null) {
-  if (!customer) return false;
-  if (BOOTSTRAP_SUPER_ADMIN_EMAILS.has(normalizedEmail(customer.email))) {
-    return true;
-  }
-
-  const metadata = customer.metadata || {};
-  const role = String(
-    metadata.gp_staff_role ||
-      metadata.staff_role ||
-      metadata.role ||
-      metadata.account_role ||
-      "",
-  )
-    .trim()
-    .toLowerCase();
-
-  if (STAFF_ROLES.has(role)) return true;
-
-  return [
-    metadata.is_staff,
-    metadata.staff,
-    metadata.gp_staff,
-    metadata.staff_access,
-    metadata.phone_order_staff,
-  ].some(truthyStaffValue);
 }
 
 export function jsonError(
@@ -165,6 +91,10 @@ export function handleRouteError(
   error: unknown,
   fallbackMessage: string,
 ) {
+  if (error instanceof PaymentMethodAccessDenied) {
+    jsonError(res, 403, error.message);
+    return;
+  }
   const logger = req.scope.resolve("logger") as {
     error: (message: string) => void;
     warn?: (message: string) => void;
@@ -228,9 +158,9 @@ export async function getPaymentContextCustomer(req: MedusaRequest) {
     };
   }
 
-  if (!authenticatedCustomer || !isStaffCustomer(authenticatedCustomer)) {
-    throw new Error(
-      "Staff access required for customer-context payment methods.",
+  if (!canManageCustomerPaymentMethods(authenticatedCustomer)) {
+    throw new PaymentMethodAccessDenied(
+      "Staff access required: office permission is needed for customer-context payment methods.",
     );
   }
 
