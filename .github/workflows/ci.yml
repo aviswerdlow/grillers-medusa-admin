@@ -12,6 +12,17 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: gp_catalog_test
+          POSTGRES_PASSWORD: fixture
+          POSTGRES_DB: gp_catalog
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U gp_catalog_test -d gp_catalog"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - name: Mark start
         run: echo "CI_STARTED_AT_MS=$(date +%s000)" >> "$GITHUB_ENV"
@@ -23,6 +34,10 @@ jobs:
       - run: yarn install --frozen-lockfile
       - name: Unit tests
         run: yarn test:unit
+      - name: Public catalog database and guard tests
+        env:
+          CATALOG_TEST_DATABASE_URL: postgres://gp_catalog_test:fixture@localhost:5432/gp_catalog
+        run: yarn test:catalog
       - name: TypeScript
         run: npx tsc --noEmit
       - name: Emit ops.ci
