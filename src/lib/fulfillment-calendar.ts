@@ -138,6 +138,8 @@ export type CalendarRequest = {
   service: string;
   postalCode: string;
   routeId?: string;
+  countryCode?: string;
+  province?: string;
 };
 export type CalendarChoice = {
   arrivalDate: string;

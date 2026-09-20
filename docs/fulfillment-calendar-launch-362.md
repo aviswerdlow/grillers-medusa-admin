@@ -91,11 +91,22 @@ approve a route in another time zone without an explicit correct customer promis
   announce errors, discard late responses, require explicit confirmation and check
   again before card setup/order submission. Regional locations with no future
   choice show an empty state. The plant recovery shortcut no longer invents today.
-- Staff: phone-order draft creation currently exposes free-form dates and prepares
-  Stripe before the new calendar can be chosen. Split draft creation, calendar
-  selection and payment preparation; reuse signed staff headers and the new picker.
-  Validate again immediately before any card confirmation. Do not remove #318/#319
-  authority or #313 final-charge controls to make the flow pass.
+- Staff: frontend PR 53 separates draft creation, signed calendar selection and
+  payment/link preparation. It rechecks actual date, inventory and actor before
+  payment setup, immediately before card confirmation and before native completion.
+  Free-form dates are refused; changed draft inputs discard the old payment form.
+  Inventory exception receipts are renewed for the selected date only after an
+  explicit staff review. Completed-cart replay does not recheck consumed inventory.
+- Integrate #318/#319 backend PR 32 commit `92717bd` alongside this candidate. Its
+  exact calendar quote endpoint retains staff identity checks but does not demand
+  payment-ready ATP before a date can be chosen. All actual payment/completion
+  endpoints retain ATP/override checks. Do not apply a broad checkout bypass or
+  remove #313 final-charge protection. The two backend branches are not merged here.
+- Regional routing reads country/state from the actual cart, normalizes US state
+  names/codes and offers only active stops in that state. Cross-state/non-US
+  requests fail before a signed choice; changing address invalidates acceptance.
+  The optional `regionalLocations` list contains id/city/state, never an inferred
+  operating date. Empty and past-only schedules remain unavailable.
 - Staff post-order changes: preserve original accepted promise, validate a proposed
   replacement against the current operating source and record the exception/approval
   history. #368 owns durable operating exceptions and downstream projections.
@@ -110,8 +121,9 @@ approve a route in another time zone without an explicit correct customer promis
 
 ## Smallest remaining acceptance set
 
-1. Complete staff entry/override paths and the ISO consumer audit. Add focused tests
-   for approved staff authority, changed/expired calendar and pre-payment rejection.
+1. Complete staff post-order amendments and the ISO consumer audit. Staff entry
+   source fixtures now cover authority, changed/expired dates and pre-charge refusal;
+   real native workflow and provider acceptance remain required.
 2. Review paired CMS/backend/frontend exact-head CI. Do not rerun an equivalent full
    suite locally. Unit fixtures cover calendar/DST/cutoffs, source pagination,
    incomplete policy, signed revisions, changed cart, carrier cache/late response,

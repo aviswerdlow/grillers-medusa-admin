@@ -186,6 +186,8 @@ test.each(["PICKUP", "ATLANTA_DELIVERY", "SCHEDULED_DELIVERY"])(
     const h = harness(service);
     if (service === "ATLANTA_DELIVERY")
       h.cart.shipping_address.postal_code = "30340";
+    if (service === "SCHEDULED_DELIVERY")
+      h.cart.shipping_address.province = "SC";
     const r = await select(
       h,
       service === "SCHEDULED_DELIVERY" ? { route_id: "approved-route" } : {},
@@ -193,6 +195,68 @@ test.each(["PICKUP", "ATLANTA_DELIVERY", "SCHEDULED_DELIVERY"])(
     expect(r.summary.transit).toBeNull();
     await prepareCalendarAcceptance(h.scope, h.cart.id);
     await validateCalendarAcceptance(h.scope, clone(h.cart));
+  },
+);
+test.each([
+  {
+    country_code: "us",
+    province: "NY",
+    code: "calendar_destination_unavailable",
+  },
+  {
+    country_code: "ca",
+    province: "SC",
+    code: "calendar_destination_unavailable",
+  },
+  { country_code: "us", province: "", code: "calendar_address_required" },
+])(
+  "regional requests reject an ineligible actual cart address: %j",
+  async ({ code, ...address }) => {
+    const h = harness("SCHEDULED_DELIVERY");
+    Object.assign(h.cart.shipping_address, address);
+    for (const action of ["list", "select"])
+      await expect(
+        fulfillmentCalendarAction(
+          h.scope,
+          {
+            action,
+            cart_id: h.cart.id,
+            route_id: "approved-route",
+            shipping_option_id: "so_fixture",
+            arrival_date: "2026-10-08",
+          },
+          env,
+          () => now,
+        ),
+      ).rejects.toMatchObject({ code });
+    expect(h.module.updateCarts).not.toHaveBeenCalled();
+  },
+);
+test.each(["SC", "sc", "South Carolina", "us-sc"])(
+  "regional routes use the actual normalized state %s",
+  async (province) => {
+    const h = harness("SCHEDULED_DELIVERY");
+    h.cart.shipping_address.province = province;
+    const page: any = await fulfillmentCalendarAction(
+      h.scope,
+      {
+        action: "list",
+        cart_id: h.cart.id,
+        shipping_option_id: "so_fixture",
+      },
+      env,
+      () => now,
+    );
+    expect(page.regionalLocations).toEqual([
+      { id: "approved-route", city: "Synthetic future route", state: "SC" },
+    ]);
+    expect(page.calendar.choices).toEqual([]); // A route still requires an explicit choice.
+    await select(h, { route_id: "approved-route" });
+    h.cart.shipping_address.province = "NY";
+    await expect(
+      prepareCalendarAcceptance(h.scope, h.cart.id),
+    ).rejects.toBeInstanceOf(FulfillmentCalendarError);
+    expect(h.module.updateCarts).not.toHaveBeenCalled();
   },
 );
 test("native completion rejects direct date metadata before preparation or payment can continue", async () => {
@@ -237,17 +301,34 @@ test("completed cart replay does not read or rewrite the old accepted promise", 
 });
 test("a revised transit fallback invalidates a displayed context even when its arrival date still exists", async () => {
   const h = harness();
-  const displayed: any = await fulfillmentCalendarAction(h.scope, {
-    action: "list", cart_id: h.cart.id, shipping_option_id: "so_fixture",
-  }, env, () => now);
+  const displayed: any = await fulfillmentCalendarAction(
+    h.scope,
+    {
+      action: "list",
+      cart_id: h.cart.id,
+      shipping_option_id: "so_fixture",
+    },
+    env,
+    () => now,
+  );
   const changed = source();
   changed.transitRules[0].BusinessDays = 2;
   changed.transitRules[0].Revision = "updated-transit";
   (loadCalendarSource as jest.Mock).mockResolvedValue(changed);
-  await expect(fulfillmentCalendarAction(h.scope, {
-    action: "select", cart_id: h.cart.id, shipping_option_id: "so_fixture",
-    arrival_date: "2026-10-08", context_revision: displayed.contextRevision,
-  }, env, () => now)).rejects.toMatchObject({ code: "calendar_context_changed" });
+  await expect(
+    fulfillmentCalendarAction(
+      h.scope,
+      {
+        action: "select",
+        cart_id: h.cart.id,
+        shipping_option_id: "so_fixture",
+        arrival_date: "2026-10-08",
+        context_revision: displayed.contextRevision,
+      },
+      env,
+      () => now,
+    ),
+  ).rejects.toMatchObject({ code: "calendar_context_changed" });
 });
 test("carrier date change returns an explicit replacement requiring another customer choice", async () => {
   const h = harness();

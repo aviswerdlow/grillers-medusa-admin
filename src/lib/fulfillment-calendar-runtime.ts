@@ -34,6 +34,7 @@ import { carrierCalendarTransit } from "./fulfillment-calendar-carrier";
 import { getPackagingConfig } from "./packaging-cost-strapi";
 import { loadShippingCatalogLines } from "./shipping-catalog-inputs";
 import { createShippingPackingPlan } from "./shipping-packing-plan";
+import { US_STATES } from "./gp-customer-create";
 
 const fields = [
   "id",
@@ -114,17 +115,32 @@ async function context(
     : "";
   if (mode !== "plant_pickup" && mode !== "southeast_pickup" && !postalCode)
     throw new FulfillmentCalendarError("calendar_address_required");
-  if (
-    mode === "ups_shipping" &&
-    String(cart.shipping_address?.country_code).toLowerCase() !== "us"
-  )
+  const countryCode = String(cart.shipping_address?.country_code ?? "")
+    .trim()
+    .toLowerCase();
+  if (mode !== "plant_pickup" && countryCode !== "us")
     throw new FulfillmentCalendarError("calendar_destination_unavailable");
+  const rawState = String(cart.shipping_address?.province ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/^us-/, "");
+  const province = US_STATES.find(
+    (state) =>
+      state.code.toLowerCase() === rawState ||
+      state.name.toLowerCase() === rawState,
+  )?.code;
+  if (mode === "southeast_pickup" && !province)
+    throw new FulfillmentCalendarError("calendar_address_required");
   const request: CalendarRequest = {
     mode,
     service,
     postalCode,
     ...(mode === "southeast_pickup"
-      ? { routeId: routeId ?? cart.metadata?.pickupLocationId }
+      ? {
+          routeId: routeId ?? cart.metadata?.pickupLocationId,
+          countryCode,
+          province,
+        }
       : {}),
   };
   return {
@@ -141,6 +157,17 @@ function calendarFor(
   now: Date,
   carrierSelection?: CalendarSelection,
 ) {
+  if (request.mode === "southeast_pickup") {
+    const route = source.policy.southeast.find(
+      (r) => r.id === request.routeId && r.active,
+    );
+    if (
+      request.countryCode !== "us" ||
+      !request.province ||
+      (route && route.state !== request.province)
+    )
+      throw new FulfillmentCalendarError("calendar_destination_unavailable");
+  }
   const transit =
     request.mode === "ups_shipping"
       ? carrierSelection?.choice.transit?.source === "carrier_cache"
@@ -221,7 +248,19 @@ export async function fulfillmentCalendarAction(
     throw new FulfillmentCalendarError("calendar_context_changed");
   let revision = contextRevision(c.cart, c.shippingOptionId, calendar);
   if (body.action === "list")
-    return { state: "available", calendar, contextRevision: revision };
+    return {
+      state: "available",
+      calendar,
+      contextRevision: revision,
+      regionalLocations:
+        c.request.mode === "southeast_pickup"
+          ? source.policy.southeast
+              .filter(
+                (route) => route.active && route.state === c.request.province,
+              )
+              .map(({ id, city, state }) => ({ id, city, state }))
+          : [],
+    };
   if (!body.arrival_date || body.context_revision !== revision)
     throw new FulfillmentCalendarError("calendar_context_changed");
   let choice = calendar.choices.find(
@@ -359,11 +398,9 @@ export async function currentCalendarSelection(
 export async function prepareCalendarAcceptance(scope: any, cartId: string) {
   const c = await currentCalendarSelection(scope, cartId);
   if (!c) return;
-  await scope
-    .resolve(Modules.CART)
-    .updateCarts(cartId, {
-      metadata: acceptedCalendarMetadata(c.cart, c.selection, c.now),
-    });
+  await scope.resolve(Modules.CART).updateCarts(cartId, {
+    metadata: acceptedCalendarMetadata(c.cart, c.selection, c.now),
+  });
 }
 export async function validateCalendarAcceptance(scope: any, loadedCart: any) {
   const c = await currentCalendarSelection(scope, loadedCart.id);
