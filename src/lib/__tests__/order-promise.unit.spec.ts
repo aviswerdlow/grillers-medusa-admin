@@ -101,6 +101,7 @@ describe("accepted-order promise contract", () => {
         "calendar_revision",
         "review_version",
         "experiment_assignments",
+        "experiment_context_status",
         "analytics_consent",
         "test_order",
       ].sort()
