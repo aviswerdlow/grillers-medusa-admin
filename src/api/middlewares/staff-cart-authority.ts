@@ -143,7 +143,10 @@ export async function enforceStaffCartAuthority(req: MedusaRequest, res: MedusaR
       writeMetadata(req, canonical)
     }
 
-    const isPayment = req.method === "POST" && (req.path.endsWith("/complete") || req.path.startsWith("/store/payment-collections")
+    // Calendar list/select/validate only return quotes. Staff identity still
+    // applies above; date-bound ATP and override receipts apply at payment.
+    const isCalendarQuote = req.path.replace(/\/+$/, "") === "/store/grillers/checkout/fulfillment-calendar"
+    const isPayment = !isCalendarQuote && req.method === "POST" && (req.path.endsWith("/complete") || req.path.startsWith("/store/payment-collections")
       || req.path.endsWith("/payment-collection") || req.path.startsWith("/store/grillers/checkout/"))
     if (proof && isPayment) {
       if (cart.completed_at && !req.path.endsWith("/complete")) throw new StaffAccessDenied("This cart already has an order.")

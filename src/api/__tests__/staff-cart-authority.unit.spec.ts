@@ -121,6 +121,20 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
   }
   const paymentPaths = ["/store/payment-collections", "/store/payment-collections/paycol_1/payment-sessions", "/store/carts/cart_1/complete", "/store/grillers/checkout/place-order"]
 
+  it.each(["list", "select", "validate"])("calendar %s retains staff authority without demanding inventory payment readiness", async action => {
+    await prepared("collect_card_now"); variant.inventory_quantity = 0; await add(true)
+    // Existing date-bound override is stale; a quote must allow choosing its replacement.
+    carts.cart_1.metadata.scheduledDate = "2099-01-01"
+    const body = { cart_id: "cart_1", action }
+    expect((await request("/store/grillers/checkout/fulfillment-calendar", body, true)).status).toBe(200)
+    expect((await request("/store/grillers/checkout/fulfillment-calendar", body)).status).toBe(403)
+    expect((await request("/store/grillers/checkout/place-order", body, true)).status).toBe(403)
+    expect((await request("/store/payment-collections/paycol_1/payment-sessions", { provider_id: "pp_stripe_stripe" }, true)).status).toBe(403)
+    customers.cus_staff.metadata.staff_access_revoked = true
+    expect((await request("/store/grillers/checkout/fulfillment-calendar", body, true)).status).toBe(403)
+    expect(paymentRun).not.toHaveBeenCalled(); expect(completeRun).not.toHaveBeenCalled()
+  })
+
   it.each(["staff_actor_customer_id", "staff_phone_order", "gp_staff_cart_authority", "payment_workflow", "final_charge_status", "finalization_status", "fulfillment_gate_status"])("rejects forged public %s before native creation", async key => {
     expect((await request("/store/carts", { email: "customer@example.test", metadata: { [key]: "forged" } })).status).toBe(403)
     expect(createRun).not.toHaveBeenCalled()
