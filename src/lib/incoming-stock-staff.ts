@@ -12,6 +12,16 @@ import {
 } from "./incoming-stock";
 import { qbdListIdFromMetadata } from "./inventory-allocation";
 
+export function canManageIncomingStock(principal: StaffPrincipal): boolean {
+  return (
+    principal.kind !== "service" &&
+    configuredIds("GP_INCOMING_STOCK_OPERATOR_IDS").has(principal.id) &&
+    (principal.kind === "operator"
+      ? configuredIds("GP_PRIVILEGED_ADMIN_USER_IDS").has(principal.id)
+      : principal.capabilities.has("inventory.manage"))
+  );
+}
+
 /** No implicit grant to office/warehouse roles before #359 names the operator. */
 export async function incomingStockStaffCommand(
   db: any,
@@ -86,6 +96,13 @@ export async function incomingStockStaffCommand(
         confirmed_quantity: body.confirmed_quantity,
         usable_at: body.usable_at,
       });
+    if (
+      body.action === "stage_receipt" &&
+      body.receipt_final_confirmed !== true
+    )
+      throw new IncomingStockInvalid(
+        "Confirm this is the final delivery for the batch. Rolling partial deliveries require receiving review."
+      );
     if (body.action === "stage_receipt")
       return stageIncomingReceipt(trx, {
         ...command,

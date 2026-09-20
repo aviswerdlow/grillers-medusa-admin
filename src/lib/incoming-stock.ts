@@ -614,3 +614,17 @@ export async function listIncomingStock(db: any, variantId: string) {
     checkout_enabled: false,
   };
 }
+
+/** Bounded staff work queue across products; original promises remain visible. */
+export async function listIncomingExceptions(db: any, after?: string) {
+  const query = db("gp_incoming_demand")
+    .where({ status: "committed" })
+    .where("remaining_quantity", ">", 0)
+    .whereNotNull("exception_reason")
+    .orderBy("id")
+    .limit(51);
+  if (after) query.where("id", ">", text(after, "Queue cursor"));
+  const rows = await query;
+  const demands = rows.slice(0, 50);
+  return { demands, next_cursor: rows.length > 50 ? demands[49].id : null };
+}

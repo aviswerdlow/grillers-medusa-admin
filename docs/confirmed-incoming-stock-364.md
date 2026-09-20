@@ -19,7 +19,7 @@ Tracks strategy [#364](https://github.com/aviswerdlow/grillers-pride-strategy/is
 
 The gateway permits reads via `inventory.read`; writes require `inventory.manage` (currently super admin only). The command additionally requires immutable actor id in **`GP_INCOMING_STOCK_OPERATOR_IDS`**, empty by default. Customer authority and session epoch are rechecked under a row lock. The separate configured native operator must also appear in this receiving allowlist. Background reader credentials cannot access this route. Do not configure an operator or grant a broader role until #359's named owner and #318's role review are approved.
 
-No staff UI or operational activation is claimed. The small entry/review screen is still required by #364.
+The paired storefront candidate supplies `/account/staff/incoming-stock`: authenticated product/batch review, a paged affected-order queue, approved-operator commands, explicit timezone conversion and recovery of a saved request after an uncertain response. `GET ?view=exceptions&after=...` returns the next 50 active exceptions with customer-safe product titles; `can_manage` is a response-only capability hint. The backend always rechecks the actual mutation. `stage_receipt` additionally requires `receipt_final_confirmed: true`, preventing an ordinary partial-delivery form from silently closing a batch. Native checkout and receipt application remain unimplemented; this screen does not activate them. Production identity/operating approval and a real staff walkthrough remain required.
 
 ## Consumer contracts and next implementation
 

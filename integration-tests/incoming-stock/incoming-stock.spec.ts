@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
+import { GET as incomingGet } from "../../src/api/admin/grillers/inventory/incoming/route";
 import { Migration20260920150000 } from "../../src/modules/gp-inventory-allocation/migrations/Migration20260920150000";
 import {
   createIncomingBatch,
@@ -8,6 +10,7 @@ import {
   releaseIncomingStock,
   stageIncomingReceipt,
   listIncomingStock,
+  listIncomingExceptions,
 } from "../../src/lib/incoming-stock";
 import { incomingStockStaffCommand } from "../../src/lib/incoming-stock-staff";
 import { staffCapabilities } from "../../src/lib/staff-access-policy";
@@ -116,6 +119,87 @@ afterAll(async () => {
     await admin.raw(`drop schema if exists ${schema} cascade`);
     await admin.destroy();
   }
+});
+
+it("pages the cross-product exception queue without dropping a boundary row and omits released commitments", async () => {
+  const rows = Array.from({ length: 53 }, (_, i) => ({
+    id: `d_${String(i).padStart(3, "0")}`,
+    variant_id: `variant_${i}`,
+    qbd_list_id: `fixture_${i}`,
+    stock_unit: "pack",
+    cart_id: `cart_${i}`,
+    line_item_id: `line_${i}`,
+    quantity: 1,
+    remaining_quantity: i === 0 ? 0 : 1,
+    needed_by,
+    customer_date: "2026-10-09",
+    calendar_revision: "fixture",
+    status: i === 0 ? "released" : "committed",
+    exception_reason: "incoming_short",
+  }));
+  await db("gp_incoming_demand").insert(rows);
+  const first = await listIncomingExceptions(db),
+    second = await listIncomingExceptions(db, first.next_cursor);
+  expect(first.demands).toHaveLength(50);
+  expect(second.demands).toHaveLength(2);
+  expect(second.next_cursor).toBeNull();
+  expect(
+    new Set([...first.demands, ...second.demands].map((row) => row.id)).size
+  ).toBe(52);
+});
+
+it("returns the queue through the staff route with product names and an explicit read-only capability", async () => {
+  const b = await batch();
+  const d = demand();
+  await reserveIncomingStock(db, d);
+  await reviseIncomingBatch(db, {
+    ...cmd(),
+    batch_id: b.id,
+    expected_revision: 1,
+    action: "cancel",
+  });
+  const principal = {
+    id: "cus_picker",
+    kind: "customer",
+    capabilities: new Set(["inventory.read"]),
+  };
+  const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
+  const req = {
+    query: { view: "exceptions" },
+    gp_staff_principal: principal,
+    scope: {
+      resolve: (key: string) =>
+        key === ContainerRegistrationKeys.PG_CONNECTION
+          ? db
+          : {
+              graph: async () => ({
+                data: [
+                  {
+                    id: identity.variant_id,
+                    sku: "PIE-FIXTURE",
+                    product: { title: "Fixture pies" },
+                  },
+                ],
+              }),
+            },
+    },
+  };
+  await incomingGet(req as any, res as any);
+  expect(res.json).toHaveBeenCalledWith(
+    expect.objectContaining({
+      can_manage: false,
+      demands: [
+        expect.objectContaining({
+          product_title: "Fixture pies",
+          exception_reason: "incoming_cancelled",
+        }),
+      ],
+    })
+  );
+  res.json.mockClear();
+  delete (req as any).gp_staff_principal;
+  await incomingGet(req as any, res as any);
+  expect(res.status).toHaveBeenCalledWith(403);
 });
 
 it("does not invent supply for a distant customer date or an unconfirmed forecast", async () => {
@@ -530,6 +614,38 @@ it("requires a current named receiving operator and sources identity/actor from 
     const result = await incomingStockStaffCommand(db, query, principal, body);
     expect(result.batch.created_by).toBe(actor.id);
     expect(result.batch.qbd_list_id).toBe(identity.qbd_list_id);
+    await incomingStockStaffCommand(db, query, principal, {
+      ...body,
+      request_id: randomUUID(),
+      action: "confirm",
+      batch_id: result.batch.id,
+      expected_revision: 0,
+      confirmed_quantity: 10,
+    });
+    const receiptBody = {
+      ...body,
+      request_id: randomUUID(),
+      action: "stage_receipt",
+      batch_id: result.batch.id,
+      expected_revision: 1,
+      source_ref: "staff-receipt",
+      quantity: 8,
+    };
+    await expect(
+      incomingStockStaffCommand(db, query, principal, receiptBody)
+    ).rejects.toThrow("final delivery");
+    expect(await db("gp_incoming_receipt").count("*").first()).toEqual({
+      count: "0",
+    });
+    expect(
+      await incomingStockStaffCommand(db, query, principal, {
+        ...receiptBody,
+        receipt_final_confirmed: true,
+      })
+    ).toMatchObject({
+      inventory_applied: false,
+      receipt: { quantity: 8, status: "pending_adapter" },
+    });
     await db("customer")
       .where({ id: actor.id })
       .update({
