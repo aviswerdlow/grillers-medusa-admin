@@ -4,6 +4,7 @@ import type { StaffCapability } from "./staff-access-policy"
 export function adminRouteCapability(path: string, method: string, body: any = {}): StaffCapability | null {
   const p = path.replace(/\/+$/, "").toLowerCase()
   const read = method === "GET" || method === "HEAD"
+  if (p === "/admin/grillers/staff-carts") return method === "POST" ? "customers.write" : null
   if (/^\/admin\/grillers\/staff-access\/customers\/[^/]+$/.test(p)) return method === "POST" ? "team.manage" : null
   if (/^\/admin\/customers(?:\/[^/]+)?(?:\/addresses(?:\/[^/]+)?)?$/.test(p)) return read ? "customers.read" : method === "POST" || (method === "DELETE" && p.includes("/addresses/")) ? "customers.write" : null
   if (p === "/admin/grillers/customers" || /^\/admin\/grillers\/customers\/[^/]+\/offline-payment$/.test(p)) return "customers.write"

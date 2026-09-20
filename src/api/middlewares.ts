@@ -19,6 +19,7 @@ import {
 import { emitOpsAlert, type OpsAlertSeverity } from "../lib/ops-alert"
 import { opsErrorHandler } from "./middlewares/ops-error-handler"
 import { protectCustomerStaffAuthority } from "./middlewares/customer-staff-authority"
+import { enforceStaffCartAuthority } from "./middlewares/staff-cart-authority"
 import { bindFulfillmentAudit, enforceStaffCapabilities, enforceStaffSessionEpoch, protectAdminCustomerAuthority, publishAdminStaffAccess, publishCurrentStaffAccess } from "./middlewares/staff-capabilities"
 import {
   rawStripeWebhookBody,
@@ -622,6 +623,10 @@ export default defineMiddlewares({
   // See ./middlewares/ops-error-handler.ts.
   errorHandler: opsErrorHandler,
   routes: [
+    { matcher: "/store/carts*", middlewares: [enforceStaffCartAuthority] },
+    { matcher: "/store/payment-collections*", middlewares: [enforceStaffCartAuthority] },
+    { matcher: "/store/grillers/checkout/*", method: "POST", middlewares: [enforceStaffCartAuthority] },
+    { matcher: "/store/gp-inventory/resolution", method: "POST", middlewares: [enforceStaffCartAuthority] },
     { matcher: "/store/products", method: ["GET"], middlewares: [filterPublicCatalog] },
     { matcher: "/store/products/:id", method: ["GET"], middlewares: [filterPublicCatalog] },
     { matcher: "/store/carts", method: ["POST"], middlewares: [guardNewCartItems] },
