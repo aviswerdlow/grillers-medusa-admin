@@ -1,3 +1,4 @@
+import { findLegacyImportCustomer, legacyContactImportPatch } from "../lib/legacy-contact-provenance"
 import mysql from "mysql2/promise"
 import { ExecArgs } from "@medusajs/framework/types"
 import {
@@ -201,15 +202,6 @@ async function hashPassword(password: string) {
   return Buffer.from(passwordHash as any).toString("base64")
 }
 
-async function findCustomerByEmail(db: any, emailLower: string) {
-  return db("customer")
-    .select("*")
-    .whereNull("deleted_at")
-    .whereRaw("lower(email) = ?", [emailLower])
-    .orderBy("has_account", "desc")
-    .orderBy("created_at", "asc")
-    .first()
-}
 
 async function ensureCustomer({
   db,
@@ -222,7 +214,10 @@ async function ensureCustomer({
   legacy: ReturnType<typeof normalizeLegacyCustomer>
   apply: boolean
 }) {
+  const existing = await findLegacyImportCustomer(db, legacy.legacyCustomerId, legacy.emailLower)
+  const contactPatch = legacyContactImportPatch(existing, legacy, new Date().toISOString())
   const metadata = {
+    ...contactPatch.metadata,
     legacy_source: "legacy_site_customers",
     legacy_customer_id: legacy.legacyCustomerId,
     qbd_customer_list_id: legacy.qbdCustomerListId,
@@ -231,7 +226,6 @@ async function ensureCustomer({
     legacy_is_active: legacy.isActive,
   }
 
-  const existing = await findCustomerByEmail(db, legacy.emailLower)
   if (!apply) {
     return existing
       ? { id: existing.id, metadata: existing.metadata, has_account: existing.has_account }
@@ -250,9 +244,10 @@ async function ensureCustomer({
     if (!toText(existing.last_name) && legacy.lastName) {
       update.last_name = legacy.lastName
     }
-    if (!toText(existing.phone) && legacy.phone) {
-      update.phone = legacy.phone
-    }
+    if (contactPatch.phone !== undefined) update.phone = db.raw(
+      "case when metadata->'primary_contact_v1' is not null or metadata->>'contact_verified_at' is not null then phone else coalesce(nullif(phone, ''), ?) end",
+      [contactPatch.phone]
+    )
     if (!toText(existing.company_name) && legacy.companyName) {
       update.company_name = legacy.companyName
     }
@@ -832,7 +827,7 @@ export default async function importLegacyCustomers({ container }: ExecArgs) {
     }
 
     try {
-      const existing = await findCustomerByEmail(db, legacy.emailLower)
+      const existing = await findLegacyImportCustomer(db, legacy.legacyCustomerId, legacy.emailLower)
       const customer = await ensureCustomer({
         db,
         customerModule,

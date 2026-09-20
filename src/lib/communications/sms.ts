@@ -1,3 +1,4 @@
+import { permitsCustomerSmsDestination } from "./primary-destination"
 import crypto from "crypto"
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
@@ -696,6 +697,9 @@ export async function sendTrackedSms(
   // 1) Consent at send time is keyed to message PURPOSE, not Twilio stream.
   // A one-to-one marketing flow may ride the transactional stream for
   // delivery, but it still needs the exact customer-originated v3 evidence.
+  if (!(await permitsCustomerSmsDestination(db, profile?.medusa_customer_id, phone, profile?.sms_consent_at))) {
+    return suppress("retired_customer_sms_destination")
+  }
   if (!hasQualifyingSmsMarketingConsent(profile, phone)) {
     return suppress("missing_qualified_sms_marketing_consent")
   }
@@ -912,6 +916,11 @@ export async function sendTrackedSms(
             [phone.slice(-10), `1${phone.slice(-10)}`]
           )
           .first()
+    if (!(await permitsCustomerSmsDestination(db, profile?.medusa_customer_id, phone, profile?.sms_consent_at))) {
+      await db("gp_message_log").where("id", messageId).update({ status: "suppressed",
+        error_message: "retired_customer_sms_destination_after_claim", updated_at: new Date() })
+      return suppress("retired_customer_sms_destination", { after_claim: true })
+    }
     if (!hasQualifyingSmsMarketingConsent(profile, phone)) {
       await db("gp_message_log").where("id", messageId).update({
         status: "suppressed",

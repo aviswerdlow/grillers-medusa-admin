@@ -563,7 +563,7 @@ export async function upsertCustomerProfile(
       },
       preference_token: newPreferenceToken(),
       last_active_at: now,
-      metadata: input.metadata || {},
+      metadata: Object.fromEntries(Object.entries(input.metadata || {}).filter(([key]) => key !== "primary_contact_v1")),
       created_at: now,
       updated_at: now,
     }
@@ -594,6 +594,10 @@ export async function upsertCustomerProfile(
   }
 
   if (existing) {
+    if (input.medusa_customer_id && existing.medusa_customer_id &&
+        input.medusa_customer_id !== existing.medusa_customer_id) {
+      throw new Error("Communications identity conflict; account association requires review")
+    }
     const existingMetadata = jsonObject(existing.metadata)
     const incomingMetadata = jsonObject(input.metadata)
     const resultPatch: Record<string, any> = {
@@ -669,8 +673,32 @@ export async function upsertCustomerProfile(
       resultPatch.sms_consent_at = asDate(incomingAt)
     }
 
-    await db("gp_customer_profile").where("id", existing.id).update(dbPatch)
-    if (input.sms_consent !== undefined) {
+    // A delayed customer event/import may contain the previous number and
+    // consent. Only the locked customer contact transaction replaces these
+    // after confirmation. Evaluate against the CURRENT row, not this read.
+    const protectedState = "metadata->'primary_contact_v1'->>'version' = '1'"
+    dbPatch.phone = db.raw(`case when ${protectedState} then phone else ? end`, [dbPatch.phone])
+    for (const key of ["sms_consent", "sms_consent_at"]) {
+      if (dbPatch[key] !== undefined) {
+        dbPatch[key] = db.raw(`case when ${protectedState} then ?? else ? end`, [key, dbPatch[key]])
+      }
+    }
+    const publicMetadata = Object.fromEntries(Object.entries(incomingMetadata).filter(
+      ([key]) => key !== "primary_contact_v1" && !key.startsWith("sms_")
+    ))
+    const legacyMetadata = { ...incomingMetadata }
+    delete legacyMetadata.primary_contact_v1
+    if (Object.keys(incomingMetadata).length) {
+      dbPatch.metadata = db.raw(
+        `coalesce(metadata, '{}'::jsonb) || case when ${protectedState} then ?::jsonb else ?::jsonb end`,
+        [JSON.stringify(publicMetadata), JSON.stringify(legacyMetadata)]
+      )
+    }
+    const update = db("gp_customer_profile").where("id", existing.id)
+    if (input.medusa_customer_id) update.whereRaw("(medusa_customer_id is null or medusa_customer_id = ?)", [input.medusa_customer_id])
+    const affected = await update.update(dbPatch)
+    if (affected === 0) throw new Error("Communications identity changed during update")
+    if (input.sms_consent !== undefined || input.phone !== undefined || existingMetadata.primary_contact_v1) {
       const refreshed = await db("gp_customer_profile")
         .whereNull("deleted_at")
         .where("id", existing.id)

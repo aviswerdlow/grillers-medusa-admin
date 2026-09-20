@@ -6,6 +6,7 @@ type Container = { resolve: (key: string) => any }
 
 const ORDER_FIELDS = [
   "id",
+  "customer_id",
   "display_id",
   "email",
   "currency_code",

@@ -35,7 +35,7 @@ function concurrentStopDb(existing: Record<string, any>) {
   let firstCount = 0
   const db: any = () => {
     const chain: any = {}
-    for (const method of ["whereNull", "where"]) {
+    for (const method of ["whereNull", "where", "whereRaw"]) {
       chain[method] = () => chain
     }
     chain.first = async () => (firstCount++ === 0 ? existing : stopped)
@@ -45,7 +45,7 @@ function concurrentStopDb(existing: Record<string, any>) {
     }
     return chain
   }
-  db.raw = (sql: string, bindings: unknown[]) => ({ sql, bindings })
+  db.raw = (sql: string, bindings: any[]) => ({ sql: sql + bindings.filter((b) => b?.sql).map((b) => b.sql).join(" "), bindings })
   return { db, updates }
 }
 
@@ -62,6 +62,7 @@ function concurrentProfileInsertDb(
     const chain: any = {}
     chain.whereNull = () => chain
     chain.where = () => chain
+    chain.whereRaw = () => chain
     chain.first = async () => {
       identityReads += 1
       // The first lookup checks both medusa_customer_id and email_lower before
@@ -78,7 +79,7 @@ function concurrentProfileInsertDb(
     }
     return chain
   }
-  db.raw = (sql: string, bindings: unknown[]) => ({ sql, bindings })
+  db.raw = (sql: string, bindings: any[]) => ({ sql: sql + bindings.filter((b) => b?.sql).map((b) => b.sql).join(" "), bindings })
 
   return { db, ignore, inserts, onConflict, updates }
 }

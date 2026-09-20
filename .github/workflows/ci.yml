@@ -10,6 +10,17 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: gp_contact_test
+          POSTGRES_PASSWORD: synthetic_contact_ci
+          POSTGRES_DB: gp_contacts
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U gp_contact_test -d gp_contacts"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     permissions:
       contents: read
     steps:
@@ -25,6 +36,11 @@ jobs:
         run: yarn test:unit
       - name: TypeScript
         run: npx tsc --noEmit
+      - name: Contact transaction and migration identity tests
+        env:
+          CONTACT_TEST_DATABASE_URL: postgres://gp_contact_test:synthetic_contact_ci@localhost:5432/gp_contacts
+          TEST_TYPE: integration:contacts
+        run: yarn jest --runInBand
       - name: Emit ops.ci
         if: always()
         env:
