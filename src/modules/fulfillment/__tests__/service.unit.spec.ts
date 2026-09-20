@@ -7,6 +7,11 @@ import { emitOpsAlert } from "../../../lib/ops-alert"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+jest.mock("../../../lib/fulfillment-calendar-runtime", () => ({
+  // This suite owns price/weight behavior. Calendar and acceptance contracts
+  // are exercised with their real implementation in calendar-runtime tests.
+  calendarPackingContextForRate: jest.fn(async (_query, _cart, service) => ({service, postalCode:"30340"})),
+}))
 
 jest.mock("../../../lib/ops-alert", () => ({
   emitOpsAlert: jest.fn(async () => ({ ok: true, skipped: false })),

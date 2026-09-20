@@ -12,6 +12,8 @@ import {
   shippingWeightSnapshots,
 } from "./shipping-weights";
 import { loadShippingCatalogLines } from "./shipping-catalog-inputs";
+import { currentCalendarSelection } from "./fulfillment-calendar-runtime";
+import { packingContextFromCalendar } from "./fulfillment-calendar-selection";
 import { weightImportHash } from "./sam-shipping-weight-import";
 import {
   isUpsServiceCode,
@@ -62,9 +64,11 @@ async function shippingAcceptanceContext(container: any, cartId: string) {
     throw new ShippingInputError("ambiguous_shipping_selection");
   const { method, service } = carriers[0],
     lines = await loadShippingCatalogLines(query, cart.items ?? []);
+  const calendar = await currentCalendarSelection(container, cartId);
+  if (!calendar) throw new ShippingInputError("shipping_calendar_required");
   const expected = createShippingPackingPlan(
     lines,
-    { service, postalCode: cart.shipping_address?.postal_code ?? "" },
+    packingContextFromCalendar(calendar.selection),
     await getPackagingConfig(process.env),
   );
   const selected = shippingMetadata(method.data)[

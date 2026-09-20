@@ -44,6 +44,8 @@ import { getPackagingConfig } from "../../lib/packaging-cost-strapi";
 import { createShippingPackingPlan, SHIPPING_PACKING_PLAN_KEY, type ShippingPackingPlan } from "../../lib/shipping-packing-plan";
 import { ShippingInputError } from "../../lib/shipping-weights";
 import { loadShippingCatalogLines } from "../../lib/shipping-catalog-inputs";
+import { calendarPackingContextForRate } from "../../lib/fulfillment-calendar-runtime";
+import { FulfillmentCalendarError } from "../../lib/fulfillment-calendar";
 
 /** True when packaging cost should be added to the forecast charge. */
 function packagingCostEnabled(env: Record<string, string | undefined>): boolean {
@@ -333,10 +335,10 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
         if (isUpsServiceCode(serviceCode)) {
           try {
             items = await loadShippingCatalogLines(this.shippingContainer_.query, items);
-            packingPlan = createShippingPackingPlan(items, {
-              service: serviceCode, postalCode: zip || "",
-            }, await getPackagingConfig(process.env));
+            const dates = await calendarPackingContextForRate(this.shippingContainer_.query, optionData?.id || optionData?.cart_id, serviceCode);
+            packingPlan = createShippingPackingPlan(items, dates, await getPackagingConfig(process.env));
           } catch (error) {
+            if (error instanceof FulfillmentCalendarError) throw new MedusaError(MedusaError.Types.NOT_ALLOWED, error.message);
             if (!(error instanceof ShippingInputError)) throw error;
             await emitOpsAlert({alertKind:"shipping_inputs_unavailable",title:"Carrier shipping needs an item-weight or packing review",path:"src/modules/fulfillment/service.ts",source:"medusa",severity:"warn",logger:this.logger_,meta:{reason:error.code,item_count:items.length,service_code:serviceCode}});
             throw new MedusaError(MedusaError.Types.NOT_ALLOWED, error.message);
@@ -668,8 +670,12 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
 
     try {
       const quote = await this.wwexClient.quoteSmallpack(rateInput);
+      if (packingPlan?.arrivalDate && ((quote.offer.transitDays != null && quote.offer.transitDays !== packingPlan.transitDays) ||
+        (quote.offer.estimatedDeliveryDate != null && quote.offer.estimatedDeliveryDate.slice(0, 10) !== packingPlan.arrivalDate)))
+        throw new FulfillmentCalendarError("carrier_promise_changed");
       return quote.offer.price.value;
     } catch (error) {
+      if (error instanceof FulfillmentCalendarError) throw new MedusaError(MedusaError.Types.NOT_ALLOWED, error.message);
       const message = error instanceof Error ? error.message : String(error);
       this.logger_.warn(
         `[wwex] live UPS ${serviceCode} quote failed; falling back to Strapi shipping zones: ${message}`
@@ -920,9 +926,10 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
     if(isUpsServiceCode(service)) {
       try {
         const items=await loadShippingCatalogLines(this.shippingContainer_.query,context?.items??[]);
-        result[SHIPPING_PACKING_PLAN_KEY]=createShippingPackingPlan(items,{service,postalCode:context?.shipping_address?.postal_code??""},await getPackagingConfig(process.env));
+        const dates=await calendarPackingContextForRate(this.shippingContainer_.query,context?.id||context?.cart_id,service);
+        result[SHIPPING_PACKING_PLAN_KEY]=createShippingPackingPlan(items,dates,await getPackagingConfig(process.env));
       } catch(error) {
-        if(error instanceof ShippingInputError) throw new MedusaError(MedusaError.Types.NOT_ALLOWED,error.message);
+        if(error instanceof ShippingInputError || error instanceof FulfillmentCalendarError) throw new MedusaError(MedusaError.Types.NOT_ALLOWED,error.message);
         throw error;
       }
     }

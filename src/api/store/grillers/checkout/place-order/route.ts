@@ -44,6 +44,8 @@ import { sanitizeOrderSmsConsentMetadata } from "../../../../../lib/communicatio
 
 import { prepareShippingAcceptance } from "../../../../../lib/shipping-acceptance";
 import { ShippingInputError } from "../../../../../lib/shipping-weights";
+import { prepareCalendarAcceptance } from "../../../../../lib/fulfillment-calendar-runtime";
+import { FulfillmentCalendarError } from "../../../../../lib/fulfillment-calendar";
 
 const PLACE_ORDER_PATH = "store/grillers/checkout/place-order";
 
@@ -586,6 +588,7 @@ async function placeInvoiceOrder(
 
   // A no-amount SYSTEM payment session is still required for completeCartWorkflow to produce an
   // order; it carries no Stripe data and authorizes no charge.
+  await prepareCalendarAcceptance(req.scope, cartId);
   await prepareShippingAcceptance(req.scope, cartId);
   const paymentCollection = await ensurePaymentCollection(req, cartId);
   await createPaymentSessionsWorkflow(req.scope).run({
@@ -785,6 +788,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       metadata: checkoutMetadata,
     });
 
+    await prepareCalendarAcceptance(req.scope, cartId);
     await prepareShippingAcceptance(req.scope, cartId);
     const paymentCollection = await ensurePaymentCollection(req, cartId);
 
@@ -898,6 +902,10 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       order,
     });
   } catch (error) {
+    if (error instanceof FulfillmentCalendarError) {
+      res.status(error.status).json({ type: "fulfillment_date_review_required", message: error.message });
+      return;
+    }
     if (error instanceof ShippingInputError) {
       res.status(409).json({ type: "shipping_review_required", message: error.message });
       return;

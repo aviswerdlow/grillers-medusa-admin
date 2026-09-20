@@ -852,6 +852,7 @@ export function wwexRateInputFromFulfillmentData(
     // Checkout estimates never trust caller-supplied measured packages.
     packages: estimatedPackingPlan ? undefined : Array.isArray(data.packages) ? data.packages : undefined,
     shipmentDate:
+      estimatedPackingPlan?.dispatchDate ||
       data.shipmentDate ||
       data.shipment_date ||
       metadata.shipmentDate ||

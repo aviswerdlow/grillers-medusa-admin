@@ -39,6 +39,17 @@ const withRecord = (record: any) =>
     },
   });
 describe("reviewed physical weights and box space", () => {
+  test.each([
+    { packingDays: 0, elapsedHours: 26 },
+    { packingDays: 1, elapsedHours: 26 },
+    { packingDays: 2, elapsedHours: -1 },
+    { packingDays: 2, elapsedHours: undefined },
+  ])("rejects inconsistent elapsed packing context %p", (extra) => {
+    expect(() => createShippingPackingPlan([shippingLine()], {
+      ...context, validatedTransit: { ...context.validatedTransit, ...extra },
+    }, packingConfig())).toThrow(ShippingInputError);
+  });
+
   test("raw SAM proxy never becomes physical mass or a pricing input", () => {
     const line = shippingLine({ quantity: 3 });
     const result = resolveShippingLine(line);
