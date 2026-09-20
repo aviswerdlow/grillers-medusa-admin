@@ -22,7 +22,7 @@ This candidate retains existing console policy. Avi/account administrator must a
 
 Warehouse roles can read needed orders/inventory. Office retains capture/cancellation, the custom idempotent refund route and accounting support. Final-charge permission never grants saved-card/customer access. Generic order metadata writes and native refund bypasses are denied to the gateway; dedicated workflows own payment/release state. Accounting handoffs cannot overwrite final-charge, release or actor authority. Approval emits the optional auto-charge signal only for a verified charge-capable person or separate privileged operator; #313's business/provider guards still apply.
 
-Invoice terms use the dedicated audited endpoint, the existing approver email allowlist and, for customer gateway identities, an approved immutable customer ID. Ordinary profiles cannot grant invoice eligibility/credit terms. This authority protection does not complete #367's accounting/business reconciliation.
+Invoice terms use the dedicated audited endpoint, the existing approver email allowlist and, for customer gateway identities, an approved immutable customer ID. Ordinary profiles cannot grant invoice eligibility/credit terms. This authority protection does not complete #370's accounting/business reconciliation.
 
 ## Grants, revocation and recovery
 
