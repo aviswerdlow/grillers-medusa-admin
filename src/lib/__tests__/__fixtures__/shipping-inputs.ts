@@ -148,3 +148,22 @@ export const packingConfig = () =>
       ],
     },
   });
+
+export function pricePolicy(
+  overrides = {},
+): import("../../shipping-price-contract").ShippingPricePolicy {
+  return {
+    version: 1,
+    revision: "synthetic-price-v1",
+    approvedBy: "test-fixture",
+    approvedAt: "2026-01-01T00:00:00Z",
+    approvalReference: "Synthetic only; not Peter approval",
+    effectiveFrom: "2026-01-01T00:00:00Z",
+    effectiveThrough: "2099-01-01T00:00:00Z",
+    currency: "usd",
+    maxCustomerShipping: 250,
+    cmsFallbackBasis: "inclusive_customer_tariff",
+    finalShipping: "retain_accepted",
+    ...overrides,
+  };
+}

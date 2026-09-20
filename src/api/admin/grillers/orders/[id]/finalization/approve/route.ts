@@ -1,9 +1,12 @@
+import { quoteWwexFinalizationShipping } from "../../../../../../../lib/wwex-finalization-shipment"
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import {
   FINALIZATION_PACKED_PENDING_CHARGE,
   appendStaffAudit,
   approveFinalization,
+  previewFinalization,
+  orderRequiresPackageCapture,
   invoiceArOrderMetadata,
   isInvoiceOrder,
   metadataObject,
@@ -30,6 +33,20 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     const orderModule = req.scope.resolve(Modules.ORDER)
     const body = (req.body || {}) as Record<string, any>
     const staffAudit = staffAuditFields(req, body)
+    let shippingCostMetadata = {}
+    if (isInvoiceOrder(order) && orderRequiresPackageCapture(order)) {
+      const preview = await previewFinalization(db, order)
+      const quoted = await quoteWwexFinalizationShipping({
+        order,
+        preview,
+        logger: req.scope.resolve(ContainerRegistrationKeys.LOGGER),
+      })
+      if (!quoted || quoted.status !== "quoted")
+        throw new Error(
+          "Shipping needs review before this invoice order can be released."
+        )
+      shippingCostMetadata = quoted.metadata
+    }
     const approved = await approveFinalization(
       db,
       order,
@@ -43,7 +60,10 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     // in A/R (no card charge, no ReceivePayment).
     const metadata = isInvoiceOrder(order)
       ? invoiceArOrderMetadata({
-          order,
+          order: {
+            ...order,
+            metadata: { ...metadataObject(order.metadata), ...shippingCostMetadata },
+          },
           finalization: approved.finalization,
           lines: approved.lines,
           packages: approved.packages,

@@ -1,4 +1,14 @@
-import { shippingLine, packingConfig } from "../../../lib/__tests__/__fixtures__/shipping-inputs"
+import { pricePolicy } from "../../../lib/__tests__/__fixtures__/shipping-inputs"
+import { SHIPPING_PRICE_TOKEN_KEY } from "../../../lib/shipping-price-contract"
+jest.mock("../../../lib/shipping-price-policy-strapi", () => ({
+  getShippingPricePolicy: jest.fn(async () =>
+    require("../../../lib/__tests__/__fixtures__/shipping-inputs").pricePolicy()
+  ),
+}))
+import {
+  shippingLine,
+  packingConfig,
+} from "../../../lib/__tests__/__fixtures__/shipping-inputs"
 import { PHYSICAL_WEIGHT_CONTRACT } from "../../../lib/shipping-weights"
 import { getPackagingConfig } from "../../../lib/packaging-cost-strapi"
 import { MedusaError } from "@medusajs/framework/utils"
@@ -13,7 +23,10 @@ const originalCalendarEnforcement = process.env.GP_CALENDAR_ENFORCEMENT
 jest.mock("../../../lib/fulfillment-calendar-runtime", () => ({
   // This suite owns price/weight behavior. Calendar and acceptance contracts
   // are exercised with their real implementation in calendar-runtime tests.
-  calendarPackingContextForRate: jest.fn(async (_query, _cart, service) => ({...require("../../../lib/__tests__/__fixtures__/shipping-inputs").packingContext(),service})),
+  calendarPackingContextForRate: jest.fn(async (_query, _cart, service) => ({
+    ...require("../../../lib/__tests__/__fixtures__/shipping-inputs").packingContext(),
+    service,
+  })),
 }))
 
 jest.mock("../../../lib/ops-alert", () => ({
@@ -42,11 +55,31 @@ const forecastEnv = {
   GRILLERS_SHIPPING_FORECAST_ENABLED: "true",
 }
 
-jest.mock("../../../lib/packaging-cost-strapi", () => ({ getPackagingConfig: jest.fn() }))
+jest.mock("../../../lib/packaging-cost-strapi", () => ({
+  getPackagingConfig: jest.fn(),
+}))
 
 function service() {
-  const query={graph:jest.fn(async ({filters})=>({data:filters.id.map((id:string)=>({...shippingLine().variant,id}))}))}
-  return new GrillersFulfillmentProviderService({ logger, query } as any, {})
+  const query = {
+    graph: jest.fn(async ({ filters }) => ({
+      data: filters.id.map((id: string) => ({ ...shippingLine().variant, id })),
+    })),
+  }
+  const svc = new GrillersFulfillmentProviderService(
+    { logger, query } as any,
+    {}
+  )
+  const calculate = svc.calculatePrice.bind(svc)
+  svc.calculatePrice = (option, data, context) =>
+    calculate(
+      option,
+      data,
+      Object.assign(
+        { id: "cart_fixture", currency_code: "usd" },
+        context
+      ) as any
+    )
+  return svc
 }
 
 function setWwexEnv() {
@@ -95,7 +128,9 @@ function writeConstantForecastModel(amount: number) {
 }
 
 function writeCorruptForecastModel() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gp-shipping-forecast-corrupt-"))
+  const dir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "gp-shipping-forecast-corrupt-")
+  )
   const modelPath = path.join(dir, "model.json")
   fs.writeFileSync(modelPath, "{ not valid json")
   return modelPath
@@ -125,6 +160,10 @@ describe("GrillersFulfillmentProviderService", () => {
     jest.restoreAllMocks()
     jest.clearAllMocks()
     clearWwexEnv()
+    process.env.GP_SHIPPING_PRICE_ACTIVE_KEY_ID = "fixture"
+    process.env.GP_SHIPPING_PRICE_KEYS_JSON = JSON.stringify({
+      fixture: "synthetic-shipping-price-test-secret-32-characters",
+    })
     clearForecastEnv()
     delete process.env.GP_CALENDAR_ENFORCEMENT
     ;(getPackagingConfig as jest.Mock).mockResolvedValue(packingConfig())
@@ -164,43 +203,106 @@ describe("GrillersFulfillmentProviderService", () => {
     expect(global.fetch).not.toHaveBeenCalled()
   })
 
-  it("blocks unavailable physical inputs before forecast, carrier or price-table fallback",async()=>{
-    const svc=service(); global.fetch=jest.fn();
-    await expect(svc.calculatePrice({service_code:"GROUND"} as any,{items:[{quantity:1}],shipping_address:{postal_code:"30340"}} as any,{} as any)).rejects.toThrow("item-weight or packing review");
-    expect(global.fetch).not.toHaveBeenCalled();
-    expect(emitOpsAlert).toHaveBeenCalledWith(expect.objectContaining({alertKind:"shipping_inputs_unavailable"}));
-  });
+  it("blocks unavailable physical inputs before forecast, carrier or price-table fallback", async () => {
+    const svc = service()
+    global.fetch = jest.fn()
+    await expect(
+      svc.calculatePrice(
+        { service_code: "GROUND" } as any,
+        {
+          items: [{ quantity: 1 }],
+          shipping_address: { postal_code: "30340" },
+        } as any,
+        {} as any
+      )
+    ).rejects.toThrow("item-weight or packing review")
+    expect(global.fetch).not.toHaveBeenCalled()
+    expect(emitOpsAlert).toHaveBeenCalledWith(
+      expect.objectContaining({ alertKind: "shipping_inputs_unavailable" })
+    )
+  })
 
-  it("replaces caller packing data with the reviewed server plan at selection",async()=>{
-    const svc=service();
-    const result=await svc.validateFulfillmentData({service_code:"GROUND"},{service_code:"PICKUP",packages:[{packed_weight_lb:1}],shipping_packing_plan_v1:{fake:true}},{items:[shippingLine()],shipping_address:{postal_code:"30340"}});
-    expect(result.service_code).toBe("GROUND");expect(result.packages).toBeUndefined();
-    expect(result.shipping_packing_plan_v1.weights.physicalWeightLb).toBe(1.5);
-  });
+  it("replaces caller packing data with the reviewed server plan at selection", async () => {
+    const svc = service()
+    const cart = {
+      id: "cart_fixture",
+      currency_code: "usd",
+      items: [shippingLine()],
+      shipping_address: { postal_code: "30340" },
+    }
+    mockShippingZones([
+      {
+        ZoneCode: "FedexGround",
+        ShippingZoneBreakpoints: [{ BreakpointPrice: 0, ShippingRate: 20 }],
+      },
+    ])
+    const priced = await svc.calculatePrice(
+      { service_code: "GROUND" } as any,
+      cart as any,
+      {} as any
+    )
+    const result = await svc.validateFulfillmentData(
+      { service_code: "GROUND" },
+      {
+        service_code: "PICKUP",
+        packages: [{ packed_weight_lb: 1 }],
+        shipping_packing_plan_v1: { fake: true },
+        [SHIPPING_PRICE_TOKEN_KEY]: (priced as any)[SHIPPING_PRICE_TOKEN_KEY],
+      },
+      cart
+    )
+    expect(result.service_code).toBe("GROUND")
+    expect(result.packages).toBeUndefined()
+    expect(result.shipping_packing_plan_v1.weights.physicalWeightLb).toBe(1.5)
+  })
 
   it("cannot bypass missing seasonal approval through forecast, WWEX, or a price-table fallback", async () => {
-    const svc = service(), config = packingConfig();
-    config.seasonalPolicies = [];
-    ;(getPackagingConfig as jest.Mock).mockResolvedValue(config);
-    const forecast = jest.spyOn(svc as any, "calculateForecastShippingRate");
-    const carrier = jest.spyOn(svc as any, "calculateWwexShippingRate");
-    global.fetch = jest.fn();
-    await expect(svc.calculatePrice({ service_code: "GROUND" } as any, forecastCart as any, {} as any)).rejects.toThrow("item-weight or packing review");
-    expect(forecast).not.toHaveBeenCalled(); expect(carrier).not.toHaveBeenCalled(); expect(global.fetch).not.toHaveBeenCalled();
-  });
+    const svc = service(),
+      config = packingConfig()
+    config.seasonalPolicies = []
+    ;(getPackagingConfig as jest.Mock).mockResolvedValue(config)
+    const forecast = jest.spyOn(svc as any, "calculateForecastShippingRate")
+    const carrier = jest.spyOn(svc as any, "calculateWwexShippingRate")
+    global.fetch = jest.fn()
+    await expect(
+      svc.calculatePrice(
+        { service_code: "GROUND" } as any,
+        forecastCart as any,
+        {} as any
+      )
+    ).rejects.toThrow("item-weight or packing review")
+    expect(forecast).not.toHaveBeenCalled()
+    expect(carrier).not.toHaveBeenCalled()
+    expect(global.fetch).not.toHaveBeenCalled()
+  })
 
   it("passes one identical packing plan through forecast and WWEX before falling through to zone pricing", async () => {
-    const svc = service();
-    mockShippingZones([{ ZoneCode: "Fedex3Day", ShippingZoneBreakpoints: [{ BreakpointPrice: 0, ShippingRate: 75 }] }]);
-    const forecast = jest.spyOn(svc as any, "calculateForecastShippingRate").mockReturnValue(null);
-    const carrier = jest.spyOn(svc as any, "calculateWwexShippingRate").mockResolvedValue(null);
-    const result = await svc.calculatePrice({ service_code: "3_DAY_SELECT" } as any, forecastCart as any, {} as any);
-    expect(result.calculated_amount).toBe(75);
-    const plan = forecast.mock.calls[0][1];
-    expect(carrier.mock.calls[0][1]).toBe(plan);
-    expect(plan).toMatchObject({ appliedPolicy: { policy: { revision: "fixture-season-v1" } } });
-    expect(getPackagingConfig).toHaveBeenCalledTimes(1);
-  });
+    const svc = service()
+    mockShippingZones([
+      {
+        ZoneCode: "Fedex3Day",
+        ShippingZoneBreakpoints: [{ BreakpointPrice: 0, ShippingRate: 75 }],
+      },
+    ])
+    const forecast = jest
+      .spyOn(svc as any, "calculateForecastShippingRate")
+      .mockReturnValue(null)
+    const carrier = jest
+      .spyOn(svc as any, "calculateWwexShippingRate")
+      .mockResolvedValue(null)
+    const result = await svc.calculatePrice(
+      { service_code: "3_DAY_SELECT" } as any,
+      forecastCart as any,
+      {} as any
+    )
+    expect(result.calculated_amount).toBe(75)
+    const plan = forecast.mock.calls[0][1]
+    expect(carrier.mock.calls[0][1]).toBe(plan)
+    expect(plan).toMatchObject({
+      appliedPolicy: { policy: { revision: "fixture-season-v1" } },
+    })
+    expect(getPackagingConfig).toHaveBeenCalledTimes(1)
+  })
 
   it("exposes UPS Ground, 3 Day Select, 2nd Day Air, and Overnight services", async () => {
     const options = await service().getFulfillmentOptions()
@@ -232,7 +334,14 @@ describe("GrillersFulfillmentProviderService", () => {
       { service_code: "3_DAY_SELECT" } as any,
       {
         shipping_address: { postal_code: "90048" },
-        items: [{ variant_id: "variant_fixture", unit_price: 100, quantity: 1, metadata: {} }],
+        items: [
+          {
+            variant_id: "variant_fixture",
+            unit_price: 100,
+            quantity: 1,
+            metadata: {},
+          },
+        ],
       } as any,
       {} as any
     )
@@ -268,7 +377,14 @@ describe("GrillersFulfillmentProviderService", () => {
       { service_code: "ATLANTA_DELIVERY" } as any,
       {
         shipping_address: { postal_code: "30340", province: "GA" },
-        items: [{ variant_id: "variant_fixture", unit_price: 100, quantity: 1, metadata: {} }],
+        items: [
+          {
+            variant_id: "variant_fixture",
+            unit_price: 100,
+            quantity: 1,
+            metadata: {},
+          },
+        ],
       } as any,
       {} as any
     )
@@ -345,12 +461,19 @@ describe("GrillersFulfillmentProviderService", () => {
           last_name: "Customer",
           phone: "2148798521",
         },
-        items: [{ variant_id: "variant_fixture", unit_price: 100, quantity: 1, metadata: {} }],
+        items: [
+          {
+            variant_id: "variant_fixture",
+            unit_price: 100,
+            quantity: 1,
+            metadata: {},
+          },
+        ],
       } as any,
       {} as any
     )
 
-    expect(result.calculated_amount).toBe(17.59)
+    expect(result.calculated_amount).toBe(29.59)
     expect(global.fetch).toHaveBeenCalledTimes(2)
   })
 
@@ -400,8 +523,18 @@ describe("GrillersFulfillmentProviderService", () => {
           phone: "2148798521",
         },
         items: [
-          { variant_id: "variant_fixture", unit_price: 100, quantity: 1, metadata: {} },
-          { variant_id: "variant_fixture", unit_price: 200, quantity: 2, metadata: {} },
+          {
+            variant_id: "variant_fixture",
+            unit_price: 100,
+            quantity: 1,
+            metadata: {},
+          },
+          {
+            variant_id: "variant_fixture",
+            unit_price: 200,
+            quantity: 2,
+            metadata: {},
+          },
         ],
       } as any,
       {} as any
@@ -422,8 +555,7 @@ describe("GrillersFulfillmentProviderService", () => {
           destination_country: "US",
           destination_province: "TX",
           item_count: 2,
-          error_message:
-            "WWEX shopFlow failed: carrier maintenance window",
+          error_message: "WWEX shopFlow failed: carrier maintenance window",
         }),
       })
     )
@@ -447,8 +579,8 @@ describe("GrillersFulfillmentProviderService", () => {
       {} as any
     )
 
-    // mean 42 + p75 residual buffer 10 = 52; forecast short-circuits before Strapi
-    expect(result.calculated_amount).toBe(52)
+    // mean 42 + p75 buffer 10 + two-box packaging 24 = 76; forecast short-circuits before Strapi
+    expect(result.calculated_amount).toBe(76)
     expect(global.fetch).not.toHaveBeenCalled()
   })
 
@@ -464,7 +596,7 @@ describe("GrillersFulfillmentProviderService", () => {
       {} as any
     )
 
-    expect(result.calculated_amount).toBe(42)
+    expect(result.calculated_amount).toBe(66)
     expect(global.fetch).not.toHaveBeenCalled()
   })
 
@@ -594,7 +726,14 @@ describe("GrillersFulfillmentProviderService", () => {
       { service_code: "2ND_DAY_AIR" } as any,
       {
         shipping_address: { postal_code: "90048" },
-        items: [{ variant_id: "variant_fixture", unit_price: 100, quantity: 1, metadata: {} }],
+        items: [
+          {
+            variant_id: "variant_fixture",
+            unit_price: 100,
+            quantity: 1,
+            metadata: {},
+          },
+        ],
       } as any,
       {} as any
     )
@@ -609,7 +748,14 @@ describe("GrillersFulfillmentProviderService", () => {
       { service_code: "GROUND" } as any,
       {
         shipping_address: { postal_code: "30340" },
-        items: [{ variant_id: "variant_fixture", unit_price: 100, quantity: 1, metadata: {} }],
+        items: [
+          {
+            variant_id: "variant_fixture",
+            unit_price: 100,
+            quantity: 1,
+            metadata: {},
+          },
+        ],
       } as any,
       {} as any
     )
@@ -651,7 +797,14 @@ describe("GrillersFulfillmentProviderService", () => {
       { service_code: "GROUND" } as any,
       {
         shipping_address: { postal_code: "30340", province: "GA" },
-        items: [{ variant_id: "variant_fixture", unit_price: 100, quantity: 1, metadata: {} }],
+        items: [
+          {
+            variant_id: "variant_fixture",
+            unit_price: 100,
+            quantity: 1,
+            metadata: {},
+          },
+        ],
       } as any,
       {} as any
     )
@@ -703,5 +856,48 @@ describe("GrillersFulfillmentProviderService", () => {
         }),
       })
     )
+  })
+  it("reuses the displayed server quote through native price-before-validation ordering", async () => {
+    const svc = service()
+    const cart = {
+      id: "cart_fixture",
+      currency_code: "usd",
+      items: [shippingLine()],
+      shipping_address: { postal_code: "30340" },
+    }
+    jest
+      .spyOn(svc as any, "calculateForecastShippingRate")
+      .mockReturnValue(null)
+    const carrier = jest
+      .spyOn(svc as any, "calculateWwexShippingRate")
+      .mockResolvedValueOnce(20)
+      .mockResolvedValue(99)
+    const displayed: any = await svc.calculatePrice(
+      { service_code: "GROUND" } as any,
+      cart as any,
+      {} as any
+    )
+    const data = {
+      [SHIPPING_PRICE_TOKEN_KEY]: displayed[SHIPPING_PRICE_TOKEN_KEY],
+    }
+    const attached = await svc.calculatePrice(
+      { service_code: "GROUND" } as any,
+      data as any,
+      cart as any
+    )
+    const validated = await svc.validateFulfillmentData(
+      { service_code: "GROUND" },
+      data,
+      cart
+    )
+    expect(displayed.calculated_amount).toBe(32)
+    expect(attached.calculated_amount).toBe(32)
+    expect(carrier).toHaveBeenCalledTimes(1)
+    expect(validated[SHIPPING_PRICE_TOKEN_KEY]).toBe(
+      data[SHIPPING_PRICE_TOKEN_KEY]
+    )
+    await expect(
+      svc.validateFulfillmentData({ service_code: "GROUND" }, {}, cart)
+    ).rejects.toThrow()
   })
 })

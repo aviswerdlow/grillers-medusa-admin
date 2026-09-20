@@ -1,3 +1,12 @@
+import {
+  acceptShippingPrice,
+  readShippingPriceToken,
+  readAcceptedShippingPrice,
+  sealAcceptedShippingPrice,
+  SHIPPING_PRICE_TOKEN_KEY,
+  SHIPPING_PRICE_ACCEPTED_KEY,
+} from "./shipping-price-contract";
+import { getShippingPricePolicy } from "./shipping-price-policy-strapi";
 import { Modules } from "@medusajs/framework/utils";
 import { getPackagingConfig } from "./packaging-cost-strapi";
 import {
@@ -23,6 +32,14 @@ import {
 const CART_FIELDS = [
   "id",
   "completed_at",
+  "currency_code",
+  "shipping_total",
+  "shipping_discount_total",
+  "shipping_tax_total",
+  "item_subtotal",
+  "tax_total",
+  "total",
+  "promotions.id",
   "metadata",
   "shipping_address.*",
   "shipping_methods.*",
@@ -77,7 +94,14 @@ async function shippingAcceptanceContext(container: any, cartId: string) {
   ] as ShippingPackingPlan;
   if (!selected || weightImportHash(selected) !== weightImportHash(expected))
     throw new ShippingInputError("shipping_selection_changed_refresh_required");
-  return { cart, lines, plan: selected };
+  const quote = readShippingPriceToken(
+    shippingMetadata(method.data)[SHIPPING_PRICE_TOKEN_KEY],
+    cart,
+    selected,
+    await getShippingPricePolicy(),
+  );
+  const accepted = acceptShippingPrice(cart, method, quote);
+  return { cart, lines, plan: selected, accepted };
 }
 
 /** Runs before completeCartWorkflow loads its own cart. The native workflow
@@ -96,6 +120,9 @@ export async function prepareShippingAcceptance(
     metadata: {
       ...shippingMetadata(context.cart.metadata),
       [SHIPPING_PACKING_PLAN_KEY]: context.plan,
+      [SHIPPING_PRICE_ACCEPTED_KEY]: sealAcceptedShippingPrice(
+        context.accepted,
+      ),
     },
   });
 }
@@ -108,6 +135,21 @@ export async function validateShippingAcceptance(
 ) {
   const context = await shippingAcceptanceContext(container, loadedCart.id);
   if (!context) return;
+  const accepted = readAcceptedShippingPrice({
+    ...loadedCart,
+    cart_id: loadedCart.id,
+  });
+  if (
+    weightImportHash(accepted) !== weightImportHash(context.accepted) ||
+    weightImportHash(
+      acceptShippingPrice(
+        loadedCart,
+        loadedCart.shipping_methods?.[0],
+        accepted.quote,
+      ),
+    ) !== weightImportHash(accepted)
+  )
+    throw new ShippingInputError("shipping_price_acceptance_changed");
   const expectedLines = shippingWeightSnapshots(
     context.lines,
     new Date().toISOString()

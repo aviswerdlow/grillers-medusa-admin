@@ -74,7 +74,9 @@ export class ShippingInputError extends Error {
     readonly lineId?: string,
   ) {
     super(
-      "Shipping needs an item-weight or packing review. Please contact the store for this shipping option.",
+      code.startsWith("shipping_price") || code === "invalid_shipping_money"
+        ? "Shipping pricing needs review. Refresh your shipping options or contact the store."
+        : "Shipping needs an item-weight or packing review. Please contact the store for this shipping option.",
     );
     this.name = "ShippingInputError";
   }

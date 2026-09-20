@@ -8,7 +8,9 @@ const mockPreviewFinalization = jest.fn()
 const mockClaimFinalChargeAttempt = jest.fn()
 const mockSettleFinalChargeAttempt = jest.fn()
 const mockQuoteWwexFinalizationShipping = jest.fn(async () => null)
-const mockBookWwexFinalizationShipment = jest.fn(async () => ({ metadata: {} }))
+const mockBookWwexFinalizationShipment = jest.fn(async () => ({
+  metadata: {},
+}))
 const mockEmitFinalizationRouteFailureAlert = jest.fn(async (_input: any) => ({
   ok: true,
 }))
@@ -56,7 +58,9 @@ jest.mock("../../../../../../../../lib/wwex-finalization-shipment", () => ({
 
 jest.mock("../../../../../../../../lib/final-charge-ops-alerts", () => ({
   emitChargeFailedHoldAlert: jest.fn(async () => ({ ok: true })),
-  emitChargeMarkedReadyButPiNotSucceededAlert: jest.fn(async () => ({ ok: true })),
+  emitChargeMarkedReadyButPiNotSucceededAlert: jest.fn(async () => ({
+    ok: true,
+  })),
   emitFinalChargeNonSucceededAlert: jest.fn(async () => ({ ok: true })),
 }))
 
@@ -300,7 +304,9 @@ describe("charge-and-release PI gate", () => {
         status: "succeeded",
       })
     )
-    const updates = db.mock.results.flatMap((r: any) => r.value.update.mock.calls)
+    const updates = db.mock.results.flatMap(
+      (r: any) => r.value.update.mock.calls
+    )
     expect(
       updates.some(
         (call: any[]) =>
@@ -569,10 +575,7 @@ describe("charge-and-release PI gate", () => {
 
     const { scope } = makeScope(makeDb())
     const res = makeRes()
-    await POST(
-      { params: { id: "order_123" }, body: {}, scope } as any,
-      res
-    )
+    await POST({ params: { id: "order_123" }, body: {}, scope } as any, res)
 
     expect(mockCreateStripeFinalPaymentIntent).not.toHaveBeenCalled()
     expect(mockRetrieveStripeFinalPaymentIntent).toHaveBeenCalledWith(
@@ -630,10 +633,7 @@ describe("charge-and-release PI gate", () => {
 
     const { scope, orderModule, eventBus } = makeScope(makeDb())
     const res = makeRes()
-    await POST(
-      { params: { id: "order_123" }, body: {}, scope } as any,
-      res
-    )
+    await POST({ params: { id: "order_123" }, body: {}, scope } as any, res)
 
     expect(res.status).toHaveBeenCalledWith(409)
     expect(mockBookWwexFinalizationShipment).not.toHaveBeenCalled()
@@ -654,10 +654,7 @@ describe("charge-and-release PI gate", () => {
     const db = makeDb()
     const { scope, orderModule } = makeScope(db)
     const res = makeRes()
-    await POST(
-      { params: { id: "order_123" }, body: {}, scope } as any,
-      res
-    )
+    await POST({ params: { id: "order_123" }, body: {}, scope } as any, res)
 
     expect(res.status).toHaveBeenCalledWith(409)
     expect(orderModule.updateOrders).not.toHaveBeenCalled()
@@ -738,4 +735,26 @@ describe("charge-and-release PI gate", () => {
       message: "preview persistence failed",
     })
   })
+})
+
+it("refuses a new Stripe attempt when the shipping price review is blocked", async () => {
+  mockCreateStripeFinalPaymentIntent.mockClear()
+  mockClaimFinalChargeAttempt.mockClear()
+  mockRetrieveFinalizationOrder.mockResolvedValueOnce({
+    id: "order_123",
+    currency_code: "usd",
+    metadata: {},
+  })
+  mockPreviewFinalization.mockResolvedValueOnce(basePreview())
+  ;(mockQuoteWwexFinalizationShipping as jest.Mock).mockResolvedValueOnce({
+    status: "blocked",
+    reason: "shipping_price_review_required",
+    totals: {},
+  })
+  const { scope } = makeScope(makeDb())
+  const res = makeRes()
+  await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
+  expect(res.status).toHaveBeenCalledWith(409)
+  expect(mockClaimFinalChargeAttempt).not.toHaveBeenCalled()
+  expect(mockCreateStripeFinalPaymentIntent).not.toHaveBeenCalled()
 })

@@ -44,7 +44,8 @@ import {
 const stripeChargeId = (paymentIntent: {
   latest_charge?: string | null
   charges?: { data?: Array<{ id?: string }> }
-}) => paymentIntent.latest_charge || paymentIntent.charges?.data?.[0]?.id || null
+}) =>
+  paymentIntent.latest_charge || paymentIntent.charges?.data?.[0]?.id || null
 
 // Stable per (order, finalization, confirmed-decline generation) — the linchpin
 // double-charge protection. The generation stays at zero through timeouts,
@@ -209,11 +210,28 @@ export async function runFinalChargeAndRelease(
       }
     }
 
-    wwexQuote = await quoteWwexFinalizationShipping({
-      order,
-      preview,
-      logger,
-    })
+    // A carrier outage must not prevent recording a payment that already
+    // succeeded. The existing A1 recovery path below must retrieve the known
+    // PaymentIntent and refuses to create a replacement when its ID is absent.
+    const recordingSettledPayment =
+      preview.finalization.status ===
+        FINALIZATION_CHARGE_SUCCEEDED_RECORDING_FAILED ||
+      metadataObject(order.metadata).final_charge_status ===
+        "succeeded_recording_failed"
+    wwexQuote = recordingSettledPayment
+      ? null
+      : await quoteWwexFinalizationShipping({ order, preview, logger })
+    if (wwexQuote?.status === "blocked") {
+      return {
+        result: "preflight_rejected",
+        status: 409,
+        body: {
+          message:
+            "Shipping needs review before the final charge. No new charge was attempted.",
+          type: wwexQuote.reason,
+        },
+      }
+    }
     effectiveTotals = wwexQuote?.totals || preview.totals
 
     finalOrderTotal = effectiveTotals.final_order_total
@@ -312,7 +330,9 @@ export async function runFinalChargeAndRelease(
         // PI. Every other recovery keeps a known PI durably linked to the
         // claimed attempt so a later replay adopts it instead of re-charging.
         stripe_payment_intent_id:
-          attemptPaymentIntentId || persistedFinalizationPaymentIntentId || null,
+          attemptPaymentIntentId ||
+          persistedFinalizationPaymentIntentId ||
+          null,
         stripe_charge_id:
           attempt.stripe_charge_id ||
           (mayAdoptPersistedFinalizationPaymentIntent
@@ -688,7 +708,9 @@ export async function runFinalChargeAndRelease(
     })
 
     return {
-      result: succeededPaymentIntent ? "charge_recording_failed" : "charge_failed",
+      result: succeededPaymentIntent
+        ? "charge_recording_failed"
+        : "charge_failed",
       status: succeededPaymentIntent ? 500 : 402,
       body: {
         message: succeededPaymentIntent
