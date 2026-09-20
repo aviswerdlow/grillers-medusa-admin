@@ -23,6 +23,7 @@
     "recover:production-backend": "node src/scripts/recover-production-backend.mjs",
     "smoke:production-backend": "node src/scripts/smoke-production-backend.mjs",
     "smoke:wwex": "ts-node --transpile-only src/scripts/smoke-wwex-speedship.ts",
+    "inventory:baseline:review": "ts-node --transpile-only src/scripts/inventory-baseline-review.ts",
     "start": "medusa start",
     "dev": "medusa develop",
     "test:integration:http": "TEST_TYPE=integration:http NODE_OPTIONS=--experimental-vm-modules jest --silent=false --runInBand --forceExit",
