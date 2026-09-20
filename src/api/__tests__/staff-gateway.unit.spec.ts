@@ -135,6 +135,17 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     process.env.GP_ADMIN_READ_ONLY_API_KEY_IDS = "apk_gateway"
     expect((await request("/admin/products", { token: null, method: "GET" })).status).toBe(403)
   })
+  it("separates incoming-stock review from writes and denies background readers", async () => {
+    const route = "/admin/grillers/inventory/incoming"
+    expect((await request(route, { method: "GET" })).status).toBe(200)
+    expect((await request(route)).status).toBe(403)
+    customers.cus_staff.metadata = { gp_staff_role: "super_admin" }
+    expect((await request(route)).status).toBe(200)
+    expect((await request(route, { method: "DELETE" })).status).toBe(403)
+    expect((await request(route, { key: "sk_reader", token: null, method: "GET" })).status).toBe(403)
+    // This tests the gateway boundary only. The real command independently
+    // requires a configured receiving operator and rechecks revocation in SQL.
+  })
   it("requires an explicitly configured, existing native recovery operator", async () => {
     const authorization = `Bearer ${token({ actor_type: "user", actor_id: "usr_recovery" })}`
     expect((await request("/admin/users", { authorization, token: null })).status).toBe(200)

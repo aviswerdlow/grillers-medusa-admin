@@ -30,3 +30,7 @@ if (process.env.TEST_TYPE === "integration:catalog") {
 } else if (process.env.TEST_TYPE === "integration:accounting") {
   module.exports.testMatch = ["**/integration-tests/accounting/*.spec.[jt]s"];
 }
+
+if (process.env.TEST_TYPE === "integration:incoming-stock") {
+  module.exports.testMatch = ["**/integration-tests/incoming-stock/*.spec.[jt]s"];
+}
