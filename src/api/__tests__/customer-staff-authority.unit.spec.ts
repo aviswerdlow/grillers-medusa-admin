@@ -30,6 +30,8 @@ const authorityKeys = [
   "staff_access_revoked", "staff_access_updated_at", "final_charge_enabled",
   "can_charge_final_orders", "staff_final_charge_enabled", "catch_weight_charge_enabled",
   "staff_actor_customer_id", "staff_audit_log", "gp_staff_session_generation",
+  "created_by_staff_customer_id", "customer_account_credits", "customer_account_credit_balance_minor", "customer_account_notes",
+  "gp_offline_payment_approved", "gp_offline_methods", "gp_credit_limit", "gp_payment_terms", "gp_invoice_application_status",
 ]
 
 describe("Store customer staff-authority boundary (native Medusa HTTP fixture)", () => {

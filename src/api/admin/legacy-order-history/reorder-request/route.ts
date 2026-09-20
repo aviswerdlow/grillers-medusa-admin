@@ -1,3 +1,4 @@
+import { verifiedStaffAuditFields } from "../../../../lib/staff-principal"
 import { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import {
@@ -52,9 +53,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       key,
       source: "admin_staff_reorder",
       metadata: {
-        staff_actor_customer_id: normalizeText(body.staff_actor_customer_id),
-        staff_actor_email: normalizeText(body.staff_actor_email),
-        staff_actor_name: normalizeText(body.staff_actor_name),
+        staff_actor_customer_id: verifiedStaffAuditFields(req).staff_actor_customer_id,
+        staff_actor_email: verifiedStaffAuditFields(req).staff_actor_email,
+        staff_actor_name: verifiedStaffAuditFields(req).staff_actor_name,
         staff_note: normalizeText(body.staff_note),
       },
     })
@@ -77,7 +78,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       fingerprint: "legacy_reorder_request:admin:500",
       meta: {
         customer_id: customerId,
-        staff_actor_customer_id: normalizeText(body.staff_actor_customer_id),
+        staff_actor_customer_id: verifiedStaffAuditFields(req).staff_actor_customer_id,
         source: "admin_staff_reorder",
         has_key: Boolean(key),
         error_name: err instanceof Error ? err.name : undefined,

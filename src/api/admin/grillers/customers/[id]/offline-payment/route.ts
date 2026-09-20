@@ -1,3 +1,5 @@
+import { requestStaffPrincipal, verifiedStaffActorId } from "../../../../../../lib/staff-principal"
+import { configuredIds } from "../../../../../../lib/staff-access-policy"
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { Modules } from "@medusajs/framework/utils"
 
@@ -28,7 +30,7 @@ import { emitOpsAlert } from "../../../../../../lib/ops-alert"
  */
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   const customerId = req.params.id
-  const actorId = (req as any).auth_context?.actor_id || null
+  const actorId = verifiedStaffActorId(req)
   const logger = req.scope.resolve("logger") as
     | { info?: (m: string) => void; error?: (m: string) => void }
     | undefined
@@ -47,16 +49,20 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   // Resolve the acting admin user's email for the approver allowlist.
   let actorEmail = ""
   try {
-    const userModule = req.scope.resolve(Modules.USER) as any
-    const user = actorId
-      ? await userModule.retrieveUser(actorId, { select: ["id", "email"] })
-      : null
-    actorEmail = user?.email || ""
+    const principal = requestStaffPrincipal(req)
+    if (principal) actorEmail = principal.email || ""
+    else {
+      const userModule = req.scope.resolve(Modules.USER) as any
+      const user = actorId ? await userModule.retrieveUser(actorId, { select: ["id", "email"] }) : null
+      actorEmail = user?.email || ""
+    }
   } catch {
     actorEmail = ""
   }
 
-  if (!isApprover(actorEmail, allowlist)) {
+  const principal = requestStaffPrincipal(req)
+  const approvedIdentity = principal?.kind !== "customer" || configuredIds("GP_INVOICE_APPROVER_CUSTOMER_IDS").has(principal.id)
+  if (!approvedIdentity || !isApprover(actorEmail, allowlist)) {
     return res.status(403).json({
       type: "not_authorized",
       message:

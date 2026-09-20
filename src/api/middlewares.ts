@@ -19,6 +19,7 @@ import {
 import { emitOpsAlert, type OpsAlertSeverity } from "../lib/ops-alert"
 import { opsErrorHandler } from "./middlewares/ops-error-handler"
 import { protectCustomerStaffAuthority } from "./middlewares/customer-staff-authority"
+import { bindFulfillmentAudit, enforceStaffCapabilities, enforceStaffSessionEpoch, protectAdminCustomerAuthority, publishAdminStaffAccess, publishCurrentStaffAccess } from "./middlewares/staff-capabilities"
 import {
   rawStripeWebhookBody,
   stripeSignatureHeader,
@@ -632,6 +633,45 @@ export default defineMiddlewares({
     { matcher: "/store/gp-inventory/availability", method: ["POST"], middlewares: [guardInventoryVariants] },
     { matcher: "/store/gp-inventory/resolution", method: ["POST"], middlewares: [guardInventoryResolution] },
     {
+      matcher: "/admin/*",
+      middlewares: [authenticate("user", ["session", "bearer", "api-key"]), enforceStaffCapabilities],
+    },
+    {
+      matcher: "/auth/token/refresh",
+      method: "POST",
+      middlewares: [authenticate("*", ["bearer"], { allowUnregistered: true }), enforceStaffSessionEpoch],
+    },
+    {
+      matcher: "/auth/session",
+      method: "POST",
+      middlewares: [authenticate("*", ["bearer"]), enforceStaffSessionEpoch],
+    },
+    {
+      matcher: "/store/customers/me",
+      method: "GET",
+      middlewares: [authenticate("customer", ["session", "bearer"]), publishCurrentStaffAccess],
+    },
+    {
+      matcher: "/admin/customers",
+      method: "POST",
+      middlewares: [protectAdminCustomerAuthority],
+    },
+    {
+      matcher: "/admin/customers/:id",
+      method: "POST",
+      middlewares: [protectAdminCustomerAuthority],
+    },
+    {
+      matcher: "/admin/customers/:id/addresses*",
+      method: ["POST", "DELETE"],
+      middlewares: [protectAdminCustomerAuthority],
+    },
+    {
+      matcher: "/admin/customers*",
+      method: "GET",
+      middlewares: [publishAdminStaffAccess],
+    },
+    {
       matcher: "/store/customers",
       method: ["POST"],
       middlewares: [protectCustomerStaffAuthority],
@@ -755,6 +795,7 @@ export default defineMiddlewares({
       matcher: "/admin/orders/:id/fulfillments",
       method: ["POST"],
       middlewares: [
+        bindFulfillmentAudit,
         blockFulfillmentBeforeFinalCharge,
         blockFulfillmentOnSlackHold,
       ],
@@ -763,6 +804,7 @@ export default defineMiddlewares({
       matcher: "/admin/orders/:id/fulfillments/*/shipments",
       method: ["POST"],
       middlewares: [
+        bindFulfillmentAudit,
         blockFulfillmentBeforeFinalCharge,
         blockFulfillmentOnSlackHold,
       ],
@@ -771,6 +813,7 @@ export default defineMiddlewares({
       matcher: "/admin/fulfillments",
       method: ["POST"],
       middlewares: [
+        bindFulfillmentAudit,
         blockFulfillmentBeforeFinalCharge,
         blockFulfillmentOnSlackHold,
       ],

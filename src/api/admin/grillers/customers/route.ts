@@ -7,6 +7,7 @@ import {
   type CreateCustomerInput,
 } from "../../../../lib/gp-customer-create"
 import { emitOpsAlert } from "../../../../lib/ops-alert"
+import { verifiedStaffAuditFields } from "../../../../lib/staff-principal"
 
 /**
  * #277 — staff "Create a customer account".
@@ -75,7 +76,8 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       phone: normalized.phone,
       company_name: normalized.company_name,
       has_account: false,
-      metadata: customerMetadataFromNormalized(normalized),
+      metadata: { ...customerMetadataFromNormalized(normalized),
+        staff_audit_log: JSON.stringify([{ action: "staff_customer_create", at: new Date().toISOString(), ...verifiedStaffAuditFields(req) }]) },
     })
 
     const customer = Array.isArray(created) ? created[0] : created

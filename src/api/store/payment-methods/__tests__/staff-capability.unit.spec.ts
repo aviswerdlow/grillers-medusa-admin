@@ -84,6 +84,17 @@ describe("customer-context saved-card capabilities", () => {
     expect(f.query.graph).toHaveBeenCalledTimes(1)
   })
 
+  it.each([GET, setup, DELETE, setDefault])("rejects an old session after access is regranted for each saved-card action", async handler => {
+    const f = fixture({ gp_staff_role: "super_admin", staff_access_valid_after: 100 })
+    f.req.auth_context.iat = 99
+    await handler(f.req, f.res)
+    expect(f.res.status).toHaveBeenCalledWith(403)
+    expect(f.query.graph).toHaveBeenCalledTimes(1)
+    expect(f.payment.listPaymentMethods).not.toHaveBeenCalled()
+    expect(f.payment.createPaymentMethods).not.toHaveBeenCalled()
+    expect(f.customer.updateCustomers).not.toHaveBeenCalled()
+  })
+
   it.each([true, 1, "true", "1", "yes"])("revocation %p outranks bootstrap compatibility", (value) => {
     expect(canManageCustomerPaymentMethods({ email: "peter@grillerspride.com", metadata: { staff_access_revoked: value } })).toBe(false)
   })

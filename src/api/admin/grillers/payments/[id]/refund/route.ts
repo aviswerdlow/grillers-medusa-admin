@@ -1,3 +1,4 @@
+import { verifiedStaffActorId } from "../../../../../../lib/staff-principal"
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { releaseAllocationLineQuantities } from "../../../../../../lib/inventory-allocation"
@@ -229,7 +230,7 @@ async function queueQbdRefundPosting({
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   const paymentId = req.params.id
   const body = (req.body ?? {}) as RefundBody
-  const actorId = (req as any).auth_context?.actor_id
+  const actorId = verifiedStaffActorId(req) || undefined
   let stage = "parse_request"
   let orderId: string | null = null
   let refundId: string | null = null

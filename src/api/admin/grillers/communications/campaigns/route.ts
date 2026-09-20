@@ -1,3 +1,4 @@
+import { verifiedStaffActorId } from "../../../../../lib/staff-principal"
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { createCampaign } from "../../../../../lib/communications/admin"
@@ -46,7 +47,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       return
     }
   }
-  const actor = (req as any).auth_context?.actor_id || null
+  const actor = verifiedStaffActorId(req) || null
   try {
     const campaign = await createCampaign(req.scope, {
       name: body.name,

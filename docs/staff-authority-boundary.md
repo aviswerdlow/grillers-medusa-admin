@@ -1,39 +1,67 @@
-# Staff authority prerequisite — launch #318
+# Staff gateway, capabilities and revocation — launch #318 / #319
 
-This candidate protects the source of staff metadata and the customer-context saved-card routes. It is **not the complete #318 capability/gateway implementation or #319 bootstrap/session recovery change**. Both issues remain open. It stacks on backend PR 29, preserving the durable accounting/refund work. No deployment or production role change is part of this patch.
+Candidate implementation in backend PR 32, paired with storefront PR 50; stacked on #314 backend PR 29 / storefront PR 47. Neither issue is closed. Owner policy approval, current-grant provenance review, configured isolated identities, integration, deployment and runtime recovery/role proofs remain gates. No live access or provider setting was changed for this patch.
 
-## Source finding and behavior
+## Verified identity and capabilities
 
-Installed Medusa 2.10.3's `StoreCreateCustomer` and `StoreUpdateCustomer` schemas accept arbitrary metadata. Their native POST handlers pass that metadata into `createCustomerAccountWorkflow` and `updateCustomersWorkflow`. The storefront role helpers and backend saved-card helper currently trust multiple metadata aliases. Without a Store write boundary, customer-supplied metadata can become a staff authority input. This is a source/isolated-fixture finding, not a claim that a live account was exploited.
+Medusa authenticates every `/admin/*` transport first. The configured gateway API-key ID also requires the original customer's signed, unexpired Medusa JWT in `x-gp-staff-authorization`. The backend checks signature, actor type, identity, issuance/expiry and fresh customer authority for each request. Body names/emails never establish identity. Lookup failures, unknown credentials and routes outside the capability map are denied, including for storefront owners.
 
-`protectCustomerStaffAuthority` runs on POST `/store/customers` and POST `/store/customers/me`. It rejects the existing role/final-charge aliases and reserves `staff_*` / `gp_staff_*` audit, access and future session fields. It checks raw and validated bodies. Protected-field writes, including null/empty/false values that could clear revocation, return 403. Wholesale null or non-object metadata returns 400. Contact edits and ordinary object metadata continue through the native handlers. Admin role management is unchanged and still needs the authoritative permission boundary in the next #318 packet.
+The three storefront admin consumers share `staff/admin.ts`: staff actions, phone-order/customer entry and inventory checks. It forwards the original cookie token, prevents auth-header substitution, restricts paths to the backend admin origin and refuses redirects. Store `/customers/me` returns response-only `staff_access`, computed from a fresh authority read. The storefront retains its capability checks and removes the admin-profile fallback for stale customer sessions.
 
-`canManageCustomerPaymentMethods` limits a request with `x-gp-staff-target-customer-id` to the existing office/customer-context capability. It uses the current customer fetched by authenticated `auth_context.actor_id`, never a supplied actor ID/name/email. Picker, packer and merchandising roles do not gain access from stale broad flags or a final-charge flag. Revocation wins over all role flags and the existing bootstrap email compatibility. Denials return 403 before target lookup, card read, setup, detach or default-card mutation. Self-service cards still work without a staff target.
+This candidate retains existing console policy. Avi/account administrator must approve it before activation; the optional Office refund/cancellation policy question remains unanswered.
 
-| Existing identity / role | Another customer's saved-card tools |
+| Role | Customer / order support / communications / accounting | Pick | Pack | Preview / approve / fulfill | Final card charge | Team access |
+| --- | --- | --- | --- | --- | --- | --- |
+| Customer / revoked / unknown | No | No | No | No | No | No |
+| Office | Yes | No | No | No | No | No |
+| Picker | No | Yes | No | Yes | Explicit grant | No |
+| Packer | No | Yes | Yes | Yes | Explicit grant | No |
+| General staff / Manager | Yes | Yes | Yes | Yes | Explicit grant | No |
+| Merchandising reviewer | No; merchandising catalog read only | No | No | No | No | No |
+| Super admin | Yes | Yes | Yes | Yes | Yes | Yes |
+
+Warehouse roles can read needed orders/inventory. Office retains capture/cancellation, the custom idempotent refund route and accounting support. Final-charge permission never grants saved-card/customer access. Generic order metadata writes and native refund bypasses are denied to the gateway; dedicated workflows own payment/release state. Accounting handoffs cannot overwrite final-charge, release or actor authority. Approval emits the optional auto-charge signal only for a verified charge-capable person or separate privileged operator; #313's business/provider guards still apply.
+
+Invoice terms use the dedicated audited endpoint, the existing approver email allowlist and, for customer gateway identities, an approved immutable customer ID. Ordinary profiles cannot grant invoice eligibility/credit terms. This authority protection does not complete #367's accounting/business reconciliation.
+
+## Grants, revocation and recovery
+
+Bootstrap privileges use `GP_STAFF_BOOTSTRAP_CUSTOMER_IDS`, never hard-coded emails. Revocation wins. A role change sets `staff_bootstrap_override=true`, so demotion/regrant cannot silently restore the initial owner role.
+
+POST `/admin/grillers/staff-access/customers/:id` requires Team access or a separately configured privileged native operator, current `expected_version`, a reason, typed confirmation and valid role. Self-demotion is refused. Recovery configuration must exist before grants change. A transaction locks actor and target in stable order, rechecks the owner's current grant/session, compares the version and atomically writes canonical permissions, revocation, the monotonically nondecreasing `staff_access_valid_after` cutoff, an incremented version, and a named before/after audit. The dedicated `staff_access_audit_log` is not trimmed by ordinary profile notes; recent staff history also gets the event.
+
+No table migration is needed. Generic admin profile edits strip unchanged grant snapshots and reject permission changes/clearing. Office cannot edit a staff account or its addresses. Public account writes reject role, charge, session, audit, customer-credit and invoice-authority fields. These protections do not authenticate historical grants; a protected provenance review is still required.
+
+Old JWTs cannot perform privileged gateway or saved-card actions after an access change, including regrant. Native refresh and session creation enforce the cutoff, including pre-registration tokens whose customer identity is hydrated during refresh. A fresh password sign-in issued after the cutoff is required; same-second tokens are conservatively refused. Ordinary customer self-service remains available. Requests admitted before revocation may finish; role transactions additionally recheck the actor under lock.
+
+Recovery uses a separately authenticated native Medusa user in `GP_PRIVILEGED_ADMIN_USER_IDS`, read fresh each request, and the same audited grant endpoint. Removing the configured ID or deleting the account denies later requests. This is an explicitly privileged operations identity, not a picker or perpetual storefront bypass. Real recovery configuration and rehearsal are prerequisites, not implied by synthetic fixtures.
+
+## Audit attribution and remaining interface
+
+Custom finalization, refunds, accounting handoffs/retries, legacy mappings/reorders and communications use the verified person. Native order/payment workflows receive that person's actor ID only after transport authentication and capabilities pass, so `captured_by`/`canceled_by` do not name the shared key. The original transport ID remains on the request principal. Fulfillment and customer profile/address metadata receive server attribution. Caller audit history must retain its stored prefix; only appended entries get the current actor. Generic profiles cannot overwrite the dedicated grant audit.
+
+**Remaining #318/#312 interface:** staff phone-order Store-cart metadata is separate from the admin gateway. `src/lib/inventory-allocation.ts` still consumes order metadata for staff allocation attribution, and frontend `staff/order-entry.ts` constructs it through Store requests. Review that signed staff-cart handoff before closing #318; these admin fixtures do not prove it. Do not resume #312's twice-failed native fixture setup as part of this handoff.
+
+## Coordinated release configuration
+
+| Backend setting | Reviewed value |
 | --- | --- |
-| Customer, picker, packer, merchandising reviewer, unknown explicit role | Denied |
-| Office, manager, general staff and existing legacy office aliases | Allowed |
-| Super admin | Allowed |
-| Any revoked identity, including bootstrap email | Denied |
+| `GP_STAFF_GATEWAY_API_KEY_ID` | ID of the dedicated key used by storefront `MEDUSA_ADMIN_API_TOKEN`, never its secret token |
+| `GP_ADMIN_READ_ONLY_API_KEY_IDS` | IDs of approved GET-only integrations, including #316's reader and storefront background reader |
+| `GP_PRIVILEGED_ADMIN_USER_IDS` | Existing native user IDs for separate privileged operations/recovery |
+| `GP_STAFF_BOOTSTRAP_CUSTOMER_IDS` | Approved existing customer IDs for initial owners after identity/grant review |
+| `GP_INVOICE_APPROVER_CUSTOMER_IDS` | Approved invoice approver customer IDs, alongside the existing email allowlist |
 
-This table describes this patch's source behavior. It is not a new owner-approved launch role matrix.
+The gateway key cannot fall back to read-only service access without a staff JWT. Back-in-stock/review-acquisition jobs now use separate storefront `MEDUSA_READ_ONLY_API_TOKEN`; its backend ID must be on the read-only list. There is no fallback to the gateway credential. Coordinate with #316/communications owners. This patch neither configures nor runs scheduled sends.
 
-## Verification scope
+Before activation:
 
-The local HTTP fixture uses the installed Medusa authentication, native validators and native customer handlers, the actual registered middleware, real signed synthetic customer JWTs and a local ephemeral HTTP listener. Customer workflow/persistence boundaries are spies. It tests both registration and profile update, every known authority alias, clearing/revocation attempts, invalid tokens, ordinary preferences and contact edits. Medusa's actual route sorter verifies registration order.
+1. Approve the matrix and immutable identities, review existing grant provenance privately, and verify the independent recovery login. Do not derive IDs from email or revoke/provision real accounts automatically.
+2. Integrate #314 and #313 financial protections and #322's parallel middleware changes without replacing other guards. Classify service consumers; keep the deliberately absent legacy writer credential absent.
+3. Review paired revisions, guide and exact-head CI. Configure backend identities and the separate reader before enabling the paired frontend. Missing configuration deliberately denies admin access; do not deploy this boundary alone.
+4. Rehearse isolated roles against the deployed endpoints, proving denial before provider/data effects, named audits, bootstrap revocation, refresh, regrant and separate recovery. Preserve distinct Medusa/Stripe/sync/QBD receipts and complete the remaining Store-cart interface review.
+5. Keep a written rollback/recovery path. Reverting code can restore unsafe metadata/email authority. Do not erase newer grant cutoffs to make rollback appear successful; keep affected tools unavailable until the safe boundary returns.
 
-The saved-card tests invoke all four real route handlers (list, SetupIntent, detach, default) with synthetic scopes. Denied roles cannot resolve a provider or target customer; permitted office roles can list cards; replaying an authenticated request re-reads revocation. These checks do not perform real Stripe operations, persist a customer, start the full Medusa app, or establish deployed acceptance.
+## Verification limits
 
-Focused check: `yarn test:unit --runTestsByPath src/api/__tests__/customer-staff-authority.unit.spec.ts src/api/store/payment-methods/__tests__/staff-capability.unit.spec.ts src/api/store/payment-methods/__tests__/utils.unit.spec.ts src/api/store/payment-methods/setup-intent/__tests__/route.unit.spec.ts`.
-
-## Next #318/#319 packet and release gates
-
-1. Approve the complete role/capability matrix and isolated role identities with Avi/account administrator. Distinguish office, pick, pack, money, customer/role management, merchandising and direct Medusa operators.
-2. Bind the shared storefront admin gateway to the original authenticated individual. Backend permission checks must cover native/custom money, customer, role, finalization and #314 accounting-history/handoff/retry routes. Denied or forged requests must cause no mutation; audit entries must record the verified person. Consolidate all three frontend admin clients (`staff/admin.ts`, `staff/order-entry.ts`, `inventory-allocation.ts`).
-3. Replace email-only bootstrap compatibility with approved immutable identity binding and an audited recovery policy. Current UI/email bootstrap checks remain outside this prerequisite patch. Do not close #319 based on saved-card denial: full revocation/regrant, stale-session rejection and independently tested recovery remain required.
-4. Review current role metadata provenance before treating stored grants as trusted. Blocking new self-writes does not retroactively verify old grants. Use a protected read-only review; do not revoke real staff or create identities without authorization.
-5. Integrate #322's separate middleware edits without losing either guard. Update the staff operations guide from the paired storefront PR. Preserve #314's immutable outbox/refund contracts.
-6. Obtain exact-head CI, review/release authority, a backend deployment receipt and sanitized actual HTTP role tests before claiming runtime acceptance. Record Stripe, Medusa and accounting effects separately. No marketing sends, live payments or credential changes are needed to review this patch.
-
-Rollback is the prior reviewed deployment revision. There is no migration, credential rotation, stock change, provider call or data rewrite in this candidate. Reverting would restore the unsafe Store metadata write path, so an operational rollback must keep affected staff actions unavailable until the boundary is restored.
+HTTP fixtures use installed Medusa authentication, route sorting, native capture/refresh/session handlers, registered guards and actual audit helpers. Customer/module/provider boundaries are synthetic. PostgreSQL tests use an isolated temporary schema for real concurrency, rollback and recovery writes. Frontend fixtures check protected headers, no-cookie denial, redirect/path restrictions, server authority and existing actions. Exact-head CI supplies full suites, TypeScript and the frontend build. These are candidate-code receipts, not deployed acceptance or real provider transactions.

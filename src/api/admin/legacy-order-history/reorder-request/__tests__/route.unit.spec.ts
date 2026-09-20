@@ -46,6 +46,7 @@ function makeRes() {
 function makeReq() {
   const logger = { error: jest.fn() }
   return {
+    gp_staff_principal: { id: "staff_1", kind: "customer", email: "ops@example.com", name: "Fixture Operator" },
     body: {
       customer_id: "cus_admin_legacy",
       key: "legacy:item",

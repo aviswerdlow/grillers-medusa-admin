@@ -1,3 +1,4 @@
+import { verifiedStaffActorId } from "../../../../../lib/staff-principal"
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { createOrUpdateSegment } from "../../../../../lib/communications/admin"
@@ -42,7 +43,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       name: body.name,
       description: body.description || null,
       definition: body.definition,
-      created_by: (req as any).auth_context?.actor_id || null,
+      created_by: verifiedStaffActorId(req) || null,
     })
     res.status(201).json(result)
   } catch (error) {

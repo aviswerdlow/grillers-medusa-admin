@@ -1,7 +1,7 @@
 import type { MedusaRequest } from "@medusajs/framework/http";
 import { Modules } from "@medusajs/framework/utils";
 import { emitOpsAlert } from "../../../lib/ops-alert";
-import { canManageCustomerPaymentMethods } from "../../../lib/staff-access-policy";
+import { canManageCustomerPaymentMethods, staffSessionIsCurrent } from "../../../lib/staff-access-policy";
 
 export const STRIPE_PROVIDER_ID = "pp_stripe_stripe";
 export const DEFAULT_PAYMENT_METHOD_METADATA_KEY = "default_payment_method_id";
@@ -158,7 +158,7 @@ export async function getPaymentContextCustomer(req: MedusaRequest) {
     };
   }
 
-  if (!canManageCustomerPaymentMethods(authenticatedCustomer)) {
+  if (!canManageCustomerPaymentMethods(authenticatedCustomer) || !authenticatedCustomer || !staffSessionIsCurrent(authenticatedCustomer, (req as any).auth_context)) {
     throw new PaymentMethodAccessDenied(
       "Staff access required: office permission is needed for customer-context payment methods.",
     );
