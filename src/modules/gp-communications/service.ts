@@ -1,3 +1,6 @@
+import ReceiptContact from "./models/receipt-contact"
+import ReceiptChallenge from "./models/receipt-challenge"
+import ReceiptSnapshot from "./models/receipt-snapshot"
 import { MedusaService } from "@medusajs/framework/utils"
 import Campaign from "./models/campaign"
 import Attribution from "./models/attribution"
@@ -22,6 +25,9 @@ import SuppressionPreference from "./models/suppression-preference"
 
 class GpCommunicationsModuleService extends MedusaService({
   Attribution,
+  ReceiptContact,
+  ReceiptChallenge,
+  ReceiptSnapshot,
   Campaign,
   CartLifecycle,
   CommunicationEvent,
