@@ -4,6 +4,7 @@ import {
 } from "../wwex-speedship"
 import { wwexRateInputFromFulfillmentData } from "../wwex-speedship"
 import { createShippingPackingPlan } from "../../../lib/shipping-packing-plan"
+import { packingContext } from "../../../lib/__tests__/__fixtures__/shipping-inputs"
 import { shippingLine,packingConfig } from "../../../lib/__tests__/__fixtures__/shipping-inputs"
 
 const env = {
@@ -136,7 +137,7 @@ describe("WwexSpeedshipClient", () => {
   })
 
   it("uses the shared plan's physical contents plus ice/tare and ignores forged checkout packages",()=>{
-    const plan=createShippingPackingPlan([shippingLine({quantity:2})],{service:"GROUND",postalCode:"30340",validatedTransit:{days:1,revision:"test"}},packingConfig());
+    const plan=createShippingPackingPlan([shippingLine({quantity:2})],packingContext(),packingConfig());
     const data={shipping_address:{postal_code:"30340",city:"Doraville",province:"GA"},items:[shippingLine({quantity:2})],packages:[{packed_weight_lb:1}]};
     const input=wwexRateInputFromFulfillmentData("GROUND",data,plan)!;
     const request=createWwexSpeedshipClientFromEnv(env)!.buildShopRequest(input);

@@ -13,7 +13,7 @@ const originalCalendarEnforcement = process.env.GP_CALENDAR_ENFORCEMENT
 jest.mock("../../../lib/fulfillment-calendar-runtime", () => ({
   // This suite owns price/weight behavior. Calendar and acceptance contracts
   // are exercised with their real implementation in calendar-runtime tests.
-  calendarPackingContextForRate: jest.fn(async (_query, _cart, service) => ({service, postalCode:"30340"})),
+  calendarPackingContextForRate: jest.fn(async (_query, _cart, service) => ({...require("../../../lib/__tests__/__fixtures__/shipping-inputs").packingContext(),service})),
 }))
 
 jest.mock("../../../lib/ops-alert", () => ({
@@ -175,6 +175,30 @@ describe("GrillersFulfillmentProviderService", () => {
     const result=await svc.validateFulfillmentData({service_code:"GROUND"},{service_code:"PICKUP",packages:[{packed_weight_lb:1}],shipping_packing_plan_v1:{fake:true}},{items:[shippingLine()],shipping_address:{postal_code:"30340"}});
     expect(result.service_code).toBe("GROUND");expect(result.packages).toBeUndefined();
     expect(result.shipping_packing_plan_v1.weights.physicalWeightLb).toBe(1.5);
+  });
+
+  it("cannot bypass missing seasonal approval through forecast, WWEX, or a price-table fallback", async () => {
+    const svc = service(), config = packingConfig();
+    config.seasonalPolicies = [];
+    ;(getPackagingConfig as jest.Mock).mockResolvedValue(config);
+    const forecast = jest.spyOn(svc as any, "calculateForecastShippingRate");
+    const carrier = jest.spyOn(svc as any, "calculateWwexShippingRate");
+    global.fetch = jest.fn();
+    await expect(svc.calculatePrice({ service_code: "GROUND" } as any, forecastCart as any, {} as any)).rejects.toThrow("item-weight or packing review");
+    expect(forecast).not.toHaveBeenCalled(); expect(carrier).not.toHaveBeenCalled(); expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("passes one identical packing plan through forecast and WWEX before falling through to zone pricing", async () => {
+    const svc = service();
+    mockShippingZones([{ ZoneCode: "Fedex3Day", ShippingZoneBreakpoints: [{ BreakpointPrice: 0, ShippingRate: 75 }] }]);
+    const forecast = jest.spyOn(svc as any, "calculateForecastShippingRate").mockReturnValue(null);
+    const carrier = jest.spyOn(svc as any, "calculateWwexShippingRate").mockResolvedValue(null);
+    const result = await svc.calculatePrice({ service_code: "3_DAY_SELECT" } as any, forecastCart as any, {} as any);
+    expect(result.calculated_amount).toBe(75);
+    const plan = forecast.mock.calls[0][1];
+    expect(carrier.mock.calls[0][1]).toBe(plan);
+    expect(plan).toMatchObject({ appliedPolicy: { policy: { revision: "fixture-season-v1" } } });
+    expect(getPackagingConfig).toHaveBeenCalledTimes(1);
   });
 
   it("exposes UPS Ground, 3 Day Select, 2nd Day Air, and Overnight services", async () => {

@@ -248,6 +248,8 @@ export function packingContextFromCalendar(
     dispatchDate: c.dispatchDate,
     arrivalDate: c.arrivalDate,
     validatedTransit: {
+      packedAt: c.packedAt,
+      arrivalBy: c.arrivalBy,
       days: c.transitBusinessDays,
       packingDays: c.packingDays,
       elapsedHours: c.elapsedPackingHours,

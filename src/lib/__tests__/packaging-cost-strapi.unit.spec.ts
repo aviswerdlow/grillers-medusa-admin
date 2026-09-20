@@ -1,4 +1,7 @@
 import { resolvePackagingConfig } from "../packaging-cost"
+import { createShippingPackingPlan } from "../shipping-packing-plan"
+import { ShippingInputError } from "../shipping-weights"
+import { packingContext, seasonalPolicy, shippingLine } from "./__fixtures__/shipping-inputs"
 import {
   fetchPackagingOverridesFromStrapi,
   getPackagingConfig,
@@ -8,6 +11,11 @@ import {
 
 it("retains the reviewed policy, external dimensions and separate fit calibration",()=>{
   expect(packagingOverridesFromColdChainSetting({PackingPolicyVersion:"review-v1",PackagingBoxes:[{PackagingTier:"m330",LengthIn:18,WidthIn:15,HeightIn:13,MaxFitUnits:12,FitRuleId:"fit-v1"}]})).toMatchObject({policyVersion:"review-v1",packagingBoxes:[{lengthIn:18,widthIn:15,heightIn:13,maxFitUnits:12,fitRuleId:"fit-v1"}]})
+})
+
+it("preserves the approved seasonal rows and ice space without fabricating defaults", () => {
+  const rows = [seasonalPolicy()];
+  expect(packagingOverridesFromColdChainSetting({ Enabled: true, SeasonalPackingPolicies: rows, PackagingBoxes: [{ DryIceFitUnitsPerLb: 0.25 }] })).toMatchObject({ enabled: true, seasonalPolicies: rows, packagingBoxes: [{ dryIceFitUnitsPerLb: 0.25 }] });
 })
 
 describe("resolvePackagingConfig — layering default < strapi < env", () => {
@@ -229,10 +237,21 @@ describe("getPackagingConfig — fetch + cache", () => {
     expect(fetchMock.mock.calls[0][0]).toContain(
       "populate[TransitDayThresholds]=*&populate[PackagingBoxes]=*"
     )
+    expect(fetchMock.mock.calls[0][0]).toContain("status=published")
+    expect(fetchMock.mock.calls[0][0]).toContain("populate[SeasonalPackingPolicies][populate][ExposureRules]=*")
 
     // past the TTL → refetch
     await getPackagingConfig(env, 1_000 + 6 * 60 * 1000)
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it("does not share cached policy between CMS origins or tokens", async () => {
+    const mock = jest.fn(async () => ({ ok: true, json: async () => ({ data: { Enabled: false } }) }));
+    global.fetch = mock as any;
+    await getPackagingConfig({ STRAPI_URL: "https://first.test", STRAPI_TOKEN: "fixture-one" }, 1000);
+    await getPackagingConfig({ STRAPI_URL: "https://second.test", STRAPI_TOKEN: "fixture-one" }, 2000);
+    await getPackagingConfig({ STRAPI_URL: "https://second.test", STRAPI_TOKEN: "fixture-two" }, 3000);
+    expect(mock).toHaveBeenCalledTimes(3);
   })
 
   it("falls back to defaults when Strapi fails (never throws)", async () => {
@@ -244,6 +263,7 @@ describe("getPackagingConfig — fetch + cache", () => {
       Date.now()
     )
     expect(c.dryIceUsdPerLb).toBe(0.6) // default
+    expect(() => createShippingPackingPlan([shippingLine()], packingContext(), c)).toThrow(ShippingInputError)
   })
 
   it("returns {} overrides when STRAPI_URL is unset", async () => {

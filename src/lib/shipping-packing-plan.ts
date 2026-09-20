@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import {
-  transitDaysForOrder,
   type PackagingCostConfig,
   type ContinuousPackagingBoxRule,
 } from "./packaging-cost";
@@ -10,6 +9,11 @@ import {
   type ShippingLine,
   type ResolvedShippingWeights,
 } from "./shipping-weights";
+import {
+  PackingPolicyError,
+  selectSeasonalPackingPolicy,
+  validatePackingPublication,
+} from "./seasonal-packing-policy";
 export const SHIPPING_PACKING_PLAN_KEY = "shipping_packing_plan_v1";
 
 export type ShippingPackingContext = {
@@ -23,6 +27,8 @@ export type ShippingPackingContext = {
     revision: string;
     packingDays?: number;
     elapsedHours?: number;
+    packedAt?: string;
+    arrivalBy?: string;
   };
 };
 export type PlannedShippingPackage = {
@@ -37,6 +43,9 @@ export type PlannedShippingPackage = {
   grossWeightLb: number;
   fitUnits: number;
   fitCapacity: number;
+  dryIceFitUnits: number;
+  totalFitUnits: number;
+  grossWeightLimitLb: number;
   contents: Array<{ variantId: string; quantity: number }>;
 };
 export type ShippingPackingPlan = {
@@ -51,6 +60,13 @@ export type ShippingPackingPlan = {
   transitSource: string;
   packingDays?: number;
   elapsedPackingHours?: number;
+  appliedPolicy: ReturnType<typeof selectSeasonalPackingPolicy> & {
+    minimumDryIceAmountLb: number;
+    dryIceUsdPerLb: number;
+    boxUnitCost: number;
+    dryIceFitUnitsPerLb: number;
+    carrierMaxPackageWeightLb: number;
+  };
   weights: ResolvedShippingWeights;
   packages: PlannedShippingPackage[];
   boxes: number;
@@ -78,18 +94,18 @@ export function createShippingPackingPlan(
   if (
     config.model !== "continuous_weight" ||
     !config.continuous ||
-    !config.policyVersion?.trim()
+    !config.policyVersion?.trim() ||
+    config.enabled !== true
   )
     throw new ShippingInputError("unapproved_packing_policy");
   if (!positive(config.dryIceUsdPerLb))
     throw new ShippingInputError("invalid_dry_ice_cost");
-  const transitDays =
-    context.validatedTransit?.days ??
-    transitDaysForOrder(context.service, context.postalCode);
+  const transitDays = context.validatedTransit?.days;
   if (
     !Number.isSafeInteger(transitDays) ||
+    !transitDays ||
     transitDays <= 0 ||
-    (context.validatedTransit && !context.validatedTransit.revision)
+    !context.validatedTransit?.revision
   )
     throw new ShippingInputError("invalid_transit_context");
   const packingDays = context.validatedTransit?.packingDays;
@@ -104,15 +120,46 @@ export function createShippingPackingPlan(
     )
       throw new ShippingInputError("invalid_elapsed_packing_context");
   }
-  const threshold = [...config.continuous.dryIceByTransitDays]
-    .filter(
-      (r) =>
-        r.transitDays <= (context.validatedTransit?.packingDays ?? transitDays),
-    )
-    .sort((a, b) => b.transitDays - a.transitDays)[0];
-  if (!threshold || !positive(threshold.dryIceLbPerBox))
-    throw new ShippingInputError("missing_transit_packing_rule");
-  const ice = threshold.dryIceLbPerBox;
+  let selected: ReturnType<typeof selectSeasonalPackingPolicy>;
+  try {
+    // Validate the same complete contract as the CMS publication gate. No
+    // incomplete field may inherit an unstated legacy operating value.
+    const policies = validatePackingPublication({
+      Enabled: config.enabled,
+      PackagingCostModel: config.model,
+      PackingPolicyVersion: config.policyVersion,
+      MinimumDryIceAmount: config.minimumDryIceAmountLb,
+      DryIcePricePerLb: config.dryIceUsdPerLb,
+      SeasonalPackingPolicies: config.seasonalPolicies,
+      PackagingBoxes: config.continuous.boxRules.map((b) => ({
+        PackagingTier: b.boxTier,
+        Name: b.name,
+        UnitCost: b.unitCost,
+        LengthIn: b.lengthIn,
+        WidthIn: b.widthIn,
+        HeightIn: b.heightIn,
+        MaxProductWeightLb: b.maxProductWeightLb,
+        MaxTransitDays: b.maxTransitDays,
+        MaxTotalWeightLb: b.maxTotalWeightLb,
+        TareWeightLb: b.tareWeightLb,
+        MaxFitUnits: b.maxFitUnits,
+        FitRuleId: b.fitRuleId,
+        DryIceFitUnitsPerLb: b.dryIceFitUnitsPerLb,
+      })),
+    });
+    selected = selectSeasonalPackingPolicy(policies, {
+      service: context.service,
+      ...context.validatedTransit,
+    });
+  } catch (error) {
+    if (error instanceof PackingPolicyError)
+      throw new ShippingInputError(error.code);
+    throw error;
+  }
+  if (!positive(config.carrierMaxPackageWeightLb))
+    throw new ShippingInputError("invalid_carrier_package_limit");
+  const ice = config.minimumDryIceAmountLb! * selected.rule.dryIceMultiplier;
+  if (!positive(ice)) throw new ShippingInputError("invalid_dry_ice_quantity");
   const physical = weights.lines.filter((line) => line.kind === "physical");
   const unitCount = physical.reduce((n, l) => n + l.quantity, 0);
   if (unitCount > 10000) throw new ShippingInputError("packing_unit_limit");
@@ -121,9 +168,9 @@ export function createShippingPackingPlan(
     box: ContinuousPackagingBoxRule,
   ): PlannedShippingPackage[] | null => {
     if (
-      box.maxTransitDays !== null &&
-      (context.validatedTransit?.packingDays ?? transitDays) >
-        box.maxTransitDays
+      !selected.policy.boxTiers.includes(box.boxTier) ||
+      (box.maxTransitDays !== null &&
+        Math.ceil(selected.exposureHours / 24) > box.maxTransitDays)
     )
       return null;
     if (
@@ -131,16 +178,25 @@ export function createShippingPackingPlan(
       !positive(box.widthIn) ||
       !positive(box.heightIn) ||
       !positive(box.maxFitUnits) ||
+      !positive(box.dryIceFitUnitsPerLb) ||
       box.fitRuleId !== weights.fitRuleId ||
       !positive(box.unitCost)
     )
       return null;
+    const grossWeightLimitLb = Math.min(
+      box.maxTotalWeightLb,
+      selected.policy.maxGrossWeightLb,
+      config.carrierMaxPackageWeightLb!,
+    );
+    const dryIceFitUnits = ice * box.dryIceFitUnitsPerLb;
+    const foodFitCapacity = box.maxFitUnits - dryIceFitUnits;
     const capacity = Math.min(
       box.maxProductWeightLb ?? Infinity,
-      box.maxTotalWeightLb - ice - box.tareWeightLb,
+      grossWeightLimitLb - ice - box.tareWeightLb,
     );
     if (
       !positive(capacity) ||
+      !positive(foodFitCapacity) ||
       !Number.isFinite(box.tareWeightLb) ||
       box.tareWeightLb < 0
     )
@@ -155,17 +211,17 @@ export function createShippingPackingPlan(
       )
       .sort(
         (a, b) =>
-          Math.max(b.weight / capacity, b.fit / box.maxFitUnits!) -
-            Math.max(a.weight / capacity, a.fit / box.maxFitUnits!) ||
+          Math.max(b.weight / capacity, b.fit / foodFitCapacity) -
+            Math.max(a.weight / capacity, a.fit / foodFitCapacity) ||
           a.variantId.localeCompare(b.variantId),
       );
     const packages: PlannedShippingPackage[] = [];
     for (const unit of units) {
-      if (unit.weight > capacity || unit.fit > box.maxFitUnits) return null;
+      if (unit.weight > capacity || unit.fit > foodFitCapacity) return null;
       let target = packages.find(
         (p) =>
           p.productWeightLb + unit.weight <= capacity + 1e-9 &&
-          p.fitUnits + unit.fit <= box.maxFitUnits! + 1e-9,
+          p.fitUnits + unit.fit <= foodFitCapacity + 1e-9,
       );
       if (!target) {
         target = {
@@ -180,6 +236,9 @@ export function createShippingPackingPlan(
           grossWeightLb: 0,
           fitUnits: 0,
           fitCapacity: box.maxFitUnits,
+          dryIceFitUnits,
+          totalFitUnits: dryIceFitUnits,
+          grossWeightLimitLb,
           contents: [],
         };
         packages.push(target);
@@ -196,6 +255,7 @@ export function createShippingPackingPlan(
       ...p,
       productWeightLb: rounded(p.productWeightLb),
       fitUnits: rounded(p.fitUnits),
+      totalFitUnits: rounded(p.fitUnits + p.dryIceFitUnits),
       grossWeightLb: rounded(p.productWeightLb + p.dryIceLb + p.tareLb),
     }));
   };
@@ -222,6 +282,16 @@ export function createShippingPackingPlan(
     version: 1 as const,
     policyVersion: config.policyVersion,
     fitRuleId: weights.fitRuleId,
+    // Copy approved values, not live references. Hash includes all policy,
+    // exposure, capacity and cost inputs so changed quotes require acceptance.
+    appliedPolicy: {
+      ...selected,
+      minimumDryIceAmountLb: config.minimumDryIceAmountLb!,
+      dryIceUsdPerLb: config.dryIceUsdPerLb,
+      boxUnitCost: choice.box.unitCost,
+      dryIceFitUnitsPerLb: choice.box.dryIceFitUnitsPerLb!,
+      carrierMaxPackageWeightLb: config.carrierMaxPackageWeightLb!,
+    },
     service: context.service,
     dispatchDate: context.dispatchDate ?? null,
     arrivalDate: context.arrivalDate ?? null,
@@ -231,8 +301,8 @@ export function createShippingPackingPlan(
           elapsedPackingHours: context.validatedTransit.elapsedHours,
         }
       : {}),
-    transitDays,
-    transitSource: context.validatedTransit?.revision ?? "legacy_zip3_v1",
+    transitDays: transitDays!,
+    transitSource: context.validatedTransit!.revision,
     weights,
     packages: choice.packages,
     boxes: choice.packages.length,
