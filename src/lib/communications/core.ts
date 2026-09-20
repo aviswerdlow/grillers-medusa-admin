@@ -749,7 +749,8 @@ export async function recordIdentity(
 
 export async function recordCommunicationEvent(
   db: KnexLike,
-  input: CommunicationEventInput
+  input: CommunicationEventInput,
+  options: { deferSideEffects?: boolean } = {}
 ): Promise<Record<string, any>> {
   const now = new Date()
   const eventId = input.event_id || crypto.randomUUID()
@@ -826,6 +827,10 @@ export async function recordCommunicationEvent(
     .insert(row)
     .onConflict(db.raw('("event_id") where "deleted_at" is null'))
     .ignore()
+
+  // The order publication journal owns purchase destinations and durable
+  // automation retries. Its caller commits the row and counters atomically.
+  if (options.deferSideEffects) return row
 
   try {
     const { writeEventDestinations } = await import("./destinations.js")

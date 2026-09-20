@@ -5,10 +5,7 @@ import {
   smsConsentFromCustomerMetadata,
   upsertCustomerProfile,
 } from "../lib/communications/core"
-import {
-  finalChargeSucceeded,
-  metadataObject,
-} from "../lib/catch-weight-finalization"
+import { metadataObject } from "../lib/catch-weight-finalization"
 import { emitOpsAlert } from "../lib/ops-alert"
 
 const ALERT_PATH = "src/subscribers/communications-commerce-events.ts"
@@ -104,48 +101,13 @@ async function fetchCustomerContext(container: any, customerId?: string) {
   return customers?.[0] || null
 }
 
-async function updateProfileStatsFromOrder(
-  db: any,
-  profile: Record<string, any> | null,
-  order: Record<string, any> | null
-) {
-  if (!profile || !order?.id) return
-
-  const alreadyCounted = await db("gp_communication_event")
-    .whereNull("deleted_at")
-    .where("event_name", "order_completed")
-    .where("order_id", order.id)
-    .first()
-
-  if (alreadyCounted) return
-
-  const totalOrders = Number(profile.total_orders || 0) + 1
-  const metadata = metadataObject(order.metadata)
-  const recognizedRevenue =
-    Number(metadata.final_total || metadata.final_order_total) ||
-    Number(order.total || 0)
-  const totalRevenue = Number(profile.total_revenue || 0) + recognizedRevenue
-  const firstOrderAt = profile.first_order_at || new Date()
-  const firstBasketSize =
-    profile.first_basket_size ||
-    (Array.isArray(order.items) ? order.items.length : null)
-
-  await db("gp_customer_profile").where("id", profile.id).update({
-    total_orders: totalOrders,
-    total_revenue: totalRevenue,
-    avg_order_value: totalOrders > 0 ? totalRevenue / totalOrders : 0,
-    first_order_at: firstOrderAt,
-    last_order_at: new Date(),
-    last_active_at: new Date(),
-    first_basket_size: firstBasketSize,
-    updated_at: new Date(),
-  })
-}
-
 export default async function communicationsCommerceEvents({
   event: { name, data },
   container,
 }: SubscriberArgs<EventData>) {
+  // One owner for purchase/finalization: the durable order publication journal.
+  // Also guard direct/in-flight invocations from an older subscriber registry.
+  if (name === "order.placed" || name === "order.final_charge_succeeded") return
   const logger = container.resolve("logger")
   const db = container.resolve(ContainerRegistrationKeys.PG_CONNECTION)
 
@@ -158,16 +120,7 @@ export default async function communicationsCommerceEvents({
     let medusaCustomerId = data.customer_id
     let orderId = data.order_id
 
-    if (
-      name === "order.placed" ||
-      name === "order.canceled" ||
-      name === "order.final_charge_succeeded"
-    ) {
-      orderId = data.id
-    }
-    if (name === "order.final_charge_succeeded") {
-      orderId = data.order_id || data.id
-    }
+    if (name === "order.canceled") orderId = data.id
 
     if (orderId) {
       order = await fetchOrderContext(container, orderId)
@@ -206,42 +159,8 @@ export default async function communicationsCommerceEvents({
     }
 
     const orderMetadata = metadataObject(order?.metadata)
-    const catchWeightPendingOrderPlaced =
-      name === "order.placed" &&
-      !finalChargeSucceeded(orderMetadata)
-
-    if (
-      name === "order.placed" &&
-      !catchWeightPendingOrderPlaced
-    ) {
-      await updateProfileStatsFromOrder(db, customer, order)
-      if (customer?.id) {
-        customer = await db("gp_customer_profile")
-          .whereNull("deleted_at")
-          .where("id", customer.id)
-          .first()
-      }
-    }
-
-    if (name === "order.final_charge_succeeded") {
-      await updateProfileStatsFromOrder(db, customer, order)
-      if (customer?.id) {
-        customer = await db("gp_customer_profile")
-          .whereNull("deleted_at")
-          .where("id", customer.id)
-          .first()
-      }
-    }
-
     await recordCommunicationEvent(db, {
-      event_name:
-        catchWeightPendingOrderPlaced
-          ? "order_received"
-          : name === "order.placed" || name === "order.final_charge_succeeded"
-            ? "order_completed"
-            : name === "payment.refunded"
-              ? "order_refunded"
-              : eventName,
+      event_name: name === "payment.refunded" ? "order_refunded" : eventName,
       event_id: `${name}:${data.id}:${data.order_id || ""}:${data.amount || ""}`,
       source: "medusa-server",
       profile_id: customer?.id || null,
@@ -256,9 +175,9 @@ export default async function communicationsCommerceEvents({
         display_id: order?.display_id,
         cart_id: order?.cart_id,
         total:
-          data.amount ||
-          orderMetadata.final_total ||
-          orderMetadata.final_order_total ||
+          data.amount ??
+          orderMetadata.final_total ??
+          orderMetadata.final_order_total ??
           order?.total,
         item_count: Array.isArray(order?.items) ? order.items.length : undefined,
         currency_code: order?.currency_code,
@@ -281,8 +200,6 @@ export default async function communicationsCommerceEvents({
 
 export const config: SubscriberConfig = {
   event: [
-    "order.placed",
-    "order.final_charge_succeeded",
     "order.canceled",
     "order.fulfilled",
     "shipment.created",

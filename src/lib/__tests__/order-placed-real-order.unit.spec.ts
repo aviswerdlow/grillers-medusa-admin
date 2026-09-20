@@ -28,6 +28,9 @@
  *      was never allocated on any order (oversell risk).
  */
 import { toRemoteQuery } from "@medusajs/modules-sdk/dist/remote-query/to-remote-query"
+const mockPublication = jest.fn().mockResolvedValue(undefined)
+jest.mock("../order-publication", () => ({ requestOrderPublication: (...args: any[]) => mockPublication(...args) }))
+import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import orderPlacedHandler from "../../subscribers/analytics/order-placed"
 import { buildShippingForecastEvent } from "../../subscribers/analytics/shipping-forecast"
 import { createAllocationsForOrder } from "../inventory-allocation"
@@ -36,38 +39,6 @@ import realOrder from "./__fixtures__/order-135-real.json"
 
 // The exact query.graph field arrays each subscriber/lib sends. Kept in sync with
 // the source so a future re-introduction of a `+`-prefixed nested field is caught.
-const ORDER_PLACED_FIELDS = [
-  "id",
-  "display_id",
-  "cart_id",
-  "created_at",
-  "email",
-  "currency_code",
-  "customer_id",
-  "customer.*",
-  "customer.groups.*",
-  "customer.metadata",
-  "customer.groups.metadata",
-  "total",
-  "subtotal",
-  "item_total",
-  "tax_total",
-  "shipping_total",
-  "discount_total",
-  "metadata",
-  "shipping_address.*",
-  "items.*",
-  "items.metadata",
-  "items.variant.*",
-  "items.variant.product.*",
-  "items.variant.product.metadata",
-  "shipping_methods.*",
-  "shipping_methods.shipping_option_id",
-  "shipping_methods.data",
-  "shipping_methods.metadata",
-  "payment_collections.payments.*",
-]
-
 const SHIPPING_FORECAST_FIELDS = [
   "id",
   "display_id",
@@ -148,7 +119,6 @@ function relationKeys(entity: string, fields: string[]): string[] {
 
 describe("order.placed subscriber query fields (real-order regression)", () => {
   const cases: Array<[string, string, string[]]> = [
-    ["order-placed.ts", "order", ORDER_PLACED_FIELDS],
     ["shipping-forecast.ts", "order", SHIPPING_FORECAST_FIELDS],
     ["inventory-allocation ORDER_ALLOCATION_FIELDS", "order", ORDER_ALLOCATION_FIELDS],
     ["inventory-allocation fetchVariants", "product_variant", FETCH_VARIANTS_FIELDS],
@@ -263,69 +233,20 @@ describe("evaluateGbm column guard (.kind defense-in-depth)", () => {
   })
 })
 
-/**
- * Finding #1 (revenue correctness): the real order's COMPUTED `order.total` is 0
- * even though it is genuinely a $332.73 order (item_total 168.24 + shipping 164.49;
- * verified against the live order + its payment_collection amount 332.73). NOTE the
- * reconstruction uses `item_total` (goods only, 168.24), NOT `subtotal` — on this
- * order `subtotal` (332.73) ALREADY includes shipping (item_total + shipping_total),
- * so `subtotal + shipping` would double-count shipping to a phantom 497.22. The
- * `order_received` warehouse event must carry the real revenue (332.73), not the
- * phantom 0 and not the double-counted 497.22.
- */
-describe("order_received estimated_value on the REAL order (revenue correctness)", () => {
-  function makeContainer(order: Record<string, any>) {
-    const analytics = { track: jest.fn().mockResolvedValue(undefined) }
-    const logger = { error: jest.fn() }
-    const query = { graph: jest.fn().mockResolvedValue({ data: [order] }) }
-    const container = {
-      resolve: (key: string) => {
-        if (key === "analytics") return analytics
-        if (key === "logger") return logger
-        if (key === "query") return query
-        throw new Error(`unexpected resolve ${key}`)
-      },
-    }
-    return { container, analytics, logger, query }
-  }
-
-  it("sanity: the real order really has total=0 with a populated item_total/shipping (and a subtotal that already bakes in shipping)", () => {
+/** The historic order has ambiguous mutable totals. It may not be used as
+ * a fallback for missing immutable original evidence. The SQL publication
+ * tests verify that unbound legacy events wait rather than emit fake revenue. */
+describe("real legacy order source boundary", () => {
+  it.each([0, 510.5])("records only order identity despite mutable total %s", async total => {
+    mockPublication.mockClear()
+    const db = {}, query = jest.fn(), track = jest.fn()
+    const resolve = (key: string) => key === ContainerRegistrationKeys.PG_CONNECTION ? db : key === "logger" ? { error: jest.fn() } : key === "query" ? query : track
     expect(realOrder.total).toBe(0)
-    expect(realOrder.item_total).toBe(168.24)
-    expect(realOrder.shipping_total).toBe(164.49)
-    // `subtotal` ALREADY includes shipping (item_total + shipping_total), which is
-    // exactly why the reconstruction must use item_total, not subtotal.
-    expect(realOrder.subtotal).toBe(332.73)
-    expect(realOrder.item_total + realOrder.shipping_total).toBe(realOrder.subtotal)
-  })
-
-  it("emits a NONZERO estimated_value (item_total+shipping+tax-discount) when total is 0", async () => {
-    const { container, analytics } = makeContainer(realOrder as any)
-
-    await orderPlacedHandler({
-      event: { name: "order.placed", data: { id: realOrder.id } },
-      container,
-    } as any)
-
-    expect(analytics.track).toHaveBeenCalledTimes(1)
-    const call = analytics.track.mock.calls[0][0]
-    expect(call.event).toBe("order_received")
-    // 168.24 + 164.49 + 0 - 0 = 332.73 — the real order value (NOT the phantom
-    // computed total of 0, and NOT the shipping-double-counted 497.22).
-    expect(call.properties.estimated_value).toBe(332.73)
-    expect(call.properties.estimated_value).toBeGreaterThan(0)
-  })
-
-  it("prefers a positive computed total when one exists", async () => {
-    const order = { ...(realOrder as any), total: 510.5 }
-    const { container, analytics } = makeContainer(order)
-
-    await orderPlacedHandler({
-      event: { name: "order.placed", data: { id: order.id } },
-      container,
-    } as any)
-
-    expect(analytics.track.mock.calls[0][0].properties.estimated_value).toBe(510.5)
+    expect(realOrder.item_total + realOrder.shipping_total).toBe(332.73)
+    await orderPlacedHandler({ event: { name: "order.placed", data: { id: realOrder.id, total } }, container: { resolve } } as any)
+    expect(mockPublication).toHaveBeenCalledWith(db, "placed", realOrder.id, undefined)
+    expect(query).not.toHaveBeenCalled()
+    expect(track).not.toHaveBeenCalled()
   })
 })
 
@@ -531,36 +452,10 @@ describe("shipping_forecast edge cases (Finding #5)", () => {
   })
 })
 
-/**
- * Finding #5 (guest order): no customer_id ⇒ actor_id undefined; the gp-analytics
- * shim must synthesize a STABLE anonymous_id from the order id so the event still
- * lands in the warehouse. This pins the synth-anonymous-id path for guest orders.
- */
-describe("guest order analytics (no customer_id)", () => {
-  it("order-placed tracks with actor_id undefined for a guest order", async () => {
-    const guestOrder = { ...(realOrder as any), customer_id: null, customer: null }
-    const analytics = { track: jest.fn().mockResolvedValue(undefined) }
-    const container = {
-      resolve: (key: string) => {
-        if (key === "analytics") return analytics
-        if (key === "logger") return { error: jest.fn() }
-        if (key === "query")
-          return { graph: jest.fn().mockResolvedValue({ data: [guestOrder] }) }
-        throw new Error(`unexpected resolve ${key}`)
-      },
-    }
-
-    await orderPlacedHandler({
-      event: { name: "order.placed", data: { id: guestOrder.id } },
-      container,
-    } as any)
-
-    const call = analytics.track.mock.calls[0][0]
-    expect(call.actor_id).toBeUndefined()
-    expect(call.properties.customer_id).toBeUndefined()
-    // The shim derives a stable anonymous_id from transaction_id downstream.
-    expect(call.properties.transaction_id).toBe(guestOrder.id)
-    // Revenue still correct for a guest order (item_total 168.24 + shipping 164.49).
-    expect(call.properties.estimated_value).toBe(332.73)
-  })
+it("records guest legacy identity without inventing a customer or a purchase amount", async () => {
+  mockPublication.mockClear()
+  const db = {}
+  const resolve = (key: string) => key === ContainerRegistrationKeys.PG_CONNECTION ? db : { error: jest.fn() }
+  await orderPlacedHandler({ event: { name: "order.placed", data: { id: realOrder.id, customer_id: null } }, container: { resolve } } as any)
+  expect(mockPublication).toHaveBeenCalledWith(db, "placed", realOrder.id, undefined)
 })

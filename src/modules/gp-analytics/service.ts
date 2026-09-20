@@ -463,6 +463,49 @@ class GpAnalyticsProviderService extends AbstractAnalyticsProviderService {
       return
     }
 
+    const sourceProperties = { ...(properties || {}) }
+    const body = this.gpAnalyticsPayload(eventType, actorId, properties)
+
+    fetch(`${gpAnalyticsEndpoint.replace(/\/$/, "")}/v1/track`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${gpAnalyticsServerKey}`,
+      },
+      body: JSON.stringify(body),
+    })
+      .then(async (res) => {
+        if (res.ok) return
+        const text =
+          typeof res.text === "function" ? await res.text().catch(() => "") : ""
+        const firstLine = text.split(/\r?\n/)[0] || ""
+        this.logger_.warn(
+          `Analytics: GP analytics rejected ${eventType} with ${res.status}: ${firstLine}`
+        )
+        await this.emitAnalyticsDeliveryFailureAlert({
+          target: "gp_analytics",
+          eventType,
+          stage: "http_rejected",
+          status: res.status,
+          error: firstLine || res.statusText || "GP analytics request rejected",
+          properties: sourceProperties,
+        })
+      })
+      .catch((err) => {
+        this.logger_.error(
+          `Analytics: Failed to send ${eventType} to GP analytics: ${err.message}`
+        )
+        void this.emitAnalyticsDeliveryFailureAlert({
+          target: "gp_analytics",
+          eventType,
+          stage: "request_failed",
+          error: err,
+          properties: sourceProperties,
+        }).catch(() => undefined)
+      })
+  }
+
+  private gpAnalyticsPayload(eventType: string, actorId?: string, properties?: Record<string, any>) {
     // Work from the full producer properties to DERIVE the mirror keys
     // (session, idempotency, timestamp can read PII-adjacent fields like
     // created_at), then strip raw PII before anything is POSTed.
@@ -508,7 +551,7 @@ class GpAnalyticsProviderService extends AbstractAnalyticsProviderService {
       mirrorProperties.fulfillment_tier = fulfillmentTier
     }
 
-    const body = {
+    return {
       event: eventType,
       event_id: idempotencyKey ? uuidV5(idempotencyKey) : randomUUID(),
       idempotency_key: idempotencyKey || undefined,
@@ -532,43 +575,29 @@ class GpAnalyticsProviderService extends AbstractAnalyticsProviderService {
       },
     }
 
-    fetch(`${gpAnalyticsEndpoint.replace(/\/$/, "")}/v1/track`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${gpAnalyticsServerKey}`,
-      },
-      body: JSON.stringify(body),
-    })
-      .then(async (res) => {
-        if (res.ok) return
-        const text =
-          typeof res.text === "function" ? await res.text().catch(() => "") : ""
-        const firstLine = text.split(/\r?\n/)[0] || ""
-        this.logger_.warn(
-          `Analytics: GP analytics rejected ${eventType} with ${res.status}: ${firstLine}`
-        )
-        await this.emitAnalyticsDeliveryFailureAlert({
-          target: "gp_analytics",
-          eventType,
-          stage: "http_rejected",
-          status: res.status,
-          error: firstLine || res.statusText || "GP analytics request rejected",
-          properties: sourceProperties,
-        })
-      })
-      .catch((err) => {
-        this.logger_.error(
-          `Analytics: Failed to send ${eventType} to GP analytics: ${err.message}`
-        )
-        void this.emitAnalyticsDeliveryFailureAlert({
-          target: "gp_analytics",
-          eventType,
-          stage: "request_failed",
-          error: err,
-          properties: sourceProperties,
-        }).catch(() => undefined)
-      })
+  }
+
+  /** Await a bounded transport acknowledgment. The publication journal, not
+   * track(), owns retries and per-target status for accepted order events. */
+  async deliverOrderPublication(target: "jitsu" | "gp_analytics", data: ProviderTrackAnalyticsEventDTO): Promise<{ status: "accepted" | "held"; reason?: string }> {
+    const p = data.properties || {}
+    if (!p.idempotency_key || !Number.isFinite(p.event_timestamp_ms) || !["order_completed", "order_finalized"].includes(data.event)) throw new Error("publication_transport_contract_invalid")
+    let url: string, headers: Record<string, string>, body: any
+    if (target === "jitsu") {
+      if (!this.options_.jitsuHost || !this.options_.jitsuServerSecret) return { status: "held", reason: "jitsu_not_configured" }
+      url = `${this.options_.jitsuHost.replace(/\/$/, "")}/api/v1/s2s/event`
+      headers = { "Content-Type": "application/json", "X-Auth-Token": this.options_.jitsuServerSecret }
+      body = this.buildPayload(data.event, data.actor_id, { ...p, event_id: uuidV5(p.idempotency_key) })
+    } else {
+      if (!this.options_.gpAnalyticsEndpoint || !this.options_.gpAnalyticsServerKey || this.options_.gpAnalyticsDualRun === false) return { status: "held", reason: "gp_analytics_not_enabled" }
+      url = `${this.options_.gpAnalyticsEndpoint.replace(/\/$/, "")}/v1/track`
+      headers = { "Content-Type": "application/json", Authorization: `Bearer ${this.options_.gpAnalyticsServerKey}` }
+      body = this.gpAnalyticsPayload(data.event, data.actor_id, p)
+    }
+    const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000) })
+    // Never persist response bodies; they can include secrets or customer data.
+    if (!response.ok) throw new Error("publication_transport_not_acknowledged")
+    return { status: "accepted" }
   }
 
   async track(data: ProviderTrackAnalyticsEventDTO): Promise<void> {
