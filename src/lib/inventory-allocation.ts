@@ -1,5 +1,6 @@
 import { isInternalCatalogRecord, isInternalCatalogProduct } from "./public-catalog"
 import { randomUUID } from "crypto"
+import { variantNativeStock, unmirroredInventoryDemand, unmirroredVariantUnits, nativeReservedUnitsForLine, type NativeReservation } from "./inventory-stock"
 
 export type AvailabilityLifecycle =
   | "active"
@@ -32,6 +33,8 @@ export type AllocationSource =
   | "admin"
 
 export type AvailabilityLineInput = {
+  /** Trusted order-placement caller only; public/admin request adapters do not accept this field. */
+  reservation_line_id?: string
   product_id?: string
   variant_id: string
   quantity: number
@@ -98,6 +101,7 @@ export type QueryGraph = {
 export type DbConnection = {
   (tableName: string): any
   raw?: (...args: any[]) => any
+  transaction?: <T>(work: (trx: DbConnection) => Promise<T>) => Promise<T>
 }
 
 const ACTIVE_ALLOCATION_STATUSES = [
@@ -324,70 +328,7 @@ function variantProduct(variant: Record<string, unknown>): Record<string, unknow
   return objectRecord(variant.product)
 }
 
-function variantStockQuantity(variant: Record<string, unknown>): {
-  quantity: number
-  inventoryItemId?: string
-  stockLocationId?: string
-} {
-  if (variant.manage_inventory === false) return { quantity: 999999 }
-  if (variant.allow_backorder === true) return { quantity: 999999 }
-
-  const directInventoryQuantity = numberValue(variant.inventory_quantity)
-  if (directInventoryQuantity !== undefined) {
-    return { quantity: Math.max(0, Math.floor(directInventoryQuantity)) }
-  }
-
-  const inventoryLinks = Array.isArray(variant.inventory_items)
-    ? variant.inventory_items
-    : []
-  const kitQuantities: number[] = []
-  let firstInventoryItemId: string | undefined
-  let firstStockLocationId: string | undefined
-
-  for (const rawLink of inventoryLinks) {
-    const link = objectRecord(rawLink)
-    const requiredQuantity = Math.max(1, normalizeQuantity(link.required_quantity, 1))
-    const inventoryItemId =
-      textValue(link.inventory_item_id) ||
-      textValue(objectRecord(link.inventory).id)
-    const inventory = objectRecord(link.inventory)
-    const locationLevels = Array.isArray(inventory.location_levels)
-      ? inventory.location_levels
-      : []
-    const available = locationLevels.reduce((sum, rawLevel) => {
-      const level = objectRecord(rawLevel)
-      const levelAvailable =
-        numberValue(level.available_quantity) ??
-        Math.max(
-          0,
-          (numberValue(level.stocked_quantity) ?? 0) -
-            (numberValue(level.reserved_quantity) ?? 0)
-        )
-      if (!firstStockLocationId) {
-        firstStockLocationId = textValue(level.location_id)
-      }
-      return sum + Math.max(0, levelAvailable)
-    }, 0)
-
-    if (inventoryItemId && !firstInventoryItemId) {
-      firstInventoryItemId = inventoryItemId
-    }
-    if (locationLevels.length) {
-      kitQuantities.push(Math.floor(available / requiredQuantity))
-    }
-  }
-
-  if (kitQuantities.length) {
-    return {
-      quantity: Math.max(0, Math.min(...kitQuantities)),
-      inventoryItemId: firstInventoryItemId,
-      stockLocationId: firstStockLocationId,
-    }
-  }
-
-  const qbdQuantity = numberValue(objectRecord(variant.metadata).qbd_quantity_on_hand)
-  return { quantity: Math.max(0, Math.floor(qbdQuantity ?? 0)) }
-}
+const variantStockQuantity = variantNativeStock
 
 function alternativeVariantIds(
   variantMetadata: unknown,
@@ -418,6 +359,12 @@ async function fetchVariants(
 ): Promise<Map<string, Record<string, unknown>>> {
   const out = new Map<string, Record<string, unknown>>()
   if (!variantIds.length) return out
+  if (variantIds.length > 100) {
+    for (let i = 0; i < variantIds.length; i += 100) {
+      for (const [id, variant] of await fetchVariants(query, variantIds.slice(i, i + 100))) out.set(id, variant)
+    }
+    return out
+  }
 
   const fields = [
     "id",
@@ -483,6 +430,7 @@ async function fetchVariants(
 type AllocationRow = {
   id: string
   variant_id: string
+  line_item_id?: string | null
   quantity: number | string
   status: AllocationStatus
   requested_fulfillment_date?: Date | string | null
@@ -497,27 +445,35 @@ function shouldCountAllocation(row: AllocationRow, now: Date): boolean {
   return days === null || days < 14
 }
 
-async function allocatedQuantitiesByVariant(
-  db: DbConnection,
+async function inventoryStateForAvailability(
+  input: AvailabilityCheckInput,
   variantIds: string[],
   now: Date
-): Promise<Map<string, number>> {
-  const out = new Map<string, number>()
-  if (!variantIds.length) return out
-
-  const rows = (await db("gp_inventory_allocation")
-    .select("id", "variant_id", "quantity", "status", "requested_fulfillment_date")
+) {
+  // Include other variants' commitments: components may share one inventory item.
+  const activeRows = (await input.db("gp_inventory_allocation")
+    .select("id", "variant_id", "line_item_id", "quantity", "status", "requested_fulfillment_date")
     .whereNull("deleted_at")
-    .whereIn("variant_id", variantIds)
     .whereIn("status", ACTIVE_ALLOCATION_STATUSES as unknown as string[])) as AllocationRow[]
-
-  for (const row of rows || []) {
-    if (!shouldCountAllocation(row, now)) continue
-    const quantity = normalizeQuantity(row.quantity, 0)
-    out.set(row.variant_id, (out.get(row.variant_id) || 0) + quantity)
-  }
-
-  return out
+  const commitments = activeRows.filter(row => shouldCountAllocation(row, now))
+  const variants = await fetchVariants(input.query, [...new Set([...variantIds, ...commitments.map(row => row.variant_id)])])
+  const alternativeIds = variantIds.flatMap(id => {
+    const variant = variants.get(id) || {}
+    return alternativeVariantIds(variant.metadata, variantProduct(variant).metadata)
+  }).filter(id => !variants.has(id))
+  for (const [id, variant] of await fetchVariants(input.query, [...new Set(alternativeIds)])) variants.set(id, variant)
+  const stocks = new Map([...variants].map(([id, variant]) => [id, variantStockQuantity(variant)]))
+  const lineIds = [...new Set([
+    ...commitments.map(row => row.line_item_id),
+    ...input.lines.map(line => line.reservation_line_id),
+  ].filter(Boolean))] as string[]
+  const reservations: NativeReservation[] = lineIds.length ? await input.db("reservation_item")
+    .select("line_item_id", "inventory_item_id", "location_id", "quantity")
+    .whereNull("deleted_at").whereIn("line_item_id", lineIds) : []
+  // An unmapped commitment can consume shared stock. Do not silently ignore it.
+  const mappingUnverified = commitments.some(row => !stocks.get(row.variant_id)?.ready)
+  const unmatched = mappingUnverified ? new Map<string, number>() : unmirroredInventoryDemand(commitments, stocks, reservations)
+  return { variants, stocks, reservations, unmatched, mappingUnverified }
 }
 
 async function recordAvailabilitySnapshots(
@@ -568,10 +524,10 @@ export async function checkInventoryAvailability(
       quantity: normalizeQuantity(line.quantity, 1),
     }))
   const variantIds = Array.from(new Set(normalizedLines.map((line) => line.variant_id)))
-  const [variants, allocated] = await Promise.all([
-    fetchVariants(input.query, variantIds),
-    allocatedQuantitiesByVariant(input.db, variantIds, now),
-  ])
+  const state = await inventoryStateForAvailability(input, variantIds, now)
+  const { variants } = state
+  const requestedByVariant = new Map<string, number>()
+  for (const line of normalizedLines) requestedByVariant.set(line.variant_id, (requestedByVariant.get(line.variant_id) || 0) + line.quantity)
 
   const results = normalizedLines.map((line) => {
     const variant = variants.get(line.variant_id) || { id: line.variant_id }
@@ -605,11 +561,11 @@ export async function checkInventoryAvailability(
       Math.floor(metadataNumber(variantMetadata, productMetadata, SAFETY_STOCK_KEYS, 0))
     )
     const stock = variantStockQuantity(variant)
-    const allocatedQuantity = allocated.get(line.variant_id) || 0
-    const atp = Math.max(
-      0,
-      stock.quantity - allocatedQuantity - safetyStockQuantity
-    )
+    const allocatedQuantity = unmirroredVariantUnits(stock, state.unmatched)
+    const ownReserved = line.reservation_line_id
+      ? nativeReservedUnitsForLine(stock, state.reservations, line.reservation_line_id) : 0
+    const atp = Math.max(0, stock.quantity - allocatedQuantity - safetyStockQuantity)
+    const requestedQuantity = requestedByVariant.get(line.variant_id) || line.quantity
     const days = daysUntil(requestedDate, now)
     const title =
       line.title ||
@@ -626,31 +582,31 @@ export async function checkInventoryAvailability(
     if (BLOCKING_LIFECYCLES.has(lifecycle)) {
       decision = "inactive"
       reason = `lifecycle_${lifecycle}`
-    } else if (
-      futureOrderEligible &&
-      days !== null &&
-      days >= replenishmentLeadDays
-    ) {
-      decision = "future_allowed"
-      reason = "future_window"
-    } else if (line.quantity <= atp) {
+    } else if (!stock.ready) {
+      decision = "blocked"
+      reason = stock.reason || "inventory_baseline_required"
+    } else if (line.reservation_line_id && ownReserved >= line.quantity) {
+      // Placement runs after native reservation. The order's own last unit is
+      // already secured; do not reclassify it as an oversell or promise it twice.
+      decision = "available"
+      reason = "native_reservation"
+    } else if (state.mappingUnverified || allocatedQuantity > 0) {
+      decision = "blocked"
+      reason = "inventory_reconciliation_required"
+    } else if (requestedQuantity <= atp) {
       decision = "available"
       reason = "in_stock"
+    } else if (futureOrderEligible && days !== null && days >= replenishmentLeadDays) {
+      // A lead-time estimate is not incoming stock. #364 will supply a dated,
+      // quantity-limited reservation contract; until then there is no bypass.
+      decision = "blocked"
+      reason = "future_supply_unconfirmed"
     } else if (atp > 0) {
       decision = "partial"
       reason = "partial_atp"
-      if (requestedDate) {
-        const date = new Date(requestedDate)
-        date.setUTCDate(date.getUTCDate() + replenishmentLeadDays)
-        earliestAvailableDate = isoDateOnly(date)
-      }
     } else {
       decision = "blocked"
       reason = "insufficient_atp"
-      const base = requestedDate || now
-      const date = new Date(base)
-      date.setUTCDate(date.getUTCDate() + replenishmentLeadDays)
-      earliestAvailableDate = isoDateOnly(date)
     }
 
     return {
@@ -684,54 +640,22 @@ export async function checkInventoryAvailability(
     } as AvailabilityResult & { metadata?: Record<string, unknown> }
   })
 
-  const allAlternativeIds = Array.from(
-    new Set(
-      results.flatMap((result) =>
-        (result.alternatives || []).map((alternative) => alternative.variant_id)
-      )
-    )
-  )
-  if (allAlternativeIds.length) {
-    const [alternativeVariants, alternativeAllocated] = await Promise.all([
-      fetchVariants(input.query, allAlternativeIds),
-      allocatedQuantitiesByVariant(input.db, allAlternativeIds, now),
-    ])
-
-    for (const result of results) {
-      result.alternatives = (result.alternatives || []).map((alternative) => {
-        const variant = alternativeVariants.get(alternative.variant_id)
-        if (!variant) return alternative
-        const product = variantProduct(variant)
-        const stock = variantStockQuantity(variant)
-        const safetyStockQuantity = Math.max(
-          0,
-          Math.floor(
-            metadataNumber(
-              variant.metadata,
-              product.metadata,
-              SAFETY_STOCK_KEYS,
-              0
-            )
-          )
-        )
-        const allocatedQuantity =
-          alternativeAllocated.get(alternative.variant_id) || 0
-        return {
-          ...alternative,
-          product_id:
-            textValue(variant.product_id) || textValue(product.id) || undefined,
-          title:
-            textValue(product.title) ||
-            textValue(variant.title) ||
-            alternative.title,
-          sku: textValue(variant.sku),
-          available_to_promise_quantity: Math.max(
-            0,
-            stock.quantity - allocatedQuantity - safetyStockQuantity
-          ),
-        }
-      })
-    }
+  for (const result of results) {
+    result.alternatives = result.alternatives.flatMap(alternative => {
+      const variant = state.variants.get(alternative.variant_id)
+      if (!variant) return []
+      const product = variantProduct(variant)
+      const stock = variantStockQuantity(variant)
+      if (isInternalCatalogRecord(variant) || isInternalCatalogProduct(product)
+        || BLOCKING_LIFECYCLES.has(lifecycleFromMetadata(variant.metadata, product.metadata))
+        || !stock.ready || state.mappingUnverified || unmirroredVariantUnits(stock, state.unmatched) > 0) return []
+      const safety = Math.max(0, Math.floor(metadataNumber(variant.metadata, product.metadata, SAFETY_STOCK_KEYS, 0)))
+      return [{ ...alternative,
+        product_id: textValue(variant.product_id) || textValue(product.id),
+        title: textValue(product.title) || textValue(variant.title) || alternative.title,
+        sku: textValue(variant.sku), available_to_promise_quantity: Math.max(0, stock.quantity - safety),
+      }]
+    })
   }
 
   await recordAvailabilitySnapshots(input.db, input, results, requestedDate)
@@ -924,7 +848,7 @@ function lineOverrideNote(item: Record<string, unknown>): string | undefined {
   return textValue(metadata.inventory_override_note)
 }
 
-async function activeAllocationForLine(
+async function existingAllocationForLine(
   db: DbConnection,
   orderId: string,
   lineItemId: string
@@ -933,12 +857,30 @@ async function activeAllocationForLine(
     .select("id", "status")
     .whereNull("deleted_at")
     .where({ order_id: orderId, line_item_id: lineItemId })
-    .whereIn("status", ["reserved", "future_committed", "blocked", "fulfilled"])
     .limit(1)
   return rows?.[0] || null
 }
 
-export async function createAllocationsForOrder({
+async function withLockedInventoryOrder<T>(
+  db: DbConnection, orderId: string,
+  work: (trx: DbConnection, order: Record<string, any>) => Promise<T>
+): Promise<T> {
+  if (!db.transaction) throw new Error("Inventory order transaction is unavailable")
+  return db.transaction(async trx => {
+    const order = await trx("order").where({ id: orderId }).whereNull("deleted_at").forUpdate().first("id", "status", "canceled_at")
+    if (!order) throw new Error("Inventory order was not found")
+    return work(trx, order)
+  })
+}
+
+export async function createAllocationsForOrder(input: Parameters<typeof createAllocationsForLockedOrder>[0]) {
+  return withLockedInventoryOrder(input.db, input.orderId, async (db, order) => {
+    if (order.status === "canceled" || order.canceled_at) return { created: 0, skipped: 0, blocked: 0 }
+    return createAllocationsForLockedOrder({ ...input, db })
+  })
+}
+
+async function createAllocationsForLockedOrder({
   db,
   query,
   orderId,
@@ -972,7 +914,7 @@ export async function createAllocationsForOrder({
       continue
     }
 
-    const existing = await activeAllocationForLine(db, orderId, lineItemId)
+    const existing = await existingAllocationForLine(db, orderId, lineItemId)
     if (existing) {
       skipped += 1
       continue
@@ -985,6 +927,7 @@ export async function createAllocationsForOrder({
       sku: lineSku(item),
       title: lineCustomerTitle(item),
       quantity: lineQuantity(item),
+      reservation_line_id: lineItemId,
       metadata: objectRecord(item.metadata),
     }
 
@@ -1032,7 +975,7 @@ export async function createAllocationsForOrder({
       fulfillment_type: fulfillmentType || null,
       source: orderSource,
       status,
-      allocation_reason: allocationReasonForDecision(availability),
+      allocation_reason: availability.reason,
       override_reason: status === "blocked" ? lineOverrideReason(item) || null : null,
       override_note: status === "blocked" ? lineOverrideNote(item) || null : null,
       staff_actor_customer_id: textValue(metadata.staff_actor_customer_id) || null,
@@ -1056,7 +999,7 @@ export async function createAllocationsForOrder({
       actor_type: orderSource === "staff_phone_order" ? "staff" : "system",
       actor_id: textValue(metadata.staff_actor_customer_id),
       actor_email: textValue(metadata.staff_actor_email),
-      reason: allocationReasonForDecision(availability),
+      reason: availability.reason,
       note: status === "blocked" ? lineOverrideNote(item) : undefined,
       metadata: {
         order_id: orderId,
@@ -1072,7 +1015,11 @@ export async function createAllocationsForOrder({
   return { created, skipped, blocked }
 }
 
-export async function releaseAllocationsForOrder({
+export async function releaseAllocationsForOrder(input: Parameters<typeof releaseAllocationsForLockedOrder>[0]) {
+  return withLockedInventoryOrder(input.db, input.orderId, db => releaseAllocationsForLockedOrder({ ...input, db }))
+}
+
+async function releaseAllocationsForLockedOrder({
   db,
   orderId,
   reason,
