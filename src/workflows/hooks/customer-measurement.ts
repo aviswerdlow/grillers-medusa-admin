@@ -4,6 +4,7 @@ import {
 } from "@medusajs/medusa/core-flows"
 import { StepResponse } from "@medusajs/framework/workflows-sdk"
 import { Modules } from "@medusajs/framework/utils"
+import { captureWelcomeCustomers } from "../../lib/account-welcome"
 import {
   captureCustomerMeasurement,
   CUSTOMER_MEASUREMENT_CONTEXT,
@@ -65,11 +66,13 @@ export async function compensateCustomerHook(data: any, execution: any) {
 }
 
 createCustomersWorkflow.hooks.customersCreated(
-  async ({ customers }, execution) =>
-    new StepResponse(
+  async ({ customers }, execution) => {
+    captureWelcomeCustomers(customers, execution)
+    return new StepResponse(
       undefined,
       await captureCustomerHook("created", customers, execution)
-    ),
+    )
+  },
   compensateCustomerHook
 )
 updateCustomersWorkflow.hooks.customersUpdated(

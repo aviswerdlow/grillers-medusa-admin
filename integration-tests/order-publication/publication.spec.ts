@@ -1,3 +1,7 @@
+import { saveAccountWelcome, deliverAccountWelcomes, welcomeFromResponse, welcomeSourceFromRow } from "../../src/lib/account-welcome";
+import gpAccountWelcome from "../../src/jobs/gp-account-welcome";
+import { updatePostmarkMessageState, recordSuppression } from "../../src/lib/communications/core";
+import { emitOpsAlert } from "../../src/lib/ops-alert";
 import { saveCustomerMeasurement, deliverCustomerMeasurements } from "../../src/lib/customer-measurement";
 import { captureCartResponse, cartSourceFromRow, saveCartMeasurement, deriveCartMeasurement, deliverCartMeasurements } from "../../src/lib/cart-measurement";
 import { projectNativeCartActivity, expireInactiveCarts, cartRecoveryAllowed, syncCartLifecycleFromEvent } from "../../src/lib/communications/cart-lifecycle";
@@ -52,6 +56,7 @@ import {
 import { deliverPublicationToCommunications } from "../../src/lib/order-publication-communications";
 
 // No external transports or messages in an isolated SQL fixture.
+jest.mock("../../src/lib/ops-alert", () => ({ emitOpsAlert: jest.fn().mockResolvedValue(undefined) }));
 jest.mock("../../src/lib/communications/destinations", () => ({
   writeEventDestinations: jest.fn(),
 }));
@@ -100,6 +105,7 @@ beforeAll(async () => {
     "create table order_cart (order_id text primary key, cart_id text unique, deleted_at timestamptz)"
   );
   for (const sql of [
+    "create table customer (id text primary key, email text, has_account boolean, first_name text, last_name text, phone text, metadata jsonb, created_at timestamptz, updated_at timestamptz, deleted_at timestamptz)",
     "create table fulfillment (id text primary key, created_at timestamptz, shipped_at timestamptz, delivered_at timestamptz, deleted_at timestamptz)",
     "create table order_fulfillment (id text primary key, order_id text, fulfillment_id text, deleted_at timestamptz)",
     'create table "return" (id text primary key, order_id text, requested_at timestamptz, deleted_at timestamptz)',
@@ -1771,5 +1777,116 @@ describe("original shipping and allocation measurement", () => {
     expect(await hasProductionPublicationBacklog(db)).toBe(false);
     await bound("live_backlog"); await scan(); await materializeOrderPublications(db, starts, now);
     expect(await hasProductionPublicationBacklog(db)).toBe(true);
+  });
+});
+
+
+describe("account welcome source and service delivery", () => {
+  const env = { ...process.env };
+  beforeEach(() => {
+    process.env = { ...env, STRIPE_API_KEY: "sk_live_fixture", GP_ACCOUNT_WELCOME_ENABLED: "true" };
+    jest.clearAllMocks();
+  });
+  afterEach(() => { process.env = { ...env }; });
+  async function welcomeFixture(options: { lane?: any; consent?: boolean } = {}) {
+    const at = new Date("2026-09-21T01:00:00Z");
+    const customer = { id: "cus_welcome", email: "original@example.test", first_name: "Original", has_account: true, created_at: at };
+    await db("customer").insert(customer);
+    const lane = options.lane || "production";
+    const context = options.consent === undefined ? null : { analytics_consent: options.consent,
+      analytics_consent_at: at.getTime() - 1000, marketing_consent: false, test_order: lane === "rehearsal",
+      analytics_environment: lane, experiment_assignments: [], experiment_context_status: "unverified" as const };
+    const snapshot = welcomeFromResponse({ request_id: "req_original", lane, context,
+      customers: [{ customer, transaction_id: "tx_account" }] }, { customer }, at)!;
+    await saveAccountWelcome(db, snapshot);
+    const notify = jest.fn().mockResolvedValue([{ id: "noti_internal", provider_id: "postmark-provider", external_id: "pm_message_original", status: "success" }]);
+    const logger = { warn: jest.fn(), error: jest.fn(), info: jest.fn(), debug: jest.fn() };
+    const container: any = { resolve: (key: string) => {
+      if (key === ContainerRegistrationKeys.PG_CONNECTION) return db;
+      if (key === "logger") return logger;
+      if (key === Modules.NOTIFICATION) return { createNotifications: notify };
+      throw new Error(`Unexpected dependency ${key}`);
+    } };
+    return { snapshot, notify, container };
+  }
+  async function makeDue() { await db("gp_event_delivery").where({ target: "account_welcome_email" }).update({ metadata: { next_attempt_at: new Date(0).toISOString() } }); }
+
+  it("saves one immutable original without creating a profile and rejects a changed retry", async () => {
+    const { snapshot } = await welcomeFixture();await saveAccountWelcome(db, snapshot);
+    expect(await db("gp_communication_event")).toHaveLength(1);expect(await db("gp_customer_profile")).toHaveLength(0);
+    await expect(saveAccountWelcome(db, { ...snapshot, customer: { ...snapshot.customer, email: "changed@example.test" } })).rejects.toThrow("account_welcome_source_conflict");
+    expect(welcomeSourceFromRow(await db("gp_communication_event").first())).toEqual(snapshot);
+  });
+  it.each([undefined, false])("sends required service email without analytics permission %s and keeps the real external receipt", async consent => {
+    const { container, notify, snapshot } = await welcomeFixture({ consent });await gpAccountWelcome(container);await gpAccountWelcome(container);
+    expect(notify).toHaveBeenCalledTimes(1);expect(notify.mock.calls[0][0].to).toBe(snapshot.customer.email);
+    const message = await db("gp_message_log").first();expect(message).toMatchObject({ status: "sent", postmark_message_id: "pm_message_original", message_purpose: "service" });
+    expect(message.metadata.account_welcome_source_id).toBe(snapshot.event_id);
+    const outcome = await db("gp_communication_event").where({ event_name: "email_sent" }).first();
+    expect(outcome.properties).toMatchObject({ analytics_consent: consent ?? null, test_event: false, original_account_source_valid: true });
+    expect(JSON.stringify(outcome.properties)).not.toMatch(/original@example|Original|subject/);
+    expect(await db("gp_flow_enrollment")).toHaveLength(0);
+  });
+  it("retains original permission for matched provider callbacks and counts replay once", async () => {
+    const { container, snapshot } = await welcomeFixture({ consent: false });await gpAccountWelcome(container);
+    await db("gp_customer_profile").update({ email_consent: true, email_consent_at: new Date() });
+    const payload = { MessageID: "pm_message_original", RecordType: "Delivery", Recipient: "wrong@example.test", ReceivedAt: "2026-09-21T01:02:00Z", Metadata: { analytics_consent: true, private: "secret" } };
+    await updatePostmarkMessageState(db, payload);await updatePostmarkMessageState(db, payload);
+    const outcomes = await db("gp_communication_event").where({ event_name: "email_delivered" });expect(outcomes).toHaveLength(1);
+    expect(outcomes[0].context.account_welcome_source_id).toBe(snapshot.event_id);expect(outcomes[0].properties.analytics_consent).toBe(false);
+    expect(outcomes[0].email).toBe(snapshot.customer.email);expect(JSON.stringify(outcomes[0].properties)).not.toMatch(/wrong@example|private|secret|Recipient/);
+  });
+  it("vetoes changed recipient without redirecting or recreating a profile", async () => {
+    const { container, notify } = await welcomeFixture();await db("customer").update({ email: "later@example.test" });await gpAccountWelcome(container);
+    expect(notify).not.toHaveBeenCalled();expect(await db("gp_customer_profile")).toHaveLength(0);
+    expect((await db("gp_event_delivery").where({ target: "account_welcome_email" }).first()).status).toBe("skipped");
+  });
+  it("does not promote a historical welcome callback with no original source association", async () => {
+    const { container } = await welcomeFixture();await gpAccountWelcome(container);
+    await db("gp_message_log").update({ metadata: {} });
+    await updatePostmarkMessageState(db, { MessageID: "pm_message_original", RecordType: "Delivery", Recipient: "original@example.test" });
+    const outcome = await db("gp_communication_event").where({ event_name: "email_delivered" }).first();
+    expect(outcome.source).toBe("communications-account");
+    expect(outcome.properties).toMatchObject({ original_account_source_valid: false, analytics_consent: null, analytics_environment: "unavailable" });
+    expect(await db("gp_flow_enrollment")).toHaveLength(0);
+  });
+  it.each(["rehearsal", "unavailable"])("does not promote original %s after configuration changes", async lane => {
+    const { container, notify } = await welcomeFixture({ lane });await gpAccountWelcome(container);
+    expect(notify).not.toHaveBeenCalled();expect(await db("gp_customer_profile")).toHaveLength(0);expect(emitOpsAlert).not.toHaveBeenCalled();
+  });
+  it("pauses without advancing a saved source when the flag is unset", async () => {
+    const { container, notify } = await welcomeFixture();delete process.env.GP_ACCOUNT_WELCOME_ENABLED;await gpAccountWelcome(container);
+    expect(await db("gp_event_delivery")).toHaveLength(0);expect(notify).not.toHaveBeenCalled();
+  });
+  it("holds an ambiguous failed provider attempt instead of automatically resending", async () => {
+    const { container, notify } = await welcomeFixture();notify.mockRejectedValue(new Error("transport outcome unknown"));await gpAccountWelcome(container);
+    expect((await db("gp_message_log").first()).status).toBe("failed");await makeDue();await gpAccountWelcome(container);expect(notify).toHaveBeenCalledTimes(1);
+    expect(await db("gp_communication_event").where({ event_name: "email_sent" })).toHaveLength(0);
+  });
+  it("never treats provider name or internal notification ID as a successful receipt", async () => {
+    const { container, notify } = await welcomeFixture();notify.mockResolvedValue([{ provider_id: "postmark-provider", id: "noti_internal", status: "success" }]);
+    await gpAccountWelcome(container);await makeDue();await gpAccountWelcome(container);expect(notify).toHaveBeenCalledTimes(1);
+    expect(await db("gp_message_log").first()).toMatchObject({ status: "queued", postmark_message_id: null });
+    expect(await db("gp_communication_event").where({ event_name: "email_sent" })).toHaveLength(0);
+  });
+  it("recovers an accepted message receipt and missing outcome without repeating the send or redirecting", async () => {
+    const { container, notify } = await welcomeFixture();await gpAccountWelcome(container);
+    await db("gp_event_delivery").where({ target: "account_welcome_email" }).delete();
+    await db("gp_communication_event").where({ event_name: "email_sent" }).delete();
+    await db("customer").update({ email: "changed@example.test" });await gpAccountWelcome(container);
+    expect(notify).toHaveBeenCalledTimes(1);expect(await db("gp_communication_event").where({ event_name: "email_sent" })).toHaveLength(1);
+    expect((await db("gp_event_delivery").where({ target: "account_welcome_email" }).first()).status).toBe("delivered");
+  });
+  it("records suppression distinctly without reporting a sent welcome", async () => {
+    const { container, notify } = await welcomeFixture();await recordSuppression(db, { email: "original@example.test", scope: "hard_bounce", reason: "fixture" });
+    await gpAccountWelcome(container);expect(notify).not.toHaveBeenCalled();expect(await db("gp_message_log")).toHaveLength(0);
+    expect(await db("gp_communication_event").where({ event_name: "email_sent" })).toHaveLength(0);
+    expect((await db("gp_communication_event").where({ event_name: "email_suppressed" }).first()).properties.reason).toBe("suppression");
+  });
+  it("serializes concurrent welcome workers over the saved source", async () => {
+    const { container, notify } = await welcomeFixture();let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });const gate = new Promise<void>(resolve => { release = resolve; });
+    notify.mockImplementation(async () => { entered();await gate;return [{ external_id: "pm_message_original", status: "success" }]; });
+    const first = gpAccountWelcome(container);await started;await gpAccountWelcome(container);release();await first;expect(notify).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,4 +1,5 @@
 import { captureCustomerMeasurementRequest } from "./middlewares/customer-measurement"
+import { captureAccountWelcomeResponse } from "./middlewares/account-welcome"
 import { captureCartMeasurementResponse } from "./middlewares/cart-measurement"
 import {
   authenticate,
@@ -730,7 +731,7 @@ export default defineMiddlewares({
     {
       matcher: "/store/customers",
       method: ["POST"],
-      middlewares: [protectCustomerStaffAuthority, captureCustomerMeasurementRequest],
+      middlewares: [protectCustomerStaffAuthority, captureCustomerMeasurementRequest, captureAccountWelcomeResponse],
     },
     {
       matcher: "/store/customers/me",

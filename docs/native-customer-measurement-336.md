@@ -66,8 +66,10 @@ claim that handler tests alone prove these runtime guarantees. Saved event rows
 allow delivery recovery without repeating native customer operations; a failure
 before source notification is accepted is a distinct source-availability gap.
 
-This does not classify the separate account welcome-email sender, calendar/
-segment audiences, or every message provider callback. Those operational/send
-paths retain their own controlled-recipient and classification gates. The new
-customer event cannot itself enroll a test in production automation, but this
-slice is not complete communications send isolation.
+The separate [account welcome source](account-welcome-source-336.md) now captures
+successful Store registration independently of analytics permission and retains
+the original recipient through service delivery and matched callbacks. Its flag
+is unset and native scope/bus, account-change races and actual provider receipts
+remain gates. Calendar/segment audiences and unmatched/general provider callbacks
+still need their own original-purpose contracts. Neither source completes all
+communications send isolation.
