@@ -44,10 +44,22 @@ begin
   raise exception 'Accepted-order evidence is immutable; append a verified correction instead';
 end;
 $$ language plpgsql;
-create trigger gp_order_promise_review_immutable before update or delete on gp_order_promise_review
+do $$ begin
+  if not exists (select 1 from pg_trigger where tgrelid = 'gp_order_promise_review'::regclass and tgname = 'gp_order_promise_review_immutable' and not tgisinternal) then
+    create trigger gp_order_promise_review_immutable before update or delete on gp_order_promise_review
   for each row execute function gp_order_promise_immutable_v1();
-create trigger gp_order_promise_snapshot_immutable before update or delete on gp_order_promise_snapshot
+  end if;
+end; $$;
+do $$ begin
+  if not exists (select 1 from pg_trigger where tgrelid = 'gp_order_promise_snapshot'::regclass and tgname = 'gp_order_promise_snapshot_immutable' and not tgisinternal) then
+    create trigger gp_order_promise_snapshot_immutable before update or delete on gp_order_promise_snapshot
   for each row execute function gp_order_promise_immutable_v1();
-create trigger gp_order_promise_binding_immutable before update or delete on gp_order_promise_binding
+  end if;
+end; $$;
+do $$ begin
+  if not exists (select 1 from pg_trigger where tgrelid = 'gp_order_promise_binding'::regclass and tgname = 'gp_order_promise_binding_immutable' and not tgisinternal) then
+    create trigger gp_order_promise_binding_immutable before update or delete on gp_order_promise_binding
   for each row execute function gp_order_promise_immutable_v1();
+  end if;
+end; $$;
 `;

@@ -55,3 +55,7 @@ Focused units cover trusted catalog authority, zero/missing totals, semantic com
 The PostgreSQL CI suite executes the actual ledger migration and transactions with isolated cart/order/link fixtures: concurrency, staleness, rollback, forgery, append-only storage and original amount/contact retention. It does not execute native Medusa completion or providers. CI also runs inherited accounting, receipt and incoming-stock checks plus TypeScript. Record the exact candidate SHA and run receipt in #368; old ledger-only CI is not proof for this integration.
 
 For an isolated local ledger test use `ORDER_PROMISE_TEST_DATABASE_URL` pointing to loopback database `gp_order_promises` (CI uses `gp_launch`), or `ORDER_PROMISE_TEST_PG_SOCKET` for port 55468/user `gp_order_promise_test`. Run `TEST_TYPE=integration:order-promise yarn jest --runInBand`. This suite never reads `DATABASE_URL`.
+
+## Migration recovery and release backup (#372)
+
+Before a migrating merge, record a fresh database backup, the restore target/procedure and the exact candidate SHA. The accepted-order migration retains existing tables and installs only missing immutable-evidence triggers. Reapplying it preserves accepted reviews, snapshots and order bindings without temporarily dropping their guards. The PostgreSQL migration-replay tests cover populated replay and a missing trigger; backup custody and a controlled Railway rehearsal remain separate operator evidence. Do not delete accepted evidence or use a destructive down migration to recover.
