@@ -207,7 +207,8 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     expect((await request("/admin/users", { token: null, authorization: `Bearer ${token({ actor_type: "user", actor_id: "usr_existing" })}`, method: "GET" })).status).toBe(200)
     expect((await request("/admin/products", { key: "sk_unknown", token: null, body: { title: "Fixture" } })).status).toBe(200)
     expect((await request("/admin/customers/cus_target", { key: "sk_unknown", token: null, body: { phone: "4045550100" } })).status).toBe(200)
-    expect(warn).toHaveBeenCalledTimes(3)
+    // Three allowed requests share one would-deny reason and one alert window.
+    expect(warn).toHaveBeenCalledTimes(1)
     expect(warn.mock.calls.flat().join(" ")).not.toMatch(/Bearer|sk_unknown|4045550100|Fixture/)
     const noAuth = await fetch(baseUrl + "/admin/users")
     expect(noAuth.status).toBe(401)

@@ -1,7 +1,7 @@
 import path from "node:path"
 import type { Server } from "node:http"
 import { authenticate } from "@medusajs/framework/http"
-import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
+import { ContainerRegistrationKeys, Modules, mergeMetadata } from "@medusajs/framework/utils"
 import middlewares from "../middlewares"
 import { protectCustomerStaffAuthority } from "../middlewares/customer-staff-authority"
 
@@ -9,7 +9,7 @@ import { protectCustomerStaffAuthority } from "../middlewares/customer-staff-aut
 // handlers. Only customer workflows/persistence are synthetic; no live account
 // is read or changed. It does not stand in for a deployed Medusa rehearsal.
 const createRun = jest.fn(async () => ({ result: { id: "cus_fixture" } }))
-const updateRun = jest.fn(async () => ({ result: [] }))
+const updateRun = jest.fn(async (_input: any) => ({ result: [] }))
 jest.mock("@medusajs/core-flows", () => ({
   ...jest.requireActual("@medusajs/core-flows"),
   createCustomerAccountWorkflow: () => ({ run: createRun }),
@@ -23,6 +23,9 @@ const updateRoute = require(path.join(medusaRoot, "dist/api/store/customers/me/r
 const { RoutesSorter } = require(path.join(path.dirname(require.resolve("@medusajs/framework/http")), "routes-sorter.js"))
 const express = require("express")
 const jwt = require("jsonwebtoken")
+
+// JSON persistence keeps nested metadata in the same realm as the HTTP parser.
+const metadataCopy = (value: any) => JSON.parse(JSON.stringify(value))
 
 const authorityKeys = [
   "gp_staff_role", "staff_role", "role", "account_role", "is_staff", "staff",
@@ -39,6 +42,9 @@ describe("Store customer staff-authority boundary (native Medusa HTTP fixture)",
   let baseUrl: string
   const secret = "isolated-staff-authority-http-fixture"
   const remoteQuery = jest.fn(async () => [{ id: "cus_fixture", email: "fixture@example.test" }])
+  let customer: any
+  let beforePersist: (() => void) | undefined
+  const retrieveCustomer = jest.fn(async (_id: string, _options: any) => metadataCopy(customer))
   const config = { projectConfig: { http: { jwtSecret: secret } } }
 
   beforeAll(async () => {
@@ -48,6 +54,7 @@ describe("Store customer staff-authority boundary (native Medusa HTTP fixture)",
       req.scope = { resolve: (key: string) => {
         if (key === ContainerRegistrationKeys.CONFIG_MODULE) return config
         if (key === ContainerRegistrationKeys.REMOTE_QUERY) return remoteQuery
+        if (key === Modules.CUSTOMER) return { retrieveCustomer }
         throw new Error(`Unexpected dependency: ${key}`)
       } }
       req.queryConfig = { fields: ["id", "email"] }
@@ -78,7 +85,25 @@ describe("Store customer staff-authority boundary (native Medusa HTTP fixture)",
     baseUrl = `http://127.0.0.1:${(server.address() as any).port}`
   })
 
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    beforePersist = undefined
+    customer = { id: "cus_fixture", email: "fixture@example.test", metadata: {
+      gp_staff_role: "office", staff_access_revoked: true,
+      created_by_staff_customer_id: "cus_creator", gp_credit_limit: 1000,
+      customer_account_notes: [{ text: "Internal fixture note" }],
+      customer_account_credit_balance_minor: 1250,
+    } }
+    retrieveCustomer.mockImplementation(async () => metadataCopy(customer))
+    remoteQuery.mockImplementation(async () => [metadataCopy(customer)])
+    updateRun.mockImplementation(async ({ input }) => {
+      beforePersist?.()
+      // Same merge helper used by the installed Medusa internal service. This
+      // is synthetic persistence, not a live database/customer mutation.
+      if (input.update.metadata) customer.metadata = mergeMetadata(customer.metadata, input.update.metadata)
+      return { result: [] }
+    })
+  })
   afterAll(async () => {
     server?.closeAllConnections()
     if (server) await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
@@ -110,7 +135,7 @@ describe("Store customer staff-authority boundary (native Medusa HTTP fixture)",
   })
 
   describe.each(["/store/customers", "/store/customers/me"])("%s", (endpoint) => {
-    it.each(authorityKeys)("rejects %s before a customer workflow or read", async (key) => {
+    it.each(authorityKeys)("rejects a change to %s before mutation or response read", async (key) => {
       const result = await post(endpoint, { email: "fixture@example.test", metadata: { [key]: key.includes("revoked") ? false : "super_admin" } })
       expect(result.status).toBe(403)
       expect(createRun).not.toHaveBeenCalled()
@@ -149,10 +174,65 @@ describe("Store customer staff-authority boundary (native Medusa HTTP fixture)",
     })
   })
 
-  it("also rejects an already-validated protected body", () => {
+  it.each([undefined, "log", "enforce"])("allows an unchanged authority snapshot with SMS updates in %s mode", async (mode) => {
+    const prior = process.env.GP_STAFF_BOUNDARY_MODE
+    try {
+      if (mode === undefined) delete process.env.GP_STAFF_BOUNDARY_MODE
+      else process.env.GP_STAFF_BOUNDARY_MODE = mode
+      const protectedBefore = metadataCopy(customer.metadata)
+      const sms = { sms_marketing_opt_in: true, sms_marketing_phone: "+14045550100", sms_marketing_consent_source: "account_profile" }
+      expect((await post("/store/customers/me", { phone: "4045550100", metadata: { ...protectedBefore, ...sms } })).status).toBe(200)
+      expect(updateRun).toHaveBeenCalledWith({ input: { selector: { id: customer.id }, update: { phone: "4045550100", metadata: sms } } })
+      expect(retrieveCustomer).toHaveBeenCalledWith(customer.id, { select: ["id", "metadata"] })
+      expect(customer.metadata).toEqual({ ...protectedBefore, ...sms })
+    } finally {
+      if (prior === undefined) delete process.env.GP_STAFF_BOUNDARY_MODE
+      else process.env.GP_STAFF_BOUNDARY_MODE = prior
+    }
+  })
+
+  it("cannot replay an old grant or credit over a change after the guard read", async () => {
+    const snapshot = metadataCopy(customer.metadata)
+    beforePersist = () => { customer.metadata.gp_staff_role = "customer"; customer.metadata.gp_credit_limit = 0 }
+    expect((await post("/store/customers/me", { metadata: { ...snapshot, sms_marketing_opt_in: false } })).status).toBe(200)
+    expect(customer.metadata).toMatchObject({ gp_staff_role: "customer", gp_credit_limit: 0, sms_marketing_opt_in: false })
+    expect(updateRun.mock.calls[0][0].input.update.metadata).toEqual({ sms_marketing_opt_in: false })
+  })
+
+  it("rejects a mixed legitimate SMS update and changed authority without applying either", async () => {
+    expect((await post("/store/customers/me", { metadata: { ...customer.metadata, gp_staff_role: "super_admin", sms_marketing_opt_in: true } })).status).toBe(403)
+    expect(updateRun).not.toHaveBeenCalled()
+    expect(customer.metadata.sms_marketing_opt_in).toBeUndefined()
+  })
+
+  it("holds an authority-bearing update when its current record cannot be verified", async () => {
+    retrieveCustomer.mockRejectedValueOnce(new Error("Synthetic storage failure"))
+    expect((await post("/store/customers/me", { metadata: { ...customer.metadata, sms_marketing_opt_in: true } })).status).toBe(503)
+    expect(updateRun).not.toHaveBeenCalled()
+  })
+
+  it("authenticates the account before reading authority from its full snapshot", async () => {
+    expect((await post("/store/customers/me", { metadata: customer.metadata }, false)).status).toBe(401)
+    expect(retrieveCustomer).not.toHaveBeenCalled()
+    expect(updateRun).not.toHaveBeenCalled()
+  })
+
+  it("validates raw and transformed bodies before stripping either snapshot", async () => {
+    const body = { metadata: { ...customer.metadata, sms_marketing_opt_in: true } }
+    const validatedBody = { metadata: { ...body.metadata, staff_access_revoked: false } }
+    const req: any = { method: "POST", path: "/store/customers/me", auth_context: { actor_type: "customer", actor_id: customer.id }, body, validatedBody,
+      scope: { resolve: () => ({ retrieveCustomer }) } }
+    const res: any = { status: jest.fn().mockReturnThis(), json: jest.fn() }, next = jest.fn()
+    await protectCustomerStaffAuthority(req, res, next)
+    expect(res.status).toHaveBeenCalledWith(403)
+    expect(body.metadata.gp_staff_role).toBe("office")
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  it("also rejects an already-validated protected body", async () => {
     const res: any = { status: jest.fn().mockReturnThis(), json: jest.fn() }
     const next = jest.fn()
-    protectCustomerStaffAuthority({ body: {}, validatedBody: { metadata: { is_staff: true } } } as any, res, next)
+    await protectCustomerStaffAuthority({ body: {}, validatedBody: { metadata: { is_staff: true } } } as any, res, next)
     expect(res.status).toHaveBeenCalledWith(403)
     expect(next).not.toHaveBeenCalled()
   })

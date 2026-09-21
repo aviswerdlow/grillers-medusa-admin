@@ -7,9 +7,27 @@ export function staffBoundaryMode(): "log" | "enforce" {
   return !value || value === "log" ? "log" : "enforce"
 }
 
+const OBSERVATION_WINDOW_MS = 5 * 60 * 1000
+const MAX_OBSERVATION_KEYS = 128
+const observations = new Map<string, { sentAt: number; suppressed: number }>()
+
 export function reportStaffBoundaryDenial(req: MedusaRequest, boundary: string, reason: string) {
+  // Group by the finite server-defined reason, never actor, path or query.
+  // This bounds hot-path logs/POSTs per process without requiring Redis.
+  const mode = staffBoundaryMode(), now = Date.now(), key = JSON.stringify([mode, boundary, reason])
+  const previous = observations.get(key)
+  if (previous && now >= previous.sentAt && now - previous.sentAt < OBSERVATION_WINDOW_MS) {
+    previous.suppressed = Math.min(previous.suppressed + 1, Number.MAX_SAFE_INTEGER)
+    return
+  }
+  if (!previous && observations.size >= MAX_OBSERVATION_KEYS) {
+    const oldest = observations.keys().next().value
+    if (oldest !== undefined) observations.delete(oldest)
+  }
+  observations.set(key, { sentAt: now, suppressed: 0 })
   // No URL parameters, request bodies, emails, tokens or raw error messages.
-  const context = { boundary, reason, mode: staffBoundaryMode(), method: req.method,
+  const context = { boundary, reason, mode, method: req.method,
+    suppressed_since_previous: previous?.suppressed || 0,
     transport_type: String((req as any).auth_context?.actor_type || "unknown"),
     transport_id: String((req as any).auth_context?.actor_id || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 100) }
   let logger: any

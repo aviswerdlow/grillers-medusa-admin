@@ -100,3 +100,33 @@ A key cannot belong to multiple service classes; gateway precedence is absolute.
 Log mode observations are sent through the existing operations-alert path with method, boundary, reason and authenticated transport ID/type only. Bodies, query strings, tokens, email addresses and raw exception text are excluded. Alert failure cannot block an authenticated request.
 
 No schema migration is added. Inherited accounting migrations still require a protected database backup, recovery access, restore procedure and before/after journal. Exact-head CI is source evidence; actual standalone previews and recovery-login/provider receipts remain #372 gates.
+
+
+## September 21 self-service metadata and alert correction
+
+Current storefront SMS opt-in resubmits existing customer metadata. The Store
+customer guard now authenticates `/store/customers/me` first, reads that exact
+customer when protected fields are present, and accepts only unchanged echoes.
+It removes those fields from both raw and validated patches before the native
+handler runs. The installed Medusa customer service merges metadata keys, so a
+later staff role, credit or note update cannot be overwritten by the old echo.
+Creation and actual additions/changes/removals of authority still fail; an
+unverifiable current record holds the protected update. This works in both log
+and enforce modes without changing either default. Ordinary preference/contact
+patches without protected fields need no additional authority read.
+
+Would-deny observations now coalesce by server-defined boundary, reason and mode
+for five minutes per process. The first observation logs and posts normally;
+the first observation after the window reports the suppressed count. Actor IDs
+and request URLs never create new throttle keys. Different failure reasons and
+mode transitions remain visible. The small cache is bounded; it resets on
+process restart, so this is not a distributed exactly-once alert claim. Alert
+failure never blocks the request and cannot trigger a per-request retry storm.
+No alert destination, credential, flag or migration is added.
+
+Backend alone against current storefront main preserves its full-metadata SMS
+form while rejecting privilege changes. The staff guide's customer preference
+and authority instructions remain accurate; no new staff step or storefront
+build is needed. #44's separate primary-contact/SMS-form activation requirements
+remain open. Native provider/consent acceptance, protected backup/recovery for
+inherited migrations and actual shared stack integration are still launch gates.

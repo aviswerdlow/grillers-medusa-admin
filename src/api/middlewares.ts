@@ -684,7 +684,7 @@ export default defineMiddlewares({
     {
       matcher: "/store/customers/me",
       method: ["POST"],
-      middlewares: [protectCustomerStaffAuthority],
+      middlewares: [authenticate("customer", ["session", "bearer"]), protectCustomerStaffAuthority],
     },
     {
       matcher: "/store/shipping-options",
