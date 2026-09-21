@@ -2,6 +2,7 @@ import type { MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { clickHouseClient } from "./destinations"
 import { getUpcomingHoliday } from "./hebrew-calendar"
+import { SegmentAudienceUnavailable, segmentMembershipState } from "./segment-membership"
 
 type KnexLike = any
 
@@ -155,7 +156,7 @@ export async function clickHouseSegmentProfileIds(
     throw new Error(`Unknown clickhouse segment query_key: ${key}`)
   }
   const client = clickHouseClient()
-  if (!client) return []
+  if (!client) throw new SegmentAudienceUnavailable("warehouse_not_configured")
 
   const { query, query_params } = registered.sql(definition.params || {})
   const result = await client.query({
@@ -307,10 +308,16 @@ export async function seedGpSegmentLibrary(db: KnexLike) {
   }
 }
 
-export function segmentEngineHealth(container: MedusaContainer) {
+export async function segmentEngineHealth(container: MedusaContainer) {
   const db = container.resolve(ContainerRegistrationKeys.PG_CONNECTION) as KnexLike
-  return db("gp_segment")
+  const segments = await db("gp_segment")
     .whereNull("deleted_at")
-    .select("key", "status", "cached_count", "last_computed_at")
+    .select("key", "status", "cached_count", "last_computed_at", "metadata", "query_definition")
     .orderBy("key")
+  return segments.map((segment: Record<string, any>) => {
+    const { metadata, query_definition, ...summary } = segment
+    const state = segmentMembershipState(segment)
+    return { ...summary, membership_available: state.available, unavailable_reason: state.reason,
+      last_refresh: state.receipt }
+  })
 }

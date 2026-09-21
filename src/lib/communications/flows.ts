@@ -14,6 +14,7 @@ import {
   resolveCalendarAnchor,
 } from "./hebrew-calendar"
 import { validateSmsMarketingContent } from "./sms"
+import { readMaterializedSegmentMembers, SegmentAudienceUnavailable } from "./segment-membership"
 
 type KnexLike = any
 
@@ -849,13 +850,13 @@ export async function evaluateFlowsForEvent(
  */
 export async function enrollCalendarAnchoredFlows(
   db: KnexLike
-): Promise<{ evaluated: number; enrolled: number }> {
+): Promise<{ evaluated: number; enrolled: number; unavailable: number }> {
   const flows = await db("gp_communication_flow")
     .whereNull("deleted_at")
     .where("status", "active")
     .where("trigger_event", "calendar_anchor")
 
-  const summary = { evaluated: 0, enrolled: 0 }
+  const summary = { evaluated: 0, enrolled: 0, unavailable: 0 }
   for (const flow of flows) {
     const cond = flow.trigger_conditions || {}
     const anchorName = cond.anchor
@@ -887,25 +888,34 @@ export async function enrollCalendarAnchoredFlows(
       .whereNull("deleted_at")
       .where("key", segmentKey)
       .first()
-    if (!segment) continue
+    let profileIds: string[]
+    let receipt: Record<string, any>
+    try {
+      if (!segment) throw new SegmentAudienceUnavailable("inactive")
+      const audience = await readMaterializedSegmentMembers(db, segment.id)
+      if (audience.segment.key !== segmentKey) throw new SegmentAudienceUnavailable("definition_changed")
+      profileIds = audience.profileIds
+      receipt = audience.receipt
+    } catch (error) {
+      if (!(error instanceof SegmentAudienceUnavailable)) throw error
+      summary.unavailable += 1
+      continue
+    }
 
-    const members = await db("gp_segment_member")
-      .whereNull("deleted_at")
-      .whereNull("exited_at")
-      .where("segment_id", segment.id)
-      .select("profile_id")
-
-    for (const member of members) {
+    for (const profileId of profileIds) {
       const enrolled = await enrollProfileInFlow(
         db,
         flow,
-        member.profile_id,
+        profileId,
         occurrenceId,
         {
           calendar_anchor: anchorName,
           segment_key: segmentKey,
           fire_at: resolved.fireAt.toISOString(),
           hebrew_year: resolved.holiday.hebrewYear,
+          segment_refresh_id: receipt.refresh_id,
+          segment_definition_hash: receipt.definition_hash,
+          segment_observed_at: receipt.completed_at,
         }
       )
       if (enrolled) summary.enrolled += 1

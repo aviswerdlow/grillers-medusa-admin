@@ -28,6 +28,7 @@ import { communicationQueueHealth, enqueueCampaignSend } from "./queue"
 import { communicationReporting } from "./reporting"
 import { listEmailTemplates, seedEmailTemplates } from "./templates"
 import { resolvePostmarkMonthlyLimit } from "./postmark-usage"
+import { readMaterializedSegmentMembers, refreshMaterializedSegment, SegmentAudienceUnavailable } from "./segment-membership"
 
 type KnexLike = any
 
@@ -473,22 +474,16 @@ async function audienceForSegment(db: KnexLike, segmentKey?: string | null) {
     .where("key", segmentKey)
     .first()
 
-  if (!segment) return []
+  if (!segment || segment.status !== "active") throw new SegmentAudienceUnavailable("inactive")
 
   // ClickHouse-sourced segments send to their MATERIALIZED membership
   // (refreshed by the runner) joined against consent — never a live
   // warehouse query at send time.
   if (isClickHouseSegmentDefinition(segment.query_definition)) {
+    const { profileIds } = await readMaterializedSegmentMembers(db, segment.id)
     return db("gp_customer_profile")
-      .join(
-        "gp_segment_member",
-        "gp_segment_member.profile_id",
-        "gp_customer_profile.id"
-      )
       .whereNull("gp_customer_profile.deleted_at")
-      .whereNull("gp_segment_member.deleted_at")
-      .whereNull("gp_segment_member.exited_at")
-      .where("gp_segment_member.segment_id", segment.id)
+      .whereIn("gp_customer_profile.id", profileIds)
       .where("gp_customer_profile.email_consent", true)
       .whereNotNull("gp_customer_profile.email")
       .select("gp_customer_profile.*")
@@ -1639,76 +1634,27 @@ export async function refreshSegmentMembership(container: MedusaContainer) {
     .select("*")
 
   let refreshed = 0
+  let unavailable = 0
   let activeMembers = 0
 
   for (const segment of segments) {
-    let profileIds: Set<string>
-    if (isClickHouseSegmentDefinition(segment.query_definition)) {
-      // Warehouse-sourced: named registry query → email_lower → profiles.
-      // Fails soft per segment (a warehouse hiccup must not break the
-      // whole refresh loop) — the segment keeps its previous membership.
-      try {
-        const ids = await clickHouseSegmentProfileIds(
-          db,
-          segment.query_definition || {}
-        )
-        profileIds = new Set(ids)
-      } catch {
-        refreshed += 1
-        continue
+    const result = await refreshMaterializedSegment(db, segment.id, async (trx, definition) => {
+      if (isClickHouseSegmentDefinition(definition)) {
+        return clickHouseSegmentProfileIds(trx, definition)
       }
-    } else {
-      const profiles = await profilesForDefinition(
-        db,
-        segment.query_definition || {},
-        { requireConsent: false, limit: 10000 }
-      )
-      profileIds = new Set(
-        profiles
-          .map((profile: Record<string, any>) => profile.id)
-          .filter(Boolean)
-      )
-    }
-    activeMembers += profileIds.size
-
-    const existingRows = await db("gp_segment_member")
-      .whereNull("deleted_at")
-      .whereNull("exited_at")
-      .where("segment_id", segment.id)
-      .select("id", "profile_id")
-
-    const existingByProfile = new Map(
-      existingRows.map((row: Record<string, any>) => [row.profile_id, row])
-    )
-
-    for (const profileId of profileIds) {
-      if (existingByProfile.has(profileId)) continue
-      await db("gp_segment_member").insert({
-        id: id("gpsegmem"),
-        segment_id: segment.id,
-        profile_id: profileId,
-        entered_at: now(),
-        metadata: {},
-        created_at: now(),
-        updated_at: now(),
+      // Overfetch detects truncation; an incomplete audience is unavailable.
+      const profiles = await profilesForDefinition(trx, definition, {
+        requireConsent: false, limit: 10001,
       })
-    }
-
-    for (const row of existingRows) {
-      if (profileIds.has(row.profile_id)) continue
-      await db("gp_segment_member").where("id", row.id).update({
-        exited_at: now(),
-        updated_at: now(),
-      })
-    }
-
-    await db("gp_segment").where("id", segment.id).update({
-      cached_count: profileIds.size,
-      last_computed_at: now(),
-      updated_at: now(),
+      return profiles.map((profile: Record<string, any>) => profile.id)
     })
-    refreshed += 1
+    if (result.status === "available") {
+      refreshed += 1
+      activeMembers += result.member_count
+    } else if (result.status === "unavailable") {
+      unavailable += 1
+    }
   }
 
-  return { refreshed, active_members: activeMembers }
+  return { refreshed, unavailable, active_members: activeMembers }
 }

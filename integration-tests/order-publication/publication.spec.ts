@@ -7,6 +7,9 @@ import { captureCartResponse, cartSourceFromRow, saveCartMeasurement, deriveCart
 import { projectNativeCartActivity, expireInactiveCarts, cartRecoveryAllowed, syncCartLifecycleFromEvent } from "../../src/lib/communications/cart-lifecycle";
 import { recordCommunicationEvent } from "../../src/lib/communications/core";
 import { runDueFlowEnrollments } from "../../src/lib/communications/flows";
+import { enrollCalendarAnchoredFlows } from "../../src/lib/communications/flows";
+import { sendCampaign } from "../../src/lib/communications/admin";
+import { readMaterializedSegmentMembers, refreshMaterializedSegment } from "../../src/lib/communications/segment-membership";
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils";
 import { reconcileOperationalMeasurements } from "../../src/lib/order-operational-measurement";
 import { Migration20260921033000 } from "../../src/modules/gp-communications/migrations/Migration20260921033000";
@@ -67,7 +70,7 @@ jest.mock("../../src/lib/communications/queue", () => ({
 // guard. SWC exposes read-only exports, so a direct spy cannot replace them.
 jest.mock("../../src/lib/communications/hebrew-calendar", () => {
   const actual = jest.requireActual("../../src/lib/communications/hebrew-calendar");
-  return { ...actual, isInSendBlackout: jest.fn(actual.isInSendBlackout) };
+  return { ...actual, isInSendBlackout: jest.fn(actual.isInSendBlackout), resolveCalendarAnchor: jest.fn(actual.resolveCalendarAnchor) };
 });
 const knex = require("knex"),
   schema = `gp_publication_${randomUUID().replace(/-/g, "")}`;
@@ -1888,5 +1891,132 @@ describe("account welcome source and service delivery", () => {
     const started = new Promise<void>(resolve => { entered = resolve; });const gate = new Promise<void>(resolve => { release = resolve; });
     notify.mockImplementation(async () => { entered();await gate;return [{ external_id: "pm_message_original", status: "success" }]; });
     const first = gpAccountWelcome(container);await started;await gpAccountWelcome(container);release();await first;expect(notify).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("materialized audience selection receipts", () => {
+  async function audienceFixture() {
+    await db("gp_segment").insert({ id: "segment_fixture", key: "fixture-audience", name: "Fixture audience", status: "active",
+      query_definition: { source: "clickhouse", query_key: "engaged_recent" }, metadata: { custom: true } });
+    return "segment_fixture";
+  }
+  const refresh = (ids: string[], segmentId = "segment_fixture") => refreshMaterializedSegment(db, segmentId, async () => ids);
+  const read = (segmentId = "segment_fixture") => readMaterializedSegmentMembers(db, segmentId);
+
+  it("records an empty success separately from a failed attempt and preserves prior rows on failure", async () => {
+    await audienceFixture();
+    await refresh(["profile_one"]);
+    const before = await db("gp_segment_member").first();
+    const result = await refreshMaterializedSegment(db, "segment_fixture", async () => { throw new Error("warehouse offline"); });
+    expect(result).toEqual({ status: "unavailable", member_count: 0 });
+    expect(await db("gp_segment_member").first()).toEqual(before);
+    await expect(read()).rejects.toThrow("latest_refresh_unavailable");
+    await refresh([]);
+    expect((await read()).profileIds).toEqual([]);
+    expect((await db("gp_segment_member").first()).exited_at).not.toBeNull();
+  });
+
+  it("updates retained membership receipts, preserves unrelated metadata and creates a new row on reentry", async () => {
+    await audienceFixture(); await refresh(["profile_one", "profile_two"]);
+    await db("gp_segment_member").where("profile_id", "profile_one").update({ metadata: { operator_note: "preserve" } });
+    await refresh(["profile_one"]);
+    expect((await read()).profileIds).toEqual(["profile_one"]);
+    expect((await db("gp_segment_member").where("profile_id", "profile_one").first()).metadata.operator_note).toBe("preserve");
+    await refresh(["profile_one", "profile_two"]);
+    expect((await read()).profileIds).toEqual(["profile_one", "profile_two"]);
+    expect(await db("gp_segment_member").where("profile_id", "profile_two")).toHaveLength(2);
+  });
+
+  it("rolls back partial membership writes while committing an unavailable receipt", async () => {
+    await audienceFixture(); await refresh(["profile_one"]);
+    const before = await db("gp_segment_member").first();
+    const result = await refreshMaterializedSegment(db, "segment_fixture", async (trx) => {
+      await trx("gp_segment_member").where("id", before.id).update({ exited_at: new Date() });
+      // A real SQL constraint error poisons the savepoint until it rolls back.
+      await trx("gp_segment_member").insert({ id: before.id, segment_id: "segment_fixture", profile_id: "duplicate", entered_at: new Date() });
+      return [];
+    });
+    expect(result.status).toBe("unavailable");
+    expect(await db("gp_segment_member").first()).toEqual(before);
+    await expect(read()).rejects.toThrow("latest_refresh_unavailable");
+  });
+
+  it("refuses a truncated audience without discarding the previous membership", async () => {
+    await audienceFixture(); await refresh(["profile_one"]);
+    expect((await refresh(Array.from({ length: 10001 }, (_, i) => `profile_${i}`))).status).toBe("unavailable");
+    expect(await db("gp_segment_member").whereNull("exited_at")).toHaveLength(1);
+    expect((await db("gp_segment").first()).metadata.membership_refresh_v1.reason).toBe("audience_too_large");
+  });
+
+  it("serializes concurrent refreshes so an older result cannot overwrite a later attempt", async () => {
+    await audienceFixture();
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const first = refreshMaterializedSegment(db, "segment_fixture", async () => { entered(); await gate; return ["profile_old"]; });
+    await started;
+    const second = refresh(["profile_new"]);
+    release();
+    expect((await Promise.all([first, second])).map((r) => r.status)).toEqual(["available", "available"]);
+    expect((await read()).profileIds).toEqual(["profile_new"]);
+  });
+
+  it("reads committed membership after an in-flight refresh instead of mixing two generations", async () => {
+    await audienceFixture(); await refresh(["profile_old"]);
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const updating = refreshMaterializedSegment(db, "segment_fixture", async () => { entered(); await gate; return ["profile_new"]; });
+    await started;
+    const reading = read(); release();
+    await updating;
+    expect((await reading).profileIds).toEqual(["profile_new"]);
+  });
+
+  it("rejects changed definitions and partially changed member sets", async () => {
+    await audienceFixture(); await refresh(["profile_one"]);
+    await db("gp_segment").where("id", "segment_fixture").update({ query_definition: { total_orders: 1 } });
+    await expect(read()).rejects.toThrow("definition_changed");
+    await refresh(["profile_one"]);
+    await db("gp_segment_member").whereNull("exited_at").update({ profile_id: "profile_other" });
+    await expect(read()).rejects.toThrow("membership_changed");
+  });
+
+  it("calendar enrollment holds unavailable audiences and retains the successful refresh identity", async () => {
+    await audienceFixture();
+    await db("gp_communication_flow").insert({ id: "calendar_fixture", key: "calendar-fixture", name: "Calendar fixture", status: "active", trigger_event: "calendar_anchor",
+      trigger_conditions: { anchor: "pesach", segment_key: "fixture-audience" }, metadata: { holdout_pct: 0 }, steps: JSON.stringify([{ type: "delay", minutes: 1 }]) });
+    const calendar = require("../../src/lib/communications/hebrew-calendar");
+    calendar.resolveCalendarAnchor.mockReturnValue({ fireAt: new Date(Date.now() - 1000), holiday: { hebrewYear: 5787 } });
+    try {
+      expect(await enrollCalendarAnchoredFlows(db)).toEqual({ evaluated: 1, enrolled: 0, unavailable: 1 });
+      expect(await db("gp_flow_enrollment")).toHaveLength(0);
+      await refresh(["profile_one"]);
+      const receipt = (await read()).receipt;
+      expect(await enrollCalendarAnchoredFlows(db)).toEqual({ evaluated: 1, enrolled: 1, unavailable: 0 });
+      const enrollment = await db("gp_flow_enrollment").first();
+      expect(enrollment.trigger_context).toMatchObject({ segment_refresh_id: receipt.refresh_id, segment_definition_hash: receipt.definition_hash });
+      expect(await db("gp_message_log")).toHaveLength(0);
+    } finally {
+      calendar.resolveCalendarAnchor.mockImplementation(jest.requireActual("../../src/lib/communications/hebrew-calendar").resolveCalendarAnchor);
+    }
+  });
+
+  it.each(["email", "sms"])("stops %s campaign selection on a failed refresh before provider access", async (channel) => {
+    await audienceFixture(); await refresh(["profile_one"]);
+    await refreshMaterializedSegment(db, "segment_fixture", async () => { throw new Error("offline"); });
+    await db("gp_campaign").insert({ id: "campaign_fixture", key: "campaign-fixture", name: "Fixture", subject: "Fixture", status: "draft",
+      segment_key: "fixture-audience", metadata: { channel, sms_body: "Griller's Pride specials. Reply STOP to unsubscribe." } });
+    const resolve = jest.fn((key: string) => { if (key === ContainerRegistrationKeys.PG_CONNECTION) return db; throw new Error("No provider access allowed"); });
+    const calendar = require("../../src/lib/communications/hebrew-calendar");
+    calendar.isInSendBlackout.mockReturnValue({ blocked: false });
+    try {
+      await expect(sendCampaign({ resolve } as any, "campaign_fixture")).rejects.toThrow("latest_refresh_unavailable");
+      expect(resolve.mock.calls.every(([key]) => key === ContainerRegistrationKeys.PG_CONNECTION)).toBe(true);
+      expect(await db("gp_message_log")).toHaveLength(0);
+      expect((await db("gp_campaign").first()).status).toBe("draft");
+    } finally {
+      calendar.isInSendBlackout.mockImplementation(jest.requireActual("../../src/lib/communications/hebrew-calendar").isInSendBlackout);
+    }
   });
 });
