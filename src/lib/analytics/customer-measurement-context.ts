@@ -31,17 +31,37 @@ export type CustomerMeasurementSnapshot = {
   context: CustomerMeasurementContext
 }
 
+export type RequestMeasurementContext = Omit<
+  CustomerMeasurementContext,
+  "analytics_consent"
+> & {
+  analytics_consent: boolean
+}
+
 /** The request supplies consent, never payment mode or native customer identity. */
 export function customerMeasurementContext(
   header: unknown,
   now = Date.now()
 ): CustomerMeasurementContext | null {
+  return requestMeasurementContext(
+    header,
+    now
+  ) as CustomerMeasurementContext | null
+}
+
+export function requestMeasurementContext(
+  header: unknown,
+  now = Date.now(),
+  allowDeniedAnalytics = false
+): RequestMeasurementContext | null {
   try {
     if (typeof header !== "string" || header.length > 12_000) return null
     const value = JSON.parse(Buffer.from(header, "base64url").toString("utf8"))
     if (
       !object(value) ||
-      value.analytics_consent !== true ||
+      (allowDeniedAnalytics
+        ? typeof value.analytics_consent !== "boolean"
+        : value.analytics_consent !== true) ||
       typeof value.analytics_consent_at !== "number" ||
       !Number.isSafeInteger(value.analytics_consent_at) ||
       value.analytics_consent_at <= 0 ||
@@ -69,6 +89,17 @@ export function customerMeasurementContext(
     )
       return null
     if (!test && value.rehearsal_id) return null
+    if (!value.analytics_consent)
+      return Object.freeze({
+        analytics_consent: false,
+        analytics_consent_at: value.analytics_consent_at,
+        marketing_consent: value.marketing_consent,
+        test_order: test,
+        analytics_environment: test ? "rehearsal" : "production",
+        ...(test ? { rehearsal_id: value.rehearsal_id } : {}),
+        experiment_assignments: [],
+        experiment_context_status: "unverified",
+      })
     const assignments = acceptedExperimentContext([
       {
         metadata: {
@@ -162,7 +193,7 @@ export function validCustomerSnapshot(
   )
 }
 
-export function customerSnapshotHash(snapshot: CustomerMeasurementSnapshot) {
+export function nativeSnapshotHash(snapshot: unknown) {
   const canonical = (value: any): any =>
     Array.isArray(value)
       ? value.map(canonical)
@@ -177,3 +208,5 @@ export function customerSnapshotHash(snapshot: CustomerMeasurementSnapshot) {
     .update(JSON.stringify(canonical(snapshot)))
     .digest("hex")
 }
+
+export const customerSnapshotHash = nativeSnapshotHash

@@ -1,4 +1,9 @@
 import { saveCustomerMeasurement, deliverCustomerMeasurements } from "../../src/lib/customer-measurement";
+import { captureCartResponse, cartSourceFromRow, saveCartMeasurement, deriveCartMeasurement, deliverCartMeasurements } from "../../src/lib/cart-measurement";
+import { projectNativeCartActivity, expireInactiveCarts, cartRecoveryAllowed, syncCartLifecycleFromEvent } from "../../src/lib/communications/cart-lifecycle";
+import { recordCommunicationEvent } from "../../src/lib/communications/core";
+import { runDueFlowEnrollments } from "../../src/lib/communications/flows";
+import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils";
 import { captureCustomerMeasurement } from "../../src/lib/analytics/customer-measurement-context";
 import { randomUUID } from "node:crypto";
 import { Migration20260921001500 } from "../../src/modules/gp-communications/migrations/Migration20260921001500";
@@ -1459,4 +1464,187 @@ it("serializes concurrent customer delivery workers and preserves the original s
   expect((await one).accepted).toBe(3);
   expect(deliver).toHaveBeenCalledTimes(3);
   expect((await db("gp_communication_event").first()).context.native_customer_snapshot).toEqual(JSON.parse(JSON.stringify(snapshot)));
+});
+
+describe("native cart source and recovery", () => {
+  const originalFlag = process.env.GP_CART_MEASUREMENT_ENABLED;
+  const activityAt = new Date(Date.now() - 2 * 60 * 60_000);
+  beforeEach(() => { process.env.GP_CART_MEASUREMENT_ENABLED = "true"; });
+  afterEach(() => {
+    if (originalFlag === undefined) delete process.env.GP_CART_MEASUREMENT_ENABLED;
+    else process.env.GP_CART_MEASUREMENT_ENABLED = originalFlag;
+  });
+  async function fixture(options: any = {}) {
+    const cartId = "cart_native", email = "cart-fixture@example.test";
+    const native = { id: cartId, email, customer_id: null, updated_at: activityAt, completed_at: null };
+    await db("cart").insert(native);
+    if (options.profile !== false) await db("gp_customer_profile").insert({
+      id: "profile_cart", email, email_lower: email, email_consent: options.consent !== false,
+      email_consent_at: new Date(activityAt.getTime() - 60_000), customer_type: "dtc", route_market: "unknown",
+    });
+    const test = options.test === true;
+    const context: any = options.context === null ? null : {
+      analytics_consent: options.analytics !== false, analytics_consent_at: activityAt.getTime() - 1000,
+      marketing_consent: false, test_order: test, analytics_environment: test ? "rehearsal" : "production",
+      ...(test ? { rehearsal_id: "cart-fixture" } : {}), experiment_assignments: [], experiment_context_status: "complete",
+    };
+    const original = captureCartResponse({ ...native, total: 0, currency_code: "usd", items: [{ id: "item_one", quantity: 1 }] }, context, test ? "rehearsal" : "production", activityAt, "request-one")!;
+    const row = await db.transaction((trx: any) => saveCartMeasurement(trx, original));
+    return { original, row, source: cartSourceFromRow(row)!, native };
+  }
+  async function project(f: any) { return db.transaction((trx: any) => projectNativeCartActivity(trx, f.source, f.row)); }
+  const container = () => ({ resolve: () => db }) as any;
+
+  it("freezes initial permission without letting retries adopt later profile changes", async () => {
+    const f = await fixture();
+    expect(f.source.email_permission?.approved).toBe(true);
+    await db("gp_customer_profile").where({ id: "profile_cart" }).update({ email_consent: false });
+    const retry = await db.transaction((trx: any) => saveCartMeasurement(trx, f.original));
+    expect(retry.context).toEqual(f.row.context);
+    await expect(db.transaction((trx: any) => saveCartMeasurement(trx, { ...f.original, cart: { ...f.original.cart, value: 99 } }))).rejects.toThrow("source_conflict");
+    expect((await db("gp_communication_event").where({ event_name: "cart_updated" })).length).toBe(1);
+  });
+  it("does not convert later email opt-in into original cart permission", async () => {
+    const f = await fixture({ consent: false });
+    await db("gp_customer_profile").where({ id: "profile_cart" }).update({ email_consent: true, email_consent_at: new Date() });
+    await project(f); await expireInactiveCarts(container());
+    const expired = await db("gp_communication_event").where({ event_name: "gp_cart_expired" }).first();
+    expect(cartSourceFromRow(expired)?.email_permission?.approved).toBe(false);
+    expect(await cartRecoveryAllowed(db, expired)).toBe(false);
+  });
+  it("permits recorded email recovery independently of declined analytics and cookie marketing", async () => {
+    const f = await fixture({ analytics: false }); await project(f);
+    expect(await expireInactiveCarts(container())).toEqual({ scanned: 1, expired: 1 });
+    const expired = await db("gp_communication_event").where({ event_name: "gp_cart_expired" }).first();
+    expect(cartSourceFromRow(expired)?.context).toMatchObject({ analytics_consent: false, marketing_consent: false });
+    expect(await cartRecoveryAllowed(db, expired)).toBe(true);
+    const logged = await recordCommunicationEvent(db, {
+      event_name: "email_sent", event_id: "cart-email-one", source: "communications-cart",
+      context: { cart_source_event_id: expired.event_id }, properties: { analytics_consent: true, test_event: false },
+    }, { deferSideEffects: true });
+    expect(logged.properties.analytics_consent).toBe(false);
+    expect(logged.properties.original_cart_source_valid).toBe(true);
+    expect(logged.context.native_cart_source_hash).toBe(expired.context.native_cart_hash);
+    await db("gp_customer_profile").where({ id: "profile_cart" }).update({ email_consent: false });
+    expect(await cartRecoveryAllowed(db, expired)).toBe(false);
+  });
+  it("keeps known tests out of production profiles and cart recovery", async () => {
+    const f = await fixture({ test: true, profile: false });
+    expect(f.source.email_permission?.approved).toBe(false);
+    expect(await db("gp_customer_profile")).toHaveLength(0);
+    expect(await project(f)).toMatchObject({ status: "excluded" });
+    expect(await db("gp_cart_lifecycle")).toHaveLength(0);
+    expect((await expireInactiveCarts(container())).expired).toBe(0);
+  });
+  it("does not let an older native observation revive a later empty cart", async () => {
+    const f = await fixture(); await project(f);
+    const empty = captureCartResponse({ ...f.native, total: 0, items: [] }, f.original.context, "production", new Date(activityAt.getTime() + 1000), "request-two")!;
+    const row = await db.transaction((trx: any) => saveCartMeasurement(trx, empty));
+    await db.transaction((trx: any) => projectNativeCartActivity(trx, cartSourceFromRow(row)!, row));
+    expect(await project(f)).toMatchObject({ status: "excluded", reason: "older_cart_activity" });
+    expect((await db("gp_cart_lifecycle").first()).status).toBe("inactive");
+  });
+  it("rolls expiration and its immutable source back together, then resumes once", async () => {
+    const f = await fixture(); await project(f);
+    await db.raw("create function reject_cart_expiry() returns trigger language plpgsql as $$ begin if NEW.event_name = 'gp_cart_expired' then raise exception 'fixture expiry failure'; end if; return NEW; end $$");
+    await db.raw("create trigger cart_expiry_failure before insert on gp_communication_event for each row execute function reject_cart_expiry()");
+    try {
+      await expect(expireInactiveCarts(container())).rejects.toThrow("fixture expiry failure");
+      expect((await db("gp_cart_lifecycle").first()).status).toBe("active");
+      expect(await db("gp_communication_event").where({ event_name: "gp_cart_expired" })).toHaveLength(0);
+    } finally {
+      await db.raw("drop trigger cart_expiry_failure on gp_communication_event");
+      await db.raw("drop function reject_cart_expiry()");
+    }
+    const results = await Promise.all([expireInactiveCarts(container()), expireInactiveCarts(container())]);
+    expect(results.reduce((sum, result) => sum + result.expired, 0)).toBe(1);
+    expect(await db("gp_communication_event").where({ event_name: "gp_cart_expired" })).toHaveLength(1);
+    expect((await db("gp_cart_lifecycle").first()).status).toBe("expired");
+  });
+  it("vetoes native completion before an order measurement event exists", async () => {
+    const f = await fixture(); await project(f);
+    await db("cart").where({ id: f.native.id }).update({ completed_at: new Date() });
+    expect((await expireInactiveCarts(container())).expired).toBe(0);
+    expect((await db("gp_cart_lifecycle").first()).status).toBe("recovered");
+    expect(await db("gp_communication_event").where({ event_name: "order_received" })).toHaveLength(0);
+  });
+  it("vetoes a newer accepted activity before its projection worker runs", async () => {
+    const f = await fixture(); await project(f); await expireInactiveCarts(container());
+    const expired = await db("gp_communication_event").where({ event_name: "gp_cart_expired" }).first();
+    expect(await cartRecoveryAllowed(db, expired)).toBe(true);
+    const newer = captureCartResponse({ ...f.native, total: 5, items: [{ quantity: 1 }] }, f.original.context, "production", new Date(activityAt.getTime() + 1000), "request-two")!;
+    await db.transaction((trx: any) => saveCartMeasurement(trx, newer));
+    expect(await cartRecoveryAllowed(db, expired)).toBe(false);
+  });
+  it("does not enroll old unclassified lifecycle rows", async () => {
+    await db("gp_cart_lifecycle").insert({ id: "legacy_cart", cart_id: "cart_legacy", status: "active", last_activity_at: activityAt, expire_after_minutes: 60 });
+    expect(await expireInactiveCarts(container())).toEqual({ scanned: 1, expired: 0 });
+    expect((await db("gp_cart_lifecycle").first()).status).toBe("unavailable");
+    expect(await db("gp_communication_event")).toHaveLength(0);
+  });
+  it("allows matching browser activity to extend timing without changing recipient or source", async () => {
+    const f = await fixture(); await project(f);
+    const before = await db("gp_cart_lifecycle").first();
+    const input = { event_name: "cart_viewed", cart_id: f.native.id, profile_id: "profile_cart", occurred_at: new Date(activityAt.getTime() + 10_000), email: "different@example.test", properties: { analytics_consent: true, test_event: false, analytics_environment: "production" } };
+    const wrong = await syncCartLifecycleFromEvent(db, { ...input, profile_id: "other" });
+    expect(wrong.last_activity_at).toEqual(before.last_activity_at);
+    const updated = await syncCartLifecycleFromEvent(db, input);
+    expect(updated.last_activity_at).toEqual(input.occurred_at);
+    expect(updated.email).toBe(before.email); expect(updated.metadata).toEqual(before.metadata);
+    expect(await syncCartLifecycleFromEvent(db, { ...input, cart_id: "cart_unknown" })).toBeNull();
+  });
+  it("recovers only missing cart transport receipts with the original source", async () => {
+    const f = await fixture();
+    const deliver = jest.fn(async (target: string) => target === "native_cart_gp" ? { status: "held", reason: "offline" } as const : { status: "accepted" } as const);
+    expect((await deliverCartMeasurements(db, deliver, now)).accepted).toBe(2);
+    deliver.mockImplementation(async () => ({ status: "accepted" }));
+    expect((await deliverCartMeasurements(db, deliver, later(61))).accepted).toBe(1);
+    expect(deliver.mock.calls.filter(([target]) => target === "native_cart_jitsu")).toHaveLength(1);
+    expect((await db("gp_communication_event").where({ event_id: f.row.event_id }).first()).context).toEqual(f.row.context);
+  });
+
+  async function enrolledRecovery(expired: any) {
+    await db("gp_communication_flow").insert({ id: "flow_cart_fixture", key: "cart-fixture-flow", name: "Fixture", trigger_event: "gp_cart_expired", status: "active", message_stream: "lifecycle", message_purpose: "marketing_1to1", metadata: { console_edited: true },
+      steps: JSON.stringify([{ type: "email", template_key: "cart-abandoned-fixture", subject: "Fixture", heading: "Fixture", intro: "Fixture", topic: "cart_recovery" }]) });
+    await db("gp_flow_enrollment").insert({ id: "enrollment_cart_fixture", flow_id: "flow_cart_fixture", flow_key: "cart-fixture-flow", profile_id: "profile_cart", trigger_event_id: expired.event_id,
+      trigger_context: expired, status: "active", current_step_index: 0, enrolled_at: activityAt, next_action_at: activityAt, metadata: {} });
+    const notify = jest.fn(async () => { throw new Error("No provider sends in this fixture"); });
+    return { notify, container: { resolve: (key: string) => {
+      if (key === ContainerRegistrationKeys.PG_CONNECTION) return db;
+      if (key === Modules.NOTIFICATION) return { createNotifications: notify };
+      if (key === "logger") return { error: jest.fn(), warn: jest.fn(), debug: jest.fn() };
+      throw new Error("Unexpected fixture dependency: " + key);
+    } } as any };
+  }
+  it("pauses queued recovery when disabled and vetoes completed carts even after the flow trigger changes", async () => {
+    const f = await fixture(); await project(f); await expireInactiveCarts(container());
+    const expired = await db("gp_communication_event").where({ event_name: "gp_cart_expired" }).first();
+    const runner = await enrolledRecovery(expired);
+    delete process.env.GP_CART_MEASUREMENT_ENABLED;
+    await runDueFlowEnrollments(runner.container);
+    expect((await db("gp_flow_enrollment").where({ id: "enrollment_cart_fixture" }).first()).status).toBe("active");
+    process.env.GP_CART_MEASUREMENT_ENABLED = "true";
+    await db("gp_communication_flow").where({ id: "flow_cart_fixture" }).update({ trigger_event: "customer_updated" });
+    await db("cart").where({ id: f.native.id }).update({ completed_at: new Date() });
+    await runDueFlowEnrollments(runner.container);
+    expect((await db("gp_flow_enrollment").where({ id: "enrollment_cart_fixture" }).first()).exit_reason).toBe("cart_source_no_longer_eligible");
+    expect(runner.notify).not.toHaveBeenCalled();
+  });
+  it("retains original consent on suppressed recovery logs and never counts a suppressed send as sent", async () => {
+    const f = await fixture({ analytics: false }); await project(f); await expireInactiveCarts(container());
+    const expired = await db("gp_communication_event").where({ event_name: "gp_cart_expired" }).first();
+    await db("gp_customer_profile").where({ id: "profile_cart" }).update({ preferences: { cart_recovery: false } });
+    const runner = await enrolledRecovery(expired);
+    const calendar = require("../../src/lib/communications/hebrew-calendar");
+    const blackout = jest.spyOn(calendar, "isInSendBlackout").mockReturnValue({ blocked: false });
+    try {
+      const result = await runDueFlowEnrollments(runner.container);
+      expect(result).toMatchObject({ sent: 0, errors: 0 });
+      const suppressed = await db("gp_communication_event").where({ event_name: "email_suppressed" }).first();
+      expect(suppressed.properties).toMatchObject({ analytics_consent: false, original_cart_source_valid: true });
+      expect(suppressed.context.cart_source_event_id).toBe(expired.event_id);
+      expect(await db("gp_communication_event").where({ event_name: "gp_abandon_email_sent" })).toHaveLength(0);
+      expect(runner.notify).not.toHaveBeenCalled();
+    } finally { blackout.mockRestore(); }
+  });
 });

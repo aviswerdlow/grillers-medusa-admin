@@ -1,4 +1,5 @@
 import { captureCustomerMeasurementRequest } from "./middlewares/customer-measurement"
+import { captureCartMeasurementResponse } from "./middlewares/cart-measurement"
 import {
   authenticate,
   defineMiddlewares,
@@ -653,7 +654,7 @@ export default defineMiddlewares({
   // See ./middlewares/ops-error-handler.ts.
   errorHandler: opsErrorHandler,
   routes: [
-    { matcher: "/store/carts*", middlewares: [enforceStaffCartAuthority] },
+    { matcher: "/store/carts*", middlewares: [enforceStaffCartAuthority, captureCartMeasurementResponse] },
     {
       matcher: "/store/payment-collections*",
       middlewares: [enforceStaffCartAuthority],

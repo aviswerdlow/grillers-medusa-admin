@@ -661,6 +661,9 @@ async function enrollProfileInFlow(
   if (holdout) {
     await recordCommunicationEvent(db, {
       event_name: "flow_holdout_assigned",
+      ...(["gp_cart_created", "gp_cart_expired"].includes(triggerContext?.event_name) ? {
+        source: "communications-cart", context: { cart_source_event_id: triggerEventId },
+      } : {}),
       profile_id: profileId,
       flow_id: flow.id,
       properties: { flow_key: flow.key, trigger_event_id: triggerEventId },
@@ -814,6 +817,10 @@ export async function evaluateFlowsForEvent(
   if (!event.profile_id || !isFlowTriggerableEvent(event.event_name)) {
     return
   }
+  if (["gp_cart_created", "gp_cart_expired"].includes(event.event_name)) {
+    const { cartRecoveryAllowed } = await import("./cart-lifecycle.js")
+    if (!(await cartRecoveryAllowed(db, event))) return
+  }
   await seedCommunicationDefaults(db)
 
   const profile = await db("gp_customer_profile")
@@ -962,6 +969,11 @@ export async function runDueFlowEnrollments(
         .whereNull("deleted_at")
         .where("id", enrollment.profile_id)
         .first()
+      const cartRecovery = ["gp_cart_created", "gp_cart_expired"].includes(flow?.trigger_event) ||
+        ["gp_cart_created", "gp_cart_expired"].includes(enrollment.trigger_context?.event_name)
+      const cartSourceMetadata = cartRecovery
+        ? { cart_source_event_id: enrollment.trigger_event_id } : undefined
+      const cartTracking = cartSourceMetadata ? { source: "communications-cart", context: cartSourceMetadata } : {}
       const steps = Array.isArray(flow?.steps) ? (flow.steps as FlowStep[]) : []
       const step = steps[Number(enrollment.current_step_index || 0)]
 
@@ -974,6 +986,21 @@ export async function runDueFlowEnrollments(
         })
         summary.completed += 1
         continue
+      }
+
+      if (cartRecovery) {
+        // Disabling the owner pauses its queued steps; it never restores the
+        // older unclassified recovery path or discards their audit records.
+        if (process.env.GP_CART_MEASUREMENT_ENABLED !== "true") continue
+        const { cartRecoveryEnrollmentAllowed } = await import("./cart-lifecycle.js")
+        if (!(await cartRecoveryEnrollmentAllowed(db, enrollment))) {
+          await db("gp_flow_enrollment").where("id", enrollment.id).update({
+            status: "exited", exited_at: now(), exit_reason: "cart_source_no_longer_eligible",
+            next_action_at: null, updated_at: now(),
+          })
+          summary.completed += 1
+          continue
+        }
       }
 
       if (!profile.email) {
@@ -1018,6 +1045,7 @@ export async function runDueFlowEnrollments(
       if (enrollment.metadata?.holdout) {
         await recordCommunicationEvent(db, {
           event_name: "flow_message_holdout",
+          ...cartTracking,
           profile_id: profile.id,
           email: profile.email,
           flow_id: flow.id,
@@ -1154,6 +1182,8 @@ export async function runDueFlowEnrollments(
         flow_key: flow.key,
         flow_enrollment_id: enrollment.id,
         idempotency_key: `${flow.key}:${enrollment.id}:${enrollment.current_step_index}:${profile.email_lower}`,
+        metadata: cartSourceMetadata,
+        cart_id: cartSourceMetadata ? enrollment.trigger_context?.cart_id : undefined,
         template_model: {
           first_name: profile.first_name || "",
           email: profile.email,
@@ -1171,12 +1201,13 @@ export async function runDueFlowEnrollments(
       }
 
       if (send.ok && !send.skipped) summary.sent += 1
-      if (send.ok && step.template_key.startsWith("cart-abandoned")) {
+      if (send.ok && !send.skipped && step.template_key.startsWith("cart-abandoned")) {
         const trigger = enrollment.trigger_context || {}
         await recordCommunicationEvent(db, {
           event_name: "gp_abandon_email_sent",
           event_id: `gp_abandon_email_sent:${enrollment.id}:${enrollment.current_step_index}`,
           source: "communications",
+          ...cartTracking,
           profile_id: profile.id,
           email: profile.email,
           cart_id: trigger.cart_id || null,
@@ -1209,6 +1240,9 @@ export async function runDueFlowEnrollments(
       summary.errors += 1
       await recordCommunicationEvent(db, {
         event_name: "flow_step_failed",
+        ...(["gp_cart_created", "gp_cart_expired"].includes(enrollment.trigger_context?.event_name) ? {
+          source: "communications-cart", context: { cart_source_event_id: enrollment.trigger_event_id },
+        } : {}),
         flow_id: enrollment.flow_id,
         profile_id: enrollment.profile_id,
         properties: {

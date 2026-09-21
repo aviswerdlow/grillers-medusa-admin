@@ -752,6 +752,15 @@ export async function recordCommunicationEvent(
   input: CommunicationEventInput,
   options: { deferSideEffects?: boolean } = {}
 ): Promise<Record<string, any>> {
+  if (input.source === "communications-cart") {
+    const { cartSourceFromRow, cartMeasurementProperties } = await import("../cart-measurement.js")
+    const source = await db("gp_communication_event").where({ event_id: input.context?.cart_source_event_id || "" }).whereNull("deleted_at").first()
+    const snapshot = cartSourceFromRow(source)
+    const original = cartMeasurementProperties(snapshot)
+    input = { ...input, properties: { ...(input.properties || {}), ...original, original_cart_source_valid: Boolean(snapshot) },
+      context: { ...(input.context || {}), experiment_context: original.experiment_context,
+        native_cart_source_hash: snapshot ? source.context.native_cart_hash : null } }
+  }
   const now = new Date()
   const eventId = input.event_id || crypto.randomUUID()
   const experimentContext = experimentContextFrom(input.context, input.properties)
@@ -845,6 +854,8 @@ export async function recordCommunicationEvent(
     })
     // External delivery must never block event ingestion.
   }
+
+  if (row.source === "communications-cart" && (row.properties.original_cart_source_valid !== true || row.properties.test_event !== false)) return row
 
   try {
     const { enqueueCommunicationEvent } = await import("./queue.js")
@@ -976,10 +987,20 @@ export async function sendTrackedEmail(
   const emailLower = normalizeEmail(input.to)
   const now = new Date()
   const purpose = input.purpose || inferredPurpose(input.stream, input.template_key)
+  let messageMetadata = input.metadata || {}
+  if (messageMetadata.cart_source_event_id) {
+    const { cartSourceFromRow, cartMeasurementProperties } = await import("../cart-measurement.js")
+    const source = await db("gp_communication_event").where({ event_id: messageMetadata.cart_source_event_id }).whereNull("deleted_at").first()
+    messageMetadata = { ...messageMetadata, ...cartMeasurementProperties(cartSourceFromRow(source)) }
+  }
   const experimentContext = experimentContextFrom(
-    input.metadata,
+    messageMetadata,
     input.template_model
   )
+  const cartTracking = input.metadata?.cart_source_event_id ? {
+    source: "communications-cart",
+    context: { cart_source_event_id: input.metadata.cart_source_event_id },
+  } : { context: experimentContext ? { experiment_context: experimentContext } : {} }
   const identityCustomer = input.medusa_customer_id
     // Historical service notices retain the account identity even after soft deletion.
     ? await db("customer").where({ id: input.medusa_customer_id }).first()
@@ -1016,7 +1037,7 @@ export async function sendTrackedEmail(
         topic: input.topic,
         reason: "missing_marketing_consent",
       },
-      context: experimentContext ? { experiment_context: experimentContext } : {},
+      ...cartTracking,
     })
     return { ok: true, skipped: true }
   }
@@ -1041,7 +1062,7 @@ export async function sendTrackedEmail(
         topic: input.topic,
         reason: "topic_preference",
       },
-      context: experimentContext ? { experiment_context: experimentContext } : {},
+      ...cartTracking,
     })
     return { ok: true, skipped: true }
   }
@@ -1062,7 +1083,7 @@ export async function sendTrackedEmail(
         topic: input.topic,
         reason: "suppression",
       },
-      context: experimentContext ? { experiment_context: experimentContext } : {},
+      ...cartTracking,
     })
     return { ok: true, skipped: true }
   }
@@ -1121,9 +1142,7 @@ export async function sendTrackedEmail(
           reason: blackout.reason || "shabbat_blackout",
           defer_until: blackout.until ? blackout.until.toISOString() : null,
         },
-        context: experimentContext
-          ? { experiment_context: experimentContext }
-          : {},
+        ...cartTracking,
       })
       return {
         ok: false,
@@ -1185,9 +1204,7 @@ export async function sendTrackedEmail(
             cap,
             sent_this_week: sentThisWeek,
           },
-          context: experimentContext
-            ? { experiment_context: experimentContext }
-            : {},
+          ...cartTracking,
         })
         return { ok: true, skipped: true }
       }
@@ -1219,7 +1236,7 @@ export async function sendTrackedEmail(
     template_model: input.template_model || {},
     experiment_context: experimentContext,
     metadata: {
-      ...(input.metadata || {}),
+      ...messageMetadata,
       purpose,
       ...(experimentContext ? { experiment_context: experimentContext } : {}),
     },
@@ -1305,7 +1322,7 @@ export async function sendTrackedEmail(
           cart_id: input.cart_id,
           campaign_id: input.campaign_id,
           flow_id: input.flow_id,
-          ...(input.metadata || {}),
+          ...messageMetadata,
         }),
       },
     })
@@ -1346,7 +1363,7 @@ export async function sendTrackedEmail(
         topic: input.topic,
         subject: input.subject,
       },
-      context: experimentContext ? { experiment_context: experimentContext } : {},
+      ...cartTracking,
     })
 
     return { ok: true, messageId: messageId || undefined }
@@ -1372,7 +1389,7 @@ export async function sendTrackedEmail(
       template_key: input.template_key,
       message_id: messageRow.id,
       properties: { stream: input.stream, error },
-      context: experimentContext ? { experiment_context: experimentContext } : {},
+      ...cartTracking,
     })
     await emitCommunicationEmailFailureAlert({
       logger,

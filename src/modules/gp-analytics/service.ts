@@ -607,6 +607,21 @@ class GpAnalyticsProviderService extends AbstractAnalyticsProviderService {
     return this.deliverClassifiedMeasurement(target, { ...data, properties })
   }
 
+  async deliverCartMeasurement(target: Exclude<PublicationTarget, "communications" | "communications_automation">, data: ProviderTrackAnalyticsEventDTO): Promise<DeliveryResult> {
+    const p = data.properties || {}
+    const kind = ({ cart_updated: "activity", gp_cart_created: "created", gp_cart_expired: "expired" } as Record<string, string>)[data.event]
+    if (!kind || !p.cart_id || !String(p.idempotency_key || "").startsWith(`native-cart:${kind}:${p.cart_id}:`) ||
+      !Number.isFinite(p.event_timestamp_ms)) throw new Error("cart_measurement_transport_contract_invalid")
+    if (target.endsWith("_rehearsal") && p.rehearsal_id !== this.options_.rehearsal?.id)
+      return { status: "held", reason: "original_rehearsal_route_unavailable" }
+    const properties = stripMirrorPii(p)
+    if (!UUID_RE.test(String(properties.session_id || ""))) {
+      properties.session_id = uuidV5(`native-source-session:${p.idempotency_key}`)
+      properties.session_context_status = "unavailable"
+    } else properties.session_context_status = "captured"
+    return this.deliverClassifiedMeasurement(target, { ...data, properties })
+  }
+
   private async deliverClassifiedMeasurement(target: Exclude<PublicationTarget, "communications" | "communications_automation">, data: ProviderTrackAnalyticsEventDTO): Promise<DeliveryResult> {
     const p = data.properties || {}
     const ineligible = publicationEligibility(target, p)
@@ -639,7 +654,7 @@ class GpAnalyticsProviderService extends AbstractAnalyticsProviderService {
 
   async track(data: ProviderTrackAnalyticsEventDTO): Promise<void> {
     // Customer facts belong to the immutable native capture/recovery path.
-    if (["customer_created", "customer_updated"].includes(data.event)) return
+    if (["customer_created", "customer_updated", "cart_updated", "checkout_completed", "gp_cart_created", "gp_cart_expired"].includes(data.event)) return
     // Fail-soft: analytics is a side-channel and must NEVER throw back into a
     // subscriber (a throw here surfaces as "Failed to track <event>" and, worse,
     // the Jitsu sink and the GP dual-run share this method — one synchronous
