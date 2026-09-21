@@ -255,4 +255,12 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     delete process.env.GP_COMMUNICATIONS_ADMIN_API_KEY_IDS
   })
 
+  it("does not let log-only staff rollout bypass required order review", async () => {
+    process.env.GP_STAFF_BOUNDARY_MODE = "log"
+    process.env.GP_ORDER_REVIEW_ENFORCEMENT = "required"
+    expect((await request("/admin/draft-orders", { key: "sk_unknown", token: null })).status).toBe(403)
+    expect(effects).not.toHaveBeenCalled()
+    delete process.env.GP_ORDER_REVIEW_ENFORCEMENT
+  })
+
 })

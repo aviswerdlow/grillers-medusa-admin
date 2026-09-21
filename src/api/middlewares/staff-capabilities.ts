@@ -8,11 +8,13 @@ import { currentStaffCustomer, requestStaffPrincipal, resolveStaffPrincipal, Sta
 import { adminRouteCapability, isServiceRoute } from "../../lib/staff-route-capabilities"
 
 export async function enforceStaffCapabilities(req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) {
+  // Checkout enforcement is independent of the staff observation switch.
+  if (orderReviewEnforcementMode() === "required" && req.method === "POST" && (/^\/admin\/draft-orders(?:\/[^/]+\/convert-to-order)?\/?$/.test(req.path) || /^\/admin\/orders\/?$/.test(req.path))) {
+    return res.status(403).json({ message: "Create orders through the reviewed customer or staff checkout. Native draft conversion has no accepted-order review." })
+  }
   try {
     const principal = await resolveStaffPrincipal(req)
-    if (orderReviewEnforcementMode() === "required" && req.method === "POST" && (/^\/admin\/draft-orders(?:\/[^/]+\/convert-to-order)?\/?$/.test(req.path) || /^\/admin\/orders\/?$/.test(req.path))) {
-      throw new StaffAccessDenied("Create orders through the reviewed customer or staff checkout. Native draft conversion has no accepted-order review.")
-    }
+
     const capability = adminRouteCapability(req.path, req.method, req.body)
     const allowed = principal.kind === "operator"
       || (principal.kind === "service" ? isServiceRoute(principal.service_role, req.path, req.method, (req as any).validatedBody || req.body) : capability && principal.capabilities.has(capability))
