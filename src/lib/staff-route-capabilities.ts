@@ -4,6 +4,7 @@ import type { StaffCapability } from "./staff-access-policy"
 export function adminRouteCapability(path: string, method: string, body: any = {}): StaffCapability | null {
   const p = path.replace(/\/+$/, "").toLowerCase()
   const read = method === "GET" || method === "HEAD"
+  if (p === "/admin/grillers/staff-access") return read ? "customers.read" : null
   if (p === "/admin/grillers/staff-carts") return method === "POST" ? "customers.write" : null
   if (/^\/admin\/grillers\/staff-access\/customers\/[^/]+$/.test(p)) return method === "POST" ? "team.manage" : null
   if (/^\/admin\/customers(?:\/[^/]+)?(?:\/addresses(?:\/[^/]+)?)?$/.test(p)) return read ? "customers.read" : method === "POST" || (method === "DELETE" && p.includes("/addresses/")) ? "customers.write" : null
@@ -43,4 +44,24 @@ export function isReadOnlyServiceRoute(path: string, method: string): boolean {
   return /^\/admin\/(products|product-variants|inventory-items|stock-locations|reservations|orders|customers)(?:\/[^/]+)?$/.test(p)
     || /^\/admin\/inventory-items\/[^/]+\/location-levels$/.test(p)
     || p === "/admin/grillers/inventory/allocations"
+}
+
+/** Separate IDs own catalog sync and the cron's three receipt markers. Neither is an operator. */
+export function isServiceRoute(role: string | undefined, path: string, method: string, body: any = {}): boolean {
+  if (role === "read_only" || !role) return isReadOnlyServiceRoute(path, method)
+  const p = path.replace(/\/+$/, "").toLowerCase()
+  if (role === "qbd_catalog") {
+    if (isReadOnlyServiceRoute(p, method) || ((method === "GET" || method === "HEAD") && p === "/admin/sales-channels")) return true
+    if (method !== "POST") return false
+    return /^\/admin\/products(?:\/[^/]+)?$/.test(p)
+      || /^\/admin\/products\/[^/]+\/variants\/[^/]+\/inventory-items$/.test(p)
+      || /^\/admin\/inventory-items(?:\/[^/]+)?(?:\/location-levels(?:\/[^/]+)?)?$/.test(p)
+  }
+  if (role !== "communications") return false
+  if (isReadOnlyServiceRoute(p, method)) return true
+  if (method !== "POST" || !/^\/admin\/(customers|orders)\/[^/]+$/.test(p)) return false
+  if (!body || Object.keys(body).length !== 1 || !body.metadata || typeof body.metadata !== "object" || Array.isArray(body.metadata)) return false
+  const keys = Object.keys(body.metadata)
+  return keys.length > 0 && keys.every(key => ["review_ask_sent_google_at", "review_ask_sent_yelp_at", "review_request_sent_at"].includes(key)
+    && typeof body.metadata[key] === "string" && /^\d{4}-\d{2}-\d{2}T/.test(body.metadata[key]) && Number.isFinite(Date.parse(body.metadata[key])))
 }

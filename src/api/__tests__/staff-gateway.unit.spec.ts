@@ -3,8 +3,10 @@ import type { Server } from "node:http"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import middlewares from "../middlewares"
 import { verifiedStaffAuditFields } from "../../lib/staff-principal"
+import { staffBoundaryMode } from "../../lib/staff-boundary-rollout"
 import { staffAuditFields } from "../admin/grillers/orders/[id]/finalization/utils"
 
+jest.mock("../../lib/ops-alert", () => ({ emitOpsAlert: jest.fn(async () => ({ ok: true })) }))
 const captureRun = jest.fn(async () => ({}))
 jest.mock("@medusajs/core-flows", () => ({ ...jest.requireActual("@medusajs/core-flows"), capturePaymentWorkflow: () => ({ run: captureRun }) }))
 const express = require("express"), jwt = require("jsonwebtoken")
@@ -19,6 +21,7 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
   const secret = "isolated-gateway-fixture-secret"
   let server: Server, baseUrl: string
   let customers: Record<string, any>
+  const warn = jest.fn()
   const effects = jest.fn(), customerRead = jest.fn(), userRead = jest.fn()
   const authRead = jest.fn(async () => ({ id: "auth_fixture", app_metadata: { customer_id: "cus_staff" } }))
   const now = () => Math.floor(Date.now() / 1000)
@@ -29,6 +32,7 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     app.use(express.json())
     app.use((req: any, _res: any, next: any) => {
       req.scope = { resolve(key: string) {
+        if (key === "logger") return { warn }
         if (key === ContainerRegistrationKeys.CONFIG_MODULE) return { projectConfig: { http: { jwtSecret: secret, jwtExpiresIn: "1h" } } }
         if (key === Modules.API_KEY) return { authenticate: async (token: string) => token === "sk_gateway" ? { id: "apk_gateway" } : token === "sk_reader" ? { id: "apk_reader" } : token === "sk_unknown" ? { id: "apk_unknown" } : null }
         if (key === Modules.CUSTOMER) return { retrieveCustomer: customerRead }
@@ -56,6 +60,7 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     baseUrl = `http://127.0.0.1:${(server.address() as any).port}`
   })
   beforeEach(() => {
+    process.env.GP_STAFF_BOUNDARY_MODE = "enforce"
     jest.clearAllMocks()
     process.env.GP_STAFF_GATEWAY_API_KEY_ID = "apk_gateway"
     process.env.GP_ADMIN_READ_ONLY_API_KEY_IDS = "apk_reader"
@@ -195,4 +200,47 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     expect(rows[0]).toEqual(old); expect(rows[1]).toMatchObject({ staff_actor_customer_id: "cus_staff", staffEmail: "staff@example.test" })
     expect((await request("/admin/customers/cus_target", { body: { metadata: { staff_audit_log: JSON.stringify([{ ...old, staff_actor_customer_id: "forged" }]) } } })).status).toBe(403)
   })
+  it("defaults to observation and preserves native dashboard and unclassified service access", async () => {
+    delete process.env.GP_STAFF_BOUNDARY_MODE
+    delete process.env.GP_PRIVILEGED_ADMIN_USER_IDS
+    expect(staffBoundaryMode()).toBe("log")
+    expect((await request("/admin/users", { token: null, authorization: `Bearer ${token({ actor_type: "user", actor_id: "usr_existing" })}`, method: "GET" })).status).toBe(200)
+    expect((await request("/admin/products", { key: "sk_unknown", token: null, body: { title: "Fixture" } })).status).toBe(200)
+    expect((await request("/admin/customers/cus_target", { key: "sk_unknown", token: null, body: { phone: "4045550100" } })).status).toBe(200)
+    expect(warn).toHaveBeenCalledTimes(3)
+    expect(warn.mock.calls.flat().join(" ")).not.toMatch(/Bearer|sk_unknown|4045550100|Fixture/)
+    const noAuth = await fetch(baseUrl + "/admin/users")
+    expect(noAuth.status).toBe(401)
+  })
+  it("keeps invalid explicit mode strict and publishes authority only when enforcing", async () => {
+    process.env.GP_STAFF_BOUNDARY_MODE = "typo"
+    expect(staffBoundaryMode()).toBe("enforce")
+    expect((await request("/admin/products", { key: "sk_unknown", token: null, method: "GET" })).status).toBe(403)
+    process.env.GP_STAFF_BOUNDARY_MODE = "log"
+    const legacy = await request("/store/customers/me", { method: "GET", token: null, authorization: `Bearer ${token()}` })
+    expect(legacy.body.customer.staff_access).toBeUndefined()
+  })
+  it("classifies bridge catalog writes without granting payments, grants or destructive routes", async () => {
+    process.env.GP_QBD_CATALOG_API_KEY_IDS = "apk_unknown"
+    for (const path of ["/admin/products/prod_1", "/admin/inventory-items", "/admin/inventory-items/i/location-levels/l", "/admin/products/p/variants/v/inventory-items"]) {
+      expect((await request(path, { key: "sk_unknown", token: null, body: { metadata: { qbd_list_id: "fixture" } } })).status).toBe(200)
+    }
+    for (const path of ["/admin/payments/p/capture", "/admin/draft-orders/d/pay", "/admin/customers/cus_target", "/admin/grillers/staff-access/customers/cus_target"]) {
+      expect((await request(path, { key: "sk_unknown", token: null })).status).toBe(403)
+    }
+    expect((await request("/admin/products/prod_1", { key: "sk_unknown", token: null, method: "DELETE" })).status).toBe(403)
+    delete process.env.GP_QBD_CATALOG_API_KEY_IDS
+  })
+  it("permits only send-marker metadata for the communications service and denies conflicting classes", async () => {
+    process.env.GP_COMMUNICATIONS_ADMIN_API_KEY_IDS = "apk_unknown"
+    for (const path of ["/admin/orders/o", "/admin/customers/cus_target"]) {
+      expect((await request(path, { key: "sk_unknown", token: null, body: { metadata: { review_request_sent_at: "2026-09-21T00:00:00.000Z" } } })).status).toBe(200)
+      expect((await request(path, { key: "sk_unknown", token: null, body: { metadata: { final_charge_enabled: true } } })).status).toBe(403)
+      expect((await request(path, { key: "sk_unknown", token: null, body: { email: "forged@example.test", metadata: { review_request_sent_at: "2026-09-21T00:00:00.000Z" } } })).status).toBe(403)
+    }
+    process.env.GP_ADMIN_READ_ONLY_API_KEY_IDS = "apk_reader,apk_unknown"
+    expect((await request("/admin/orders", { key: "sk_unknown", token: null, method: "GET" })).status).toBe(403)
+    delete process.env.GP_COMMUNICATIONS_ADMIN_API_KEY_IDS
+  })
+
 })

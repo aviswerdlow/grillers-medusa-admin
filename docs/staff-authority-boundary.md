@@ -4,7 +4,7 @@ Candidate implementation in backend PR 32, paired with storefront PR 50; stacked
 
 ## Verified identity and capabilities
 
-Medusa authenticates every `/admin/*` transport first. The configured gateway API-key ID also requires the original customer's signed, unexpired Medusa JWT in `x-gp-staff-authorization`. The backend checks signature, actor type, identity, issuance/expiry and fresh customer authority for each request. Body names/emails never establish identity. Lookup failures, unknown credentials and routes outside the capability map are denied, including for storefront owners.
+Medusa authenticates every `/admin/*` transport first. The configured gateway API-key ID also requires the original customer's signed, unexpired Medusa JWT in `x-gp-staff-authorization`. The backend checks signature, actor type, identity, issuance/expiry and fresh customer authority for each request. Body names/emails never establish identity. In enforce mode, lookup failures, unknown credentials and routes outside the capability map are denied, including for storefront owners. In default log mode, Medusa transport authentication still applies and the proposed capability denial is logged/alerted without blocking the existing handler. No unclassified credential becomes a verified person.
 
 The three storefront admin consumers share `staff/admin.ts`: staff actions, phone-order/customer entry and inventory checks. It forwards the original cookie token, prevents auth-header substitution, restricts paths to the backend admin origin and refuses redirects. Store `/customers/me` returns response-only `staff_access`, computed from a fresh authority read. The storefront retains its capability checks and removes the admin-profile fallback for stale customer sessions.
 
@@ -26,7 +26,7 @@ Invoice terms use the dedicated audited endpoint, the existing approver email al
 
 ## Grants, revocation and recovery
 
-Bootstrap privileges use `GP_STAFF_BOOTSTRAP_CUSTOMER_IDS`, never hard-coded emails. Revocation wins. A role change sets `staff_bootstrap_override=true`, so demotion/regrant cannot silently restore the initial owner role.
+Enforced bootstrap privileges use `GP_STAFF_BOOTSTRAP_CUSTOMER_IDS`. During log-only staging, the existing Avi/Peter bootstrap allowlist remains available to authenticated customer records; storefront bootstrap survives only until response-owned `staff_access` is served. Log mode does not publish that field. Server authority always wins once present, and the legacy fallback honors revocation and explicit bootstrap override. Revocation wins. A role change sets `staff_bootstrap_override=true`, so demotion/regrant cannot silently restore the initial owner role.
 
 POST `/admin/grillers/staff-access/customers/:id` requires Team access or a separately configured privileged native operator, current `expected_version`, a reason, typed confirmation and valid role. Self-demotion is refused. Recovery configuration must exist before grants change. A transaction locks actor and target in stable order, rechecks the owner's current grant/session, compares the version and atomically writes canonical permissions, revocation, the monotonically nondecreasing `staff_access_valid_after` cutoff, an incremented version, and a named before/after audit. The dedicated `staff_access_audit_log` is not trimmed by ordinary profile notes; recent staff history also gets the event.
 
@@ -62,16 +62,41 @@ Source: `src/lib/staff-cart-authority.ts`, `src/api/middlewares/staff-cart-autho
 | `GP_STAFF_BOOTSTRAP_CUSTOMER_IDS` | Approved existing customer IDs for initial owners after identity/grant review |
 | `GP_INVOICE_APPROVER_CUSTOMER_IDS` | Approved invoice approver customer IDs, alongside the existing email allowlist |
 
-The gateway key cannot fall back to read-only service access without a staff JWT. Back-in-stock/review-acquisition jobs now use separate storefront `MEDUSA_READ_ONLY_API_TOKEN`; its backend ID must be on the read-only list. There is no fallback to the gateway credential. Coordinate with #316/communications owners. This patch neither configures nor runs scheduled sends.
+In enforce mode the gateway key cannot fall back to any service class without its staff JWT. The storefront temporarily accepts both `MEDUSA_READ_ONLY_API_TOKEN` and the deployed `MEDUSA_ADMIN_API_TOKEN` for background jobs. Review acquisition also writes send markers: its preferred `MEDUSA_COMMUNICATIONS_API_TOKEN` must map to the communications class, not read-only. The legacy alias is compatibility only while log mode remains active; separate the credential before enforcement. This patch neither configures nor runs scheduled sends.
 
 Before activation:
 
 1. Approve the matrix and immutable identities, review existing grant provenance privately, and verify the independent recovery login. Do not derive IDs from email or revoke/provision real accounts automatically.
 2. Integrate #314 and #313 financial protections and #322's parallel middleware changes without replacing other guards. Classify service consumers; keep the deliberately absent legacy writer credential absent.
-3. Review paired revisions, guide and exact-head CI. Configure backend identities and the separate reader before enabling the paired frontend. Missing configuration deliberately denies admin access; do not deploy this boundary alone.
+3. Review paired revisions, guide and exact-head CI. Configure backend identities and the separate reader before enabling the paired frontend. Leave `GP_STAFF_BOUNDARY_MODE=log` (the default) while credential and recovery inventory is incomplete. Switch to enforce only after every consumer is classified and recovery is rehearsed. Invalid nonempty mode settings enforce rather than silently disable the boundary.
 4. Rehearse isolated roles against the deployed endpoints, proving denial before provider/data effects, named audits, bootstrap revocation, refresh, regrant and separate recovery. Include phone orders, customer-context shopping, checkout-link expiry/revocation, changed override quantities/dates, the actual buyer on payment sessions and native completion retries. Preserve distinct Medusa/Stripe/sync/QBD receipts. Existing unsigned staff carts must be re-prepared; do not bypass the receipt checks to revive them.
 5. Keep a written rollback/recovery path. Reverting code can restore unsafe metadata/email authority. Do not erase newer grant cutoffs to make rollback appear successful; keep affected tools unavailable until the safe boundary returns.
 
 ## Verification limits
 
 HTTP fixtures use installed Medusa authentication, route sorting, native capture/refresh/session handlers, registered guards and actual audit helpers. Customer/module/provider boundaries are synthetic. PostgreSQL tests use an isolated temporary schema for real concurrency, rollback and recovery writes. Frontend fixtures check protected headers, no-cookie denial, redirect/path restrictions, server authority and existing actions. Exact-head CI supplies full suites, TypeScript and the frontend build. These are candidate-code receipts, not deployed acceptance or real provider transactions.
+
+## September 21 independent rollout correction (#372)
+
+`GP_STAFF_BOUNDARY_MODE=log|enforce` defaults **log**; invalid configured values enforce. A backend-first log deployment retains existing authenticated Medusa dashboard/API-key access, reports would-be capability denials, does not advertise `staff_access`, and does not issue new staff-cart receipts. Existing unsigned staff carts remain available. A signed cart never downgrades on rollback, including revoked actors and invalid proof. Store customer privilege-field protections and persisted revocation cutoffs remain enforced; logging is not a permission to grant oneself access.
+
+Frontend-first deployment preserves the original owner fallback only when the backend omits `staff_access`; an explicit server customer/denial/stale state wins. Staff cart POST404 can use current native creation only after fresh Office authority without activated server state and a capability GET returning log or 404. Authorization, unknown, conflict, 503 and network failures do not fall back. Ordinary old staff cart creation does not manufacture a server receipt. Team-access changes still require the audited backend and configured independent recovery identity.
+
+### Admin API-key consumer classification
+
+| Consumer / observed source | Backend ID class for enforcement | Allowed operation / activation constraint |
+|---|---|---|
+| Storefront staff admin helper, order entry and inventory checks (`staff/admin.ts`) | `GP_STAFF_GATEWAY_API_KEY_ID` + signed customer JWT | Explicit role capability map; no service fallback |
+| Back-in-stock discovery; strategy snapshot/customer-phone audit; backend inventory-baseline review; bridge `MEDUSA_ADMIN_READ_TOKEN` live-order read | `GP_ADMIN_READ_ONLY_API_KEY_IDS` | Enumerated GET/HEAD catalog, customers, orders, inventory and allocation reads |
+| Review acquisition cron (`api/cron/review-acquisition`) | `GP_COMMUNICATIONS_ADMIN_API_KEY_IDS`; frontend prefers `MEDUSA_COMMUNICATIONS_API_TOKEN` | Read discovery plus POST order/customer metadata containing only the three send timestamps. Frontend no longer replays entire profile/order metadata snapshots. No other customer, money, grant or release fields |
+| QBD bridge `MedusaApi` product/inventory writer using `MEDUSA_TOKEN` | `GP_QBD_CATALOG_API_KEY_IDS` | Enumerated product POST create/update, inventory-item POST, product-variant inventory attachment and location-level POST. Read discovery as above. No delete, payment, customer or draft-order writes |
+| Dormant bridge customer/draft-order/pay/delete, sales-channel product membership, order-edit lifecycle and generic order update methods | Unclassified, denied under enforce | Keep writer absent/paths disabled pending their separate reviewed cutover; do not label the whole writer read-only or grant operator access |
+| QBD accounting metadata handoff `/api/qb-sync/...` | Existing dedicated signed sync token; outside admin API-key classification | Preserve accounting allowlist/idempotency. This staff rollout does not authorize production QBD connection or dormant writers |
+| Native Medusa dashboard/recovery user | `GP_PRIVILEGED_ADMIN_USER_IDS` in enforce | Current native authenticated user; separately verified recovery. Log mode retains existing dashboard login |
+| Unknown plugin, manual script or service key | Observe in log; denied in enforce | Reconcile live key IDs, owner, exact method/path and schedule before activation |
+
+A key cannot belong to multiple service classes; gateway precedence is absolute. No service receives native user/operator privileges. This inventory covers the canonical source repositories; live key-ID/secret custody, historical scripts outside those sources and a real recovery login are still activation prerequisites. No credential was printed, provisioned, rotated or changed and no scheduled message ran.
+
+Log mode observations are sent through the existing operations-alert path with method, boundary, reason and authenticated transport ID/type only. Bodies, query strings, tokens, email addresses and raw exception text are excluded. Alert failure cannot block an authenticated request.
+
+No schema migration is added. Inherited accounting migrations still require a protected database backup, recovery access, restore procedure and before/after journal. Exact-head CI is source evidence; actual standalone previews and recovery-login/provider receipts remain #372 gates.

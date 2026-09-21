@@ -1,3 +1,4 @@
+import { staffBoundaryMode, reportStaffBoundaryDenial } from "../../lib/staff-boundary-rollout"
 import type { MedusaRequest, MedusaResponse, MedusaNextFunction } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { isDeepStrictEqual } from "node:util"
@@ -5,7 +6,7 @@ import { currentStaffCustomer, signedCustomerContext, StaffAccessDenied, STAFF_A
 import { staffCapabilities, staffSessionIsCurrent } from "../../lib/staff-access-policy"
 import { checkInventoryAvailability } from "../../lib/inventory-allocation"
 import { cartHasStaffMarkers, normalizedCartEmail, serverOwnedCartKey, signStaffLineOverride, staffCartActorFields,
-  staffCartMetadataKey, staffCartRequestedDate, staffCartSigningSecret, STAFF_LINE_OVERRIDE,
+  STAFF_CART_AUTHORITY, staffCartMetadataKey, staffCartRequestedDate, staffCartSigningSecret, STAFF_LINE_OVERRIDE,
   verifiedStaffCartAuthority, verifiedStaffLineOverride, type StaffCartAuthority } from "../../lib/staff-cart-authority"
 
 const record = (value: any): Record<string, any> => value && typeof value === "object" && !Array.isArray(value) ? value : {}
@@ -102,6 +103,14 @@ export async function enforceStaffCartAuthority(req: MedusaRequest, res: MedusaR
     const body = record(req.body)
     const cart = await requestCart(req)
     const marked = cart && cartHasStaffMarkers(cart)
+    // Signed carts never downgrade, even during rollback. Log mode leaves the
+    // existing unsigned staff workflow available until both deployments agree.
+    if (staffBoundaryMode() === "log" && record(cart?.metadata)[STAFF_CART_AUTHORITY] == null) {
+      const incoming = [body.metadata, ...(Array.isArray(body.items) ? body.items.map((line: any) => line?.metadata) : [])]
+      if (incoming.some(m => Object.keys(record(m)).some(key => key.startsWith("gp_staff_")))) throw new StaffAccessDenied("New staff authority is server-managed.")
+      if (marked || req.headers[STAFF_AUTHORIZATION_HEADER]) reportStaffBoundaryDenial(req, "cart", "unsigned_legacy_cart")
+      return next()
+    }
     let proof: StaffCartAuthority | null = null, secret: string | undefined, staff = false
     if (marked) {
       secret = staffCartSigningSecret(req.scope)

@@ -1,16 +1,17 @@
 import type { MedusaRequest, MedusaResponse, MedusaNextFunction } from "@medusajs/framework/http"
+import { staffBoundaryMode, reportStaffBoundaryDenial } from "../../lib/staff-boundary-rollout"
 import { isDeepStrictEqual } from "node:util"
 import { Modules } from "@medusajs/framework/utils"
 import { isBootstrapStaffIdentity, isStaffGrantMetadataKey, staffAccessStatus, staffRole, staffSessionIsCurrent } from "../../lib/staff-access-policy"
 import { currentStaffCustomer, requestStaffPrincipal, resolveStaffPrincipal, StaffAccessDenied, verifiedStaffAuditFields } from "../../lib/staff-principal"
-import { adminRouteCapability, isReadOnlyServiceRoute } from "../../lib/staff-route-capabilities"
+import { adminRouteCapability, isServiceRoute } from "../../lib/staff-route-capabilities"
 
 export async function enforceStaffCapabilities(req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) {
   try {
     const principal = await resolveStaffPrincipal(req)
     const capability = adminRouteCapability(req.path, req.method, req.body)
     const allowed = principal.kind === "operator"
-      || (principal.kind === "service" ? isReadOnlyServiceRoute(req.path, req.method) : capability && principal.capabilities.has(capability))
+      || (principal.kind === "service" ? isServiceRoute(principal.service_role, req.path, req.method, (req as any).validatedBody || req.body) : capability && principal.capabilities.has(capability))
     if (!allowed) throw new StaffAccessDenied("Your current staff permissions do not allow this action.")
     ;(req as any).gp_staff_principal = principal
     // Native order/payment workflows copy auth_context.actor_id into canceled_by,
@@ -22,6 +23,10 @@ export async function enforceStaffCapabilities(req: MedusaRequest, res: MedusaRe
     }
     return next()
   } catch (error) {
+    if (staffBoundaryMode() === "log") {
+      reportStaffBoundaryDenial(req, "admin", error instanceof StaffAccessDenied ? "unapproved_capability" : "lookup_unavailable")
+      return next()
+    }
     return res.status(error instanceof StaffAccessDenied ? 403 : 503).json({
       message: error instanceof StaffAccessDenied ? error.message : "Staff access could not be verified. No action was started.",
     })
@@ -62,7 +67,15 @@ function verifiedAppend(req: MedusaRequest, current: unknown, proposed: unknown,
 export async function protectAdminCustomerAuthority(req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) {
   try {
     const principal = requestStaffPrincipal(req)
+    if (staffBoundaryMode() === "log") {
+      const metadata = ((req as any).validatedBody || req.body)?.metadata
+      if (metadata === null || (metadata && typeof metadata === "object" && Object.keys(metadata).some(isStaffGrantMetadataKey))) {
+        reportStaffBoundaryDenial(req, "customer_profile", "authority_write_requires_review")
+      }
+      return next()
+    }
     if (!principal) throw new StaffAccessDenied("Verified staff access is required.")
+    if (principal.kind === "service" && principal.service_role === "communications") return next()
     const current = req.params.id ? await currentStaffCustomer(req, req.params.id) : null
     if (current && (staffRole(current) !== "customer" || isBootstrapStaffIdentity(current)) && principal.kind !== "operator" && !principal.capabilities.has("team.manage")) {
       throw new StaffAccessDenied("Only a team administrator can edit a staff account.")
@@ -123,6 +136,7 @@ export async function enforceStaffSessionEpoch(req: MedusaRequest, res: MedusaRe
 }
 
 export async function publishCurrentStaffAccess(req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) {
+  if (staffBoundaryMode() === "log") return next()
   try {
     const auth = (req as any).auth_context
     const customer = await currentStaffCustomer(req, auth.actor_id)
@@ -136,6 +150,7 @@ export async function publishCurrentStaffAccess(req: MedusaRequest, res: MedusaR
 }
 
 export function publishAdminStaffAccess(_req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) {
+  if (staffBoundaryMode() === "log") return next()
   const json = res.json.bind(res)
   const decorate = (customer: any) => ({ ...customer, staff_access: staffAccessStatus(customer) })
   res.json = ((body: any) => json(body?.customer ? { ...body, customer: decorate(body.customer) }

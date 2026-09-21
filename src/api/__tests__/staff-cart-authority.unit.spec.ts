@@ -74,6 +74,7 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     baseUrl = `http://127.0.0.1:${(server.address() as any).port}`
   })
   beforeEach(() => {
+    process.env.GP_STAFF_BOUNDARY_MODE = "enforce"
     jest.clearAllMocks(); process.env.GP_STAFF_GATEWAY_API_KEY_ID = "apk_gateway"; count = 0; carts = {}; orders = {}; inserts = []
     customers = { cus_staff: { id: "cus_staff", email: "office@example.test", first_name: "Office", metadata: { gp_staff_role: "office", staff_access_version: 2 } },
       cus_target: { id: "cus_target", email: "customer@example.test", metadata: {} }, cus_other: { id: "cus_other", email: "other@example.test", metadata: { gp_staff_role: "office" } } }
@@ -279,4 +280,20 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     expect((await request("/store/carts/cart_1/complete", {})).status).toBe(503)
     expect(completeRun).not.toHaveBeenCalled()
   })
+  it("keeps unsigned legacy carts available in log mode without issuing new receipts", async () => {
+    process.env.GP_STAFF_BOUNDARY_MODE = "log"
+    expect((await request("/admin/grillers/staff-carts", {}, true)).status).toBe(404)
+    expect(createRun).not.toHaveBeenCalled()
+    carts.cart_1 = { id: "cart_1", customer_id: "cus_target", email: "customer@example.test", items: [], metadata: { staff_phone_order: true } }
+    expect((await request("/store/carts/cart_1", undefined, true, { method: "GET" })).status).toBe(200)
+    expect((await request("/store/carts/cart_1", { metadata: { [STAFF_CART_AUTHORITY]: "forged" } }, true)).status).toBe(403)
+  })
+  it("never downgrades an already signed cart after rollback to log", async () => {
+    await prepared(); await add()
+    process.env.GP_STAFF_BOUNDARY_MODE = "log"
+    customers.cus_staff.metadata.staff_access_revoked = true
+    expect((await request("/store/carts/cart_1/complete", {}, true)).status).toBe(403)
+    expect(completeRun).not.toHaveBeenCalled()
+  })
+
 })
