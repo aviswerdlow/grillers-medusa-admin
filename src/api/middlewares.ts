@@ -1,3 +1,4 @@
+import { captureCustomerMeasurementRequest } from "./middlewares/customer-measurement"
 import {
   authenticate,
   defineMiddlewares,
@@ -728,12 +729,12 @@ export default defineMiddlewares({
     {
       matcher: "/store/customers",
       method: ["POST"],
-      middlewares: [protectCustomerStaffAuthority],
+      middlewares: [protectCustomerStaffAuthority, captureCustomerMeasurementRequest],
     },
     {
       matcher: "/store/customers/me",
       method: ["POST"],
-      middlewares: [authenticate("customer", ["session", "bearer"]), protectCustomerStaffAuthority],
+      middlewares: [authenticate("customer", ["session", "bearer"]), protectCustomerStaffAuthority, captureCustomerMeasurementRequest],
     },
     {
       matcher: "/store/customers/me/receipt-email",

@@ -44,8 +44,7 @@ describe("communications commerce event subscriber alerts", () => {
   })
 
   it("alerts when commerce event recording fails before a communications row exists", async () => {
-    mockUpsertCustomerProfile.mockResolvedValueOnce({ id: "gpcprof_123" })
-    mockRecordCommunicationEvent.mockRejectedValueOnce(
+    mockUpsertCustomerProfile.mockRejectedValueOnce(
       new Error("insert failed for shopper@example.com")
     )
     const { container, logger, query } = makeContainer()

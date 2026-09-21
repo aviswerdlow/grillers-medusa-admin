@@ -1,3 +1,5 @@
+import { saveCustomerMeasurement, deliverCustomerMeasurements } from "../../src/lib/customer-measurement";
+import { captureCustomerMeasurement } from "../../src/lib/analytics/customer-measurement-context";
 import { randomUUID } from "node:crypto";
 import { Migration20260921001500 } from "../../src/modules/gp-communications/migrations/Migration20260921001500";
 import {
@@ -1395,3 +1397,66 @@ it.each(["pending", "succeeded"])(
     expect(await db("gp_refund_provider_metric")).toHaveLength(1);
   }
 );
+
+
+function nativeCustomerFixture(transactionId = "native-tx", test = false) {
+  return captureCustomerMeasurement("updated", { id: "cus_native_measurement", updated_at: now }, {
+    analytics_consent: true, analytics_consent_at: now.getTime() - 1000,
+    marketing_consent: false, test_order: test,
+    analytics_environment: test ? "rehearsal" : "production",
+    ...(test ? { rehearsal_id: "launch-fixture" } : {}),
+    experiment_context_status: "complete", experiment_assignments: [],
+  }, transactionId)!;
+}
+
+it("retains the native customer source across duplicates and rejects changed retry context", async () => {
+  const snapshot = nativeCustomerFixture();
+  await saveCustomerMeasurement(db, snapshot);
+  await saveCustomerMeasurement(db, snapshot);
+  const changed = { ...snapshot, context: { ...snapshot.context, marketing_consent: true } };
+  await expect(saveCustomerMeasurement(db, changed)).rejects.toThrow("source_conflict");
+  const rows = await db("gp_communication_event").where({ event_id: snapshot.event_id });
+  expect(rows).toHaveLength(1);
+  expect(rows[0].context.native_customer_snapshot).toEqual(JSON.parse(JSON.stringify(snapshot)));
+  expect((await db("gp_event_delivery")).length).toBe(0);
+});
+
+it("does not collapse distinct native customer changes with the same timestamp", async () => {
+  await saveCustomerMeasurement(db, nativeCustomerFixture("tx-a"));
+  await saveCustomerMeasurement(db, nativeCustomerFixture("tx-b"));
+  expect((await db("gp_communication_event")).length).toBe(2);
+});
+
+it("recovers failed native customer targets without replaying accepted destinations", async () => {
+  await saveCustomerMeasurement(db, nativeCustomerFixture());
+  let failed = true;
+  const deliver = jest.fn(async (target: string) => {
+    if (target === "native_customer_gp" && failed) throw new Error("network");
+    return { status: "accepted" as const };
+  });
+  const first = await deliverCustomerMeasurements(db, deliver, now);
+  expect(first).toMatchObject({ accepted: 2, retry: 1, production_pending: 1 });
+  failed = false;
+  const next = await deliverCustomerMeasurements(db, deliver, later(61));
+  expect(next.accepted).toBe(1);
+  expect(deliver.mock.calls.map(c => c[0])).toEqual(["native_customer_jitsu", "native_customer_gp", "native_customer_automation", "native_customer_gp"]);
+  expect((await db("gp_event_delivery").where({ status: "delivered" })).length).toBe(3);
+  expect((await deliverCustomerMeasurements(db, deliver, later(120))).accepted).toBe(0);
+});
+
+it("serializes concurrent customer delivery workers and preserves the original snapshot", async () => {
+  const snapshot = nativeCustomerFixture();
+  await saveCustomerMeasurement(db, snapshot);
+  let release!: () => void, signal!: () => void;
+  const started = new Promise<void>(resolve => { signal = resolve });
+  const pending = new Promise<void>(resolve => { release = resolve });
+  const deliver = jest.fn(async () => { signal(); await pending; return { status: "accepted" as const } });
+  const one = deliverCustomerMeasurements(db, deliver, now);
+  await started;
+  const two = await deliverCustomerMeasurements(db, deliver, now);
+  expect(two.busy).toBe(1);
+  release();
+  expect((await one).accepted).toBe(3);
+  expect(deliver).toHaveBeenCalledTimes(3);
+  expect((await db("gp_communication_event").first()).context.native_customer_snapshot).toEqual(JSON.parse(JSON.stringify(snapshot)));
+});

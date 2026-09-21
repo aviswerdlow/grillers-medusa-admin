@@ -589,6 +589,26 @@ class GpAnalyticsProviderService extends AbstractAnalyticsProviderService {
   async deliverOrderPublication(target: Exclude<PublicationTarget, "communications" | "communications_automation">, data: ProviderTrackAnalyticsEventDTO): Promise<DeliveryResult> {
     const p = data.properties || {}
     if (!p.idempotency_key || !Number.isFinite(p.event_timestamp_ms) || !Object.values(PUBLICATION_EVENTS).includes(data.event as any)) throw new Error("publication_transport_contract_invalid")
+    return this.deliverClassifiedMeasurement(target, data)
+  }
+
+  async deliverCustomerMeasurement(target: Exclude<PublicationTarget, "communications" | "communications_automation">, data: ProviderTrackAnalyticsEventDTO): Promise<DeliveryResult> {
+    const p = data.properties || {}
+    if (!["customer_created", "customer_updated"].includes(data.event) || !data.actor_id ||
+      !String(p.idempotency_key || "").startsWith(`native-customer:${data.event.slice(9)}:${data.actor_id}:`) ||
+      !Number.isFinite(p.event_timestamp_ms)) throw new Error("customer_measurement_transport_contract_invalid")
+    if (target.endsWith("_rehearsal") && p.rehearsal_id !== this.options_.rehearsal?.id)
+      return { status: "held", reason: "original_rehearsal_route_unavailable" }
+    const properties = stripMirrorPii(p)
+    if (!UUID_RE.test(String(properties.session_id || ""))) {
+      properties.session_id = uuidV5(`native-source-session:${p.idempotency_key}`)
+      properties.session_context_status = "unavailable"
+    } else properties.session_context_status = "captured"
+    return this.deliverClassifiedMeasurement(target, { ...data, properties })
+  }
+
+  private async deliverClassifiedMeasurement(target: Exclude<PublicationTarget, "communications" | "communications_automation">, data: ProviderTrackAnalyticsEventDTO): Promise<DeliveryResult> {
+    const p = data.properties || {}
     const ineligible = publicationEligibility(target, p)
     if (ineligible) return ineligible
     const rehearsal = target === "jitsu_rehearsal" || target === "gp_analytics_rehearsal"
@@ -618,6 +638,8 @@ class GpAnalyticsProviderService extends AbstractAnalyticsProviderService {
   }
 
   async track(data: ProviderTrackAnalyticsEventDTO): Promise<void> {
+    // Customer facts belong to the immutable native capture/recovery path.
+    if (["customer_created", "customer_updated"].includes(data.event)) return
     // Fail-soft: analytics is a side-channel and must NEVER throw back into a
     // subscriber (a throw here surfaces as "Failed to track <event>" and, worse,
     // the Jitsu sink and the GP dual-run share this method — one synchronous
@@ -670,12 +692,10 @@ class GpAnalyticsProviderService extends AbstractAnalyticsProviderService {
     }
   }
 
-  async identify(data: ProviderIdentifyAnalyticsEventDTO): Promise<void> {
-    const actorId = "actor_id" in data ? data.actor_id : undefined
-    const payload = this.buildPayload("identify", actorId, data.properties)
-
-    this.logger_.debug(`Analytics: Identifying ${actorId}`)
-    this.sendToJitsu(payload)
+  async identify(_data: ProviderIdentifyAnalyticsEventDTO): Promise<void> {
+    // The old customer subscribers sent current PII without source consent.
+    // Native customer events now carry the opaque actor ID; browser authenticated
+    // identity continuity is a separate producer contract, not a PII fallback.
   }
 }
 

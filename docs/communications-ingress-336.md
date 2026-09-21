@@ -47,9 +47,9 @@ work; their own producer/send classification still needs verification.
 | Browser Jitsu/GP sender                                          | PR63 `04ae3ab`: current consent/test classification, isolated targets and no duplicate confirmation-page purchase.                            |
 | Public communications track/batch/identify                       | This receiver contract; prove compatible production ingestion and no side effects on denied/test/unknown/forged input.                        |
 | Generic backend cart updated/completed                           | Still lacks accepted request-time consent/context; capture and preserve source evidence, then classify delivery.                              |
-| Generic backend customer created/updated                         | Still lacks accepted request-time measurement context; preserve required operational profile sync separately.                                 |
+| Generic backend customer created/updated                         | Replaced by [native customer capture](native-customer-measurement-336.md), grouped workflow source and saved independent delivery receipts; operational profile sync remains separate. Requires paired sender, activation and actual runtime proof.                                 |
 | Shipping forecast and inventory subscribers                      | Bind to original immutable order classification/context and retain event-before-binding recovery; do not infer from current mutable metadata. |
-| Communications native customer and derived cart/flow events      | Propagate source classification through maintenance/recovery; no test-triggered production automation.                                        |
+| Communications native customer and derived cart/flow events      | Native customer measurement now has its own saved source; operational profile sync does not emit analytics. Derived cart/flow and calendar/audience classification through maintenance/recovery still needs completion.                                        |
 | Storefront-server back-in-stock, standalone review-click         | Classify separately with purpose/recipient authority; the browser guard does not cover these paths.                                           |
 
 Keep #332's one controlled rehearsal stopped until this entire producer inventory,
