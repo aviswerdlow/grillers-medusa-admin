@@ -85,6 +85,7 @@ export function packagingOverridesFromColdChainSetting(
       l345: s?.BoxCost345 ?? null,
     },
     minimumDryIceAmountLb: s?.MinimumDryIceAmount ?? null,
+    dryIceBlockWeightLb: s?.DryIceBlockWeightLb ?? null,
     transitDayThresholds: thresholds,
     packagingBoxes,
   };

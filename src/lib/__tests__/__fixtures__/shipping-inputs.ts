@@ -3,8 +3,15 @@ import { SHIPPING_WEIGHT_KEY } from "../../shipping-weights";
 import { resolvePackagingConfig } from "../../packaging-cost";
 
 // Entirely synthetic. These are not Peter's approved masses or packing rules.
+export function packingExposureRules(
+  bands: { ThroughHours: number; DryIceBlocksPerBox: number }[],
+  services = ["GROUND", "UPS_3_DAY_SELECT", "UPS_2ND_DAY_AIR", "OVERNIGHT"],
+  boxes = ["m330", "l345"],
+) {
+  return services.flatMap(Service => boxes.flatMap(BoxTier => bands.map(band => ({ Service, BoxTier, ...band }))));
+}
 export function seasonalPolicy(overrides: Record<string, unknown> = {}) {
-  return {
+  const policy = {
     Name: "Synthetic normal",
     Revision: "fixture-season-v1",
     Active: true,
@@ -20,17 +27,19 @@ export function seasonalPolicy(overrides: Record<string, unknown> = {}) {
     Allow3Day: true,
     Allow2Day: true,
     AllowOvernight: true,
-    AllowMicro: true,
+    AllowMicro: false,
     Allow330: true,
     Allow345: true,
-    ExposureRules: [
-      { ThroughHours: 24, DryIceMultiplier: 1 },
-      { ThroughHours: 48, DryIceMultiplier: 2 },
-      { ThroughHours: 72, DryIceMultiplier: 3 },
-      { ThroughHours: 168, DryIceMultiplier: 3 },
-    ],
     ...overrides,
   };
+  return { ...policy, ExposureRules: overrides.ExposureRules ?? packingExposureRules([
+    { ThroughHours: 24, DryIceBlocksPerBox: 1 },
+    { ThroughHours: 48, DryIceBlocksPerBox: 2 },
+    { ThroughHours: 72, DryIceBlocksPerBox: 3 },
+    { ThroughHours: 168, DryIceBlocksPerBox: 3 },
+  ], ["GROUND", "UPS_3_DAY_SELECT", "UPS_2ND_DAY_AIR", "OVERNIGHT"].filter((_, i) =>
+    [policy.AllowGround, policy.Allow3Day, policy.Allow2Day, policy.AllowOvernight][i]),
+  ["m330", "l345"].filter((_, i) => [policy.Allow330, policy.Allow345][i])) };
 }
 export function packingContext() {
   return {
@@ -99,6 +108,7 @@ export const packingConfig = () =>
       policyVersion: "fixture-packing-v1",
       dryIceUsdPerLb: 1,
       minimumDryIceAmountLb: 2,
+      dryIceBlockWeightLb: 2,
       transitDayThresholds: [
         { transitDays: 1, dryIceMultiplier: 1 },
         { transitDays: 2, dryIceMultiplier: 2 },

@@ -57,6 +57,7 @@ describe("resolvePackagingConfig — layering default < strapi < env", () => {
     const strapi = {
       model: "continuous_weight",
       minimumDryIceAmountLb: 7,
+      dryIceBlockWeightLb: 10,
       transitDayThresholds: [
         { transitDays: 3, dryIceMultiplier: 3 },
         { transitDays: 1, dryIceMultiplier: 1 },
@@ -122,6 +123,7 @@ describe("packagingOverridesFromColdChainSetting", () => {
         BoxCost330: 9.98,
         BoxCost345: 16.06,
         MinimumDryIceAmount: 7,
+        DryIceBlockWeightLb: 10,
         TransitDayThresholds: [
           { TransitDays: 1, DryIceMultiplier: 1 },
           { TransitDays: 2, DryIceMultiplier: 2 },
@@ -145,6 +147,7 @@ describe("packagingOverridesFromColdChainSetting", () => {
       dryIceUsdPerLb: 0.6,
       boxCost: { micro: 7.54, m330: 9.98, l345: 16.06 },
       minimumDryIceAmountLb: 7,
+      dryIceBlockWeightLb: 10,
       transitDayThresholds: [
         { transitDays: 1, dryIceMultiplier: 1 },
         { transitDays: 2, dryIceMultiplier: 2 },

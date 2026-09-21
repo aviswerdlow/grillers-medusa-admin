@@ -7,6 +7,16 @@ export const PACKING_SERVICES = [
   "OVERNIGHT",
 ] as const;
 export type PackingService = (typeof PACKING_SERVICES)[number];
+const CMS_SERVICES: Partial<Record<string, PackingService>> = {
+  GROUND: "GROUND", UPS_3_DAY_SELECT: "3_DAY_SELECT",
+  UPS_2ND_DAY_AIR: "2ND_DAY_AIR", OVERNIGHT: "OVERNIGHT",
+};
+export type PackingExposureRule = {
+  service: PackingService;
+  boxTier: string;
+  throughHours: number;
+  dryIceBlocksPerBox: number;
+};
 export type SeasonalPackingPolicy = {
   name: string;
   revision: string;
@@ -20,7 +30,7 @@ export type SeasonalPackingPolicy = {
   maxGrossWeightLb: number;
   services: PackingService[];
   boxTiers: string[];
-  rules: { throughHours: number; dryIceMultiplier: number }[];
+  rules: PackingExposureRule[];
 };
 
 export class PackingPolicyError extends Error {
@@ -100,26 +110,40 @@ export function parseSeasonalPackingPolicies(
         return fail("missing_exposure_rules");
       const rules = p.ExposureRules.map(row)
         .map((r) => {
+          // CMS enum names must be valid GraphQL identifiers. Carrier codes
+          // remain unchanged outside this source adapter.
+          const service = CMS_SERVICES[text(r.Service)];
           if (
             !positive(r.ThroughHours) ||
-            !positive(r.DryIceMultiplier) ||
+            !positive(r.DryIceBlocksPerBox) ||
+            r.DryIceMultiplier != null ||
+            !service || !services.includes(service) ||
+            !boxTiers.includes(text(r.BoxTier)) ||
             number(r.ThroughHours) > number(p.MaxExposureHours)
           )
             return fail("invalid_exposure_rule");
           return {
+            service,
+            boxTier: text(r.BoxTier),
             throughHours: number(r.ThroughHours),
-            dryIceMultiplier: number(r.DryIceMultiplier),
+            dryIceBlocksPerBox: number(r.DryIceBlocksPerBox),
           };
         })
-        .sort((a, b) => a.throughHours - b.throughHours);
-      if (rules[rules.length - 1].throughHours !== number(p.MaxExposureHours))
-        return fail("uncovered_exposure_limit");
-      for (let i = 1; i < rules.length; i++) {
-        if (
-          rules[i].throughHours === rules[i - 1].throughHours ||
-          rules[i].dryIceMultiplier < rules[i - 1].dryIceMultiplier
-        )
-          return fail("contradictory_exposure_rules");
+        .sort((a, b) => a.service.localeCompare(b.service) ||
+          a.boxTier.localeCompare(b.boxTier) || a.throughHours - b.throughHours);
+      for (const service of services) {
+        // A small box may stop at an earlier exposure. Every permitted service
+        // still needs a box covering the policy's full approved duration.
+        if (!rules.some(r => r.service === service && r.throughHours === number(p.MaxExposureHours)))
+          return fail("uncovered_exposure_limit");
+        for (const tier of boxTiers) {
+          const group = rules.filter(r => r.service === service && r.boxTier === tier);
+          for (let i = 1; i < group.length; i++) {
+            if (group[i].throughHours === group[i - 1].throughHours ||
+              group[i].dryIceBlocksPerBox < group[i - 1].dryIceBlocksPerBox)
+              return fail("contradictory_exposure_rules");
+          }
+        }
       }
       return {
         name: text(p.Name),
@@ -167,6 +191,7 @@ export function validatePackingPublication(value: unknown, now = new Date()) {
     return fail("unapproved_packing_configuration");
   if (
     !positive(setting.MinimumDryIceAmount) ||
+    !positive(setting.DryIceBlockWeightLb) ||
     !positive(setting.DryIcePricePerLb)
   )
     return fail("invalid_ice_inputs");
@@ -206,21 +231,18 @@ export function validatePackingPublication(value: unknown, now = new Date()) {
     tiers.add(b.PackagingTier);
   }
   for (const p of policies) {
-    const ice =
-      number(setting.MinimumDryIceAmount) *
-      p.rules[p.rules.length - 1].dryIceMultiplier;
-    if (
-      !boxes.some(
-        (b) =>
-          p.boxTiers.includes(b.PackagingTier) &&
-          Math.min(number(b.MaxTotalWeightLb), p.maxGrossWeightLb) >
-            ice + number(b.TareWeightLb) &&
+    if (p.rules.some(r => !tiers.has(r.boxTier))) return fail("missing_packing_rule_box");
+    for (const service of p.services) {
+      if (!boxes.some((b) => {
+        const rule = selectPackingExposureRule(p, service, b.PackagingTier, p.maxExposureHours);
+        if (!rule) return false;
+        const ice = Math.max(number(setting.MinimumDryIceAmount),
+          number(setting.DryIceBlockWeightLb) * rule.dryIceBlocksPerBox);
+        return Math.min(number(b.MaxTotalWeightLb), p.maxGrossWeightLb) > ice + number(b.TareWeightLb) &&
           number(b.MaxFitUnits) > ice * number(b.DryIceFitUnitsPerLb) &&
-          (b.MaxTransitDays == null ||
-            number(b.MaxTransitDays) >= Math.ceil(p.maxExposureHours / 24)),
-      )
-    )
-      return fail("no_box_for_policy_limit");
+          (b.MaxTransitDays == null || number(b.MaxTransitDays) >= Math.ceil(p.maxExposureHours / 24));
+      })) return fail("no_box_for_policy_limit");
+    }
   }
   return policies;
 }
@@ -277,14 +299,18 @@ export function selectSeasonalPackingPolicy(
   const delayedArrival = new Date(delayedMs).toISOString();
   if (easternDate(delayedArrival) > policy.effectiveThrough)
     return fail("packing_policy_exposure_exceeded");
-  const rule = policy.rules.find((r) => r.throughHours >= exposureHours);
-  if (!rule) return fail("missing_exposure_rule");
   return {
     policy,
-    rule,
     exposureHours,
     elapsedHours: elapsed,
     packedAt: context.packedAt,
     arrivalBy: context.arrivalBy,
   };
+}
+
+/** No wildcard precedence or fallback to another service/box's ice quantity. */
+export function selectPackingExposureRule(
+  policy: SeasonalPackingPolicy, service: string, boxTier: string, exposureHours: number,
+): PackingExposureRule | undefined {
+  return policy.rules.find(r => r.service === service && r.boxTier === boxTier && r.throughHours >= exposureHours);
 }

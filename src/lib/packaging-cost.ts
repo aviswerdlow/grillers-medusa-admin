@@ -59,6 +59,7 @@ export type PackagingCostConfig = {
   enabled?: boolean;
   seasonalPolicies?: unknown;
   minimumDryIceAmountLb?: number | null;
+  dryIceBlockWeightLb?: number | null;
   carrierMaxPackageWeightLb?: number;
   policyVersion?: string | null;
   model: PackagingCostModel;
@@ -143,6 +144,7 @@ export type PackagingCostOverrides = {
     l345?: number | string | null;
   };
   minimumDryIceAmountLb?: number | string | null;
+  dryIceBlockWeightLb?: number | string | null;
   transitDayThresholds?: Array<{
     transitDays?: number | string | null;
     dryIceMultiplier?: number | string | null;
@@ -298,6 +300,7 @@ export function resolvePackagingConfig(
     ...(s.seasonalPolicies !== undefined ? {
       seasonalPolicies: s.seasonalPolicies,
       minimumDryIceAmountLb: positive(s.minimumDryIceAmountLb),
+      dryIceBlockWeightLb: positive(s.dryIceBlockWeightLb),
       carrierMaxPackageWeightLb: carrierPackageWeightLimit(env),
     } : {}),
     ...(s.policyVersion !== undefined ? { policyVersion: s.policyVersion } : {}),

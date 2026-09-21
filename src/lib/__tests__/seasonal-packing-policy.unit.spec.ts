@@ -1,5 +1,6 @@
 import {
   packingConfig,
+  packingExposureRules,
   packingContext,
   seasonalPolicy,
   shippingLine,
@@ -44,7 +45,7 @@ test("effective-date hot policy changes ice and package count for the same food,
       Name: "Synthetic hot",
       Revision: "fixture-hot-v1",
       EffectiveFrom: "2026-10-01",
-      ExposureRules: [{ ThroughHours: 168, DryIceMultiplier: 2 }],
+      ExposureRules: packingExposureRules([{ ThroughHours: 168, DryIceBlocksPerBox: 2 }]),
     }),
   ];
   config.continuous!.boxRules.forEach((b) => {
@@ -132,18 +133,18 @@ test.each([
   { EffectiveFrom: "2026-02-30" },
   { MaxExposureHours: 0 },
   { DelayAllowanceHours: -1 },
-  { ExposureRules: [{ ThroughHours: 24, DryIceMultiplier: 1 }] },
+  { ExposureRules: packingExposureRules([{ ThroughHours: 24, DryIceBlocksPerBox: 1 }]) },
   {
-    ExposureRules: [
-      { ThroughHours: 24, DryIceMultiplier: 3 },
-      { ThroughHours: 168, DryIceMultiplier: 2 },
-    ],
+    ExposureRules: packingExposureRules([
+      { ThroughHours: 24, DryIceBlocksPerBox: 3 },
+      { ThroughHours: 168, DryIceBlocksPerBox: 2 },
+    ]),
   },
   {
-    ExposureRules: [
-      { ThroughHours: 168, DryIceMultiplier: 1 },
-      { ThroughHours: 168, DryIceMultiplier: 1 },
-    ],
+    ExposureRules: packingExposureRules([
+      { ThroughHours: 168, DryIceBlocksPerBox: 1 },
+      { ThroughHours: 168, DryIceBlocksPerBox: 1 },
+    ]),
   },
   {
     AllowGround: false,
@@ -212,7 +213,7 @@ test("ice cost alone changes the frozen quote price/id, never ice quantity or bo
   expect(changed.boxes).toBe(original.boxes);
   expect(changed.dryIceCost).toBe(original.dryIceCost * 2);
   expect(changed.id).not.toBe(original.id);
-  (config.seasonalPolicies as any[])[0].ExposureRules[0].DryIceMultiplier = 20;
+  (config.seasonalPolicies as any[])[0].ExposureRules[0].DryIceBlocksPerBox = 20;
   expect(JSON.stringify(original)).toBe(frozen);
 });
 

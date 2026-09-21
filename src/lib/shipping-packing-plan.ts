@@ -12,6 +12,8 @@ import {
 import {
   PackingPolicyError,
   selectSeasonalPackingPolicy,
+  selectPackingExposureRule,
+  type PackingExposureRule,
   validatePackingPublication,
 } from "./seasonal-packing-policy";
 export const SHIPPING_PACKING_PLAN_KEY = "shipping_packing_plan_v1";
@@ -61,7 +63,9 @@ export type ShippingPackingPlan = {
   packingDays?: number;
   elapsedPackingHours?: number;
   appliedPolicy: ReturnType<typeof selectSeasonalPackingPolicy> & {
+    rule: PackingExposureRule;
     minimumDryIceAmountLb: number;
+    dryIceBlockWeightLb: number;
     dryIceUsdPerLb: number;
     boxUnitCost: number;
     dryIceFitUnitsPerLb: number;
@@ -129,6 +133,7 @@ export function createShippingPackingPlan(
       PackagingCostModel: config.model,
       PackingPolicyVersion: config.policyVersion,
       MinimumDryIceAmount: config.minimumDryIceAmountLb,
+      DryIceBlockWeightLb: config.dryIceBlockWeightLb,
       DryIcePricePerLb: config.dryIceUsdPerLb,
       SeasonalPackingPolicies: config.seasonalPolicies,
       PackagingBoxes: config.continuous.boxRules.map((b) => ({
@@ -158,21 +163,23 @@ export function createShippingPackingPlan(
   }
   if (!positive(config.carrierMaxPackageWeightLb))
     throw new ShippingInputError("invalid_carrier_package_limit");
-  const ice = config.minimumDryIceAmountLb! * selected.rule.dryIceMultiplier;
-  if (!positive(ice)) throw new ShippingInputError("invalid_dry_ice_quantity");
   const physical = weights.lines.filter((line) => line.kind === "physical");
   const unitCount = physical.reduce((n, l) => n + l.quantity, 0);
   if (unitCount > 10000) throw new ShippingInputError("packing_unit_limit");
 
   const pack = (
     box: ContinuousPackagingBoxRule,
-  ): PlannedShippingPackage[] | null => {
+  ): { packages: PlannedShippingPackage[]; rule: PackingExposureRule } | null => {
     if (
       !selected.policy.boxTiers.includes(box.boxTier) ||
       (box.maxTransitDays !== null &&
         Math.ceil(selected.exposureHours / 24) > box.maxTransitDays)
     )
       return null;
+    const rule = selectPackingExposureRule(selected.policy, context.service, box.boxTier, selected.exposureHours);
+    if (!rule) return null;
+    const ice = Math.max(config.minimumDryIceAmountLb!, config.dryIceBlockWeightLb! * rule.dryIceBlocksPerBox);
+    if (!positive(ice)) throw new ShippingInputError("invalid_dry_ice_quantity");
     if (
       !positive(box.lengthIn) ||
       !positive(box.widthIn) ||
@@ -251,21 +258,22 @@ export function createShippingPackingPlan(
       if (existing) existing.quantity++;
       else target.contents.push({ variantId: unit.variantId, quantity: 1 });
     }
-    return packages.map((p) => ({
+    return { rule, packages: packages.map((p) => ({
       ...p,
       productWeightLb: rounded(p.productWeightLb),
       fitUnits: rounded(p.fitUnits),
       totalFitUnits: rounded(p.fitUnits + p.dryIceFitUnits),
       grossWeightLb: rounded(p.productWeightLb + p.dryIceLb + p.tareLb),
-    }));
+    })) };
   };
   const candidates = config.continuous.boxRules
-    .map((box) => ({ box, packages: pack(box) }))
-    .filter((c) => c.packages !== null)
+    .map((box) => ({ box, packed: pack(box) }))
+    .filter((c) => c.packed !== null)
     .map((c) => ({
       ...c,
-      packages: c.packages!,
-      cost: c.packages!.length * (c.box.unitCost + ice * config.dryIceUsdPerLb),
+      packages: c.packed!.packages,
+      rule: c.packed!.rule,
+      cost: c.packed!.packages.reduce((cost, p) => cost + c.box.unitCost + p.dryIceLb * config.dryIceUsdPerLb, 0),
     }))
     .sort(
       (a, b) =>
@@ -275,7 +283,7 @@ export function createShippingPackingPlan(
     );
   const choice = candidates[0];
   if (!choice) throw new ShippingInputError("no_approved_box_fits");
-  const dryIceLb = choice.packages.length * ice;
+  const dryIceLb = choice.packages.reduce((total, p) => total + p.dryIceLb, 0);
   const dryIceCost = rounded(dryIceLb * config.dryIceUsdPerLb, 2),
     boxCost = rounded(choice.packages.length * choice.box.unitCost, 2);
   const result = {
@@ -286,7 +294,9 @@ export function createShippingPackingPlan(
     // exposure, capacity and cost inputs so changed quotes require acceptance.
     appliedPolicy: {
       ...selected,
+      rule: choice.rule,
       minimumDryIceAmountLb: config.minimumDryIceAmountLb!,
+      dryIceBlockWeightLb: config.dryIceBlockWeightLb!,
       dryIceUsdPerLb: config.dryIceUsdPerLb,
       boxUnitCost: choice.box.unitCost,
       dryIceFitUnitsPerLb: choice.box.dryIceFitUnitsPerLb!,
