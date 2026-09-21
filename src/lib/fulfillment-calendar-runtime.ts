@@ -35,6 +35,11 @@ import { getPackagingConfig } from "./packaging-cost-strapi";
 import { loadShippingCatalogLines } from "./shipping-catalog-inputs";
 import { createShippingPackingPlan } from "./shipping-packing-plan";
 import { US_STATES } from "./gp-customer-create";
+import {
+  calendarEnforcementMode,
+  logLegacyCalendarCheckout,
+  requiresFulfillmentCalendar,
+} from "./fulfillment-calendar-rollout";
 
 const fields = [
   "id",
@@ -68,7 +73,7 @@ export const calendarActionSchema = z
   .strict();
 
 export function modeForCalendarService(
-  service: string,
+  service: string
 ): CalendarRequest["mode"] {
   if (isUpsServiceCode(service)) return "ups_shipping";
   if (service === "PICKUP") return "plant_pickup";
@@ -76,12 +81,7 @@ export function modeForCalendarService(
   if (service === "SCHEDULED_DELIVERY") return "southeast_pickup";
   throw new FulfillmentCalendarError("calendar_service_unknown");
 }
-async function context(
-  scope: any,
-  cartId: string,
-  shippingOptionId?: string,
-  routeId?: string,
-) {
+async function readCalendarCart(scope: any, cartId: string) {
   const query = scope.resolve("query");
   const { data } = await query.graph({
     entity: "cart",
@@ -90,6 +90,16 @@ async function context(
   });
   const cart = data?.[0];
   if (!cart) throw new FulfillmentCalendarError("calendar_cart_not_found");
+  return { cart, query };
+}
+async function context(
+  scope: any,
+  cartId: string,
+  shippingOptionId?: string,
+  routeId?: string,
+  loaded?: { cart: any; query: any }
+) {
+  const { cart, query } = loaded ?? (await readCalendarCart(scope, cartId));
   if (cart.completed_at) return { cart, query, completed: true as const };
   const selectedId =
     shippingOptionId ??
@@ -106,7 +116,7 @@ async function context(
   if (options?.length !== 1 || options[0].id !== selectedId)
     throw new FulfillmentCalendarError("calendar_shipping_option_unknown");
   const service = normalizeGrillersUpsServiceCode(
-    options[0].data?.service_code,
+    options[0].data?.service_code
   );
   const mode = modeForCalendarService(service);
   const rawZip = String(cart.shipping_address?.postal_code ?? "").trim();
@@ -127,7 +137,7 @@ async function context(
   const province = US_STATES.find(
     (state) =>
       state.code.toLowerCase() === rawState ||
-      state.name.toLowerCase() === rawState,
+      state.name.toLowerCase() === rawState
   )?.code;
   if (mode === "southeast_pickup" && !province)
     throw new FulfillmentCalendarError("calendar_address_required");
@@ -155,11 +165,11 @@ function calendarFor(
   source: CalendarSource,
   request: CalendarRequest,
   now: Date,
-  carrierSelection?: CalendarSelection,
+  carrierSelection?: CalendarSelection
 ) {
   if (request.mode === "southeast_pickup") {
     const route = source.policy.southeast.find(
-      (r) => r.id === request.routeId && r.active,
+      (r) => r.id === request.routeId && r.active
     );
     if (
       request.countryCode !== "us" ||
@@ -195,7 +205,7 @@ const contextRevision = (cart: any, option: string, calendar: CalendarResult) =>
     revision: calendar.calendarRevision,
     transitRevisions: [
       ...new Set(
-        calendar.choices.map((choice) => choice.transit?.revision ?? null),
+        calendar.choices.map((choice) => choice.transit?.revision ?? null)
       ),
     ].sort(),
   });
@@ -204,7 +214,7 @@ export async function fulfillmentCalendarAction(
   scope: any,
   raw: unknown,
   env = process.env,
-  clock = () => new Date(),
+  clock = () => new Date()
 ) {
   const input = calendarActionSchema.safeParse(raw);
   if (!input.success)
@@ -215,15 +225,28 @@ export async function fulfillmentCalendarAction(
       scope,
       body.cart_id,
       env,
-      clock,
+      clock
     );
-    return { state: "valid", summary: accepted?.selection.choice ?? null };
+    return {
+      state:
+        !accepted && calendarEnforcementMode(env) === "off"
+          ? "legacy"
+          : "valid",
+      summary: accepted?.selection.choice ?? null,
+    };
   }
+  const loaded = await readCalendarCart(scope, body.cart_id);
+  if (
+    !loaded.cart.completed_at &&
+    !requiresFulfillmentCalendar(loaded.cart, env)
+  )
+    throw new FulfillmentCalendarError("calendar_not_enabled", 503);
   const c = await context(
     scope,
     body.cart_id,
     body.shipping_option_id,
     body.route_id,
+    loaded
   );
   if (c.completed)
     throw new FulfillmentCalendarError("calendar_order_already_accepted");
@@ -256,7 +279,7 @@ export async function fulfillmentCalendarAction(
         c.request.mode === "southeast_pickup"
           ? source.policy.southeast
               .filter(
-                (route) => route.active && route.state === c.request.province,
+                (route) => route.active && route.state === c.request.province
               )
               .map(({ id, city, state }) => ({ id, city, state }))
           : [],
@@ -266,7 +289,7 @@ export async function fulfillmentCalendarAction(
   let choice = calendar.choices.find(
     (x) =>
       x.arrivalDate === body.arrival_date &&
-      (x.window?.id ?? "") === (body.window_id ?? ""),
+      (x.window?.id ?? "") === (body.window_id ?? "")
   );
   if (!choice) throw new FulfillmentCalendarError("date_or_window_unavailable");
 
@@ -278,13 +301,13 @@ export async function fulfillmentCalendarAction(
       if (origin !== source.originPostalCode)
         throw new FulfillmentCalendarError(
           "calendar_carrier_origin_mismatch",
-          503,
+          503
         );
       const lines = await loadShippingCatalogLines(c.query, c.cart.items);
       const plan = createShippingPackingPlan(
         lines,
         packingContextFromCalendar({ request: c.request, choice }),
-        await getPackagingConfig(env),
+        await getPackagingConfig(env)
       );
       const transit = await carrierCalendarTransit({
         client,
@@ -315,7 +338,7 @@ export async function fulfillmentCalendarAction(
       const exact = calendar.choices.find(
         (x) =>
           x.arrivalDate === body.arrival_date &&
-          x.dispatchDate === choice!.dispatchDate,
+          x.dispatchDate === choice!.dispatchDate
       );
       if (!exact) {
         const proposed = calendar.choices[0];
@@ -365,9 +388,15 @@ export async function currentCalendarSelection(
   scope: any,
   cartId: string,
   env = process.env,
-  clock = () => new Date(),
+  clock = () => new Date()
 ) {
-  const c = await context(scope, cartId);
+  const loaded = await readCalendarCart(scope, cartId);
+  if (loaded.cart.completed_at) return null;
+  if (!requiresFulfillmentCalendar(loaded.cart, env)) {
+    logLegacyCalendarCheckout(scope, cartId);
+    return null;
+  }
+  const c = await context(scope, cartId, undefined, undefined, loaded);
   if (c.completed) return null;
   const source = await loadCalendarSource(env, clock()),
     now = clock(),
@@ -375,7 +404,7 @@ export async function currentCalendarSelection(
   const token = readCalendarSelection(
     c.cart.metadata?.[CALENDAR_SELECTION_KEY],
     key,
-    now,
+    now
   );
   const calendar = calendarFor(source, c.request, now, token);
   const selection = validateCalendarSelection({
@@ -404,7 +433,14 @@ export async function prepareCalendarAcceptance(scope: any, cartId: string) {
 }
 export async function validateCalendarAcceptance(scope: any, loadedCart: any) {
   const c = await currentCalendarSelection(scope, loadedCart.id);
-  if (!c) return;
+  if (!c) {
+    if (!loadedCart.completed_at && requiresFulfillmentCalendar(loadedCart)) {
+      const fresh = await readCalendarCart(scope, loadedCart.id);
+      if (!fresh.cart.completed_at)
+        throw new FulfillmentCalendarError("calendar_acceptance_changed");
+    }
+    return;
+  }
   const accepted = loadedCart.metadata?.[CALENDAR_ACCEPTED_KEY];
   if (
     calendarCartRevision(loadedCart) !== c.selection.cartRevision ||
@@ -433,7 +469,7 @@ export async function calendarPackingContextForRate(
   cartId: unknown,
   service: string,
   env = process.env,
-  clock = () => new Date(),
+  clock = () => new Date()
 ) {
   if (typeof cartId !== "string" || !cartId.startsWith("cart_"))
     throw new FulfillmentCalendarError("calendar_cart_required");
@@ -464,7 +500,7 @@ export async function calendarPackingContextForRate(
     const value = readCalendarSelection(
       cart.metadata?.[CALENDAR_SELECTION_KEY],
       key,
-      now,
+      now
     );
     if (
       value.cartId === cart.id &&

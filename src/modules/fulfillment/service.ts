@@ -46,6 +46,7 @@ import { ShippingInputError } from "../../lib/shipping-weights";
 import { loadShippingCatalogLines } from "../../lib/shipping-catalog-inputs";
 import { calendarPackingContextForRate } from "../../lib/fulfillment-calendar-runtime";
 import { FulfillmentCalendarError } from "../../lib/fulfillment-calendar";
+import { requiresFulfillmentCalendar } from "../../lib/fulfillment-calendar-rollout";
 
 /** True when packaging cost should be added to the forecast charge. */
 function packagingCostEnabled(env: Record<string, string | undefined>): boolean {
@@ -335,7 +336,9 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
         if (isUpsServiceCode(serviceCode)) {
           try {
             items = await loadShippingCatalogLines(this.shippingContainer_.query, items);
-            const dates = await calendarPackingContextForRate(this.shippingContainer_.query, optionData?.id || optionData?.cart_id, serviceCode);
+            const dates = requiresFulfillmentCalendar(optionData)
+              ? await calendarPackingContextForRate(this.shippingContainer_.query, optionData?.id || optionData?.cart_id, serviceCode)
+              : { service: serviceCode, postalCode: zip || "" };
             packingPlan = createShippingPackingPlan(items, dates, await getPackagingConfig(process.env));
           } catch (error) {
             if (error instanceof FulfillmentCalendarError) throw new MedusaError(MedusaError.Types.NOT_ALLOWED, error.message);
@@ -926,7 +929,9 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
     if(isUpsServiceCode(service)) {
       try {
         const items=await loadShippingCatalogLines(this.shippingContainer_.query,context?.items??[]);
-        const dates=await calendarPackingContextForRate(this.shippingContainer_.query,context?.id||context?.cart_id,service);
+        const dates=requiresFulfillmentCalendar(context)
+          ? await calendarPackingContextForRate(this.shippingContainer_.query,context?.id||context?.cart_id,service)
+          : {service,postalCode:context?.shipping_address?.postal_code??""};
         result[SHIPPING_PACKING_PLAN_KEY]=createShippingPackingPlan(items,dates,await getPackagingConfig(process.env));
       } catch(error) {
         if(error instanceof ShippingInputError || error instanceof FulfillmentCalendarError) throw new MedusaError(MedusaError.Types.NOT_ALLOWED,error.message);

@@ -30,6 +30,8 @@ import {
   calendarPolicy,
 } from "./__fixtures__/fulfillment-calendar";
 import { shippingLine, packingConfig } from "./__fixtures__/shipping-inputs";
+import { calendarEnforcementMode } from "../fulfillment-calendar-rollout";
+import { GET as calendarCapability } from "../../api/store/grillers/checkout/fulfillment-calendar/route";
 jest.mock("../fulfillment-calendar-source", () => ({
   ...jest.requireActual("../fulfillment-calendar-source"),
   loadCalendarSource: jest.fn(),
@@ -44,8 +46,10 @@ jest.mock("../../modules/fulfillment/wwex-speedship", () => ({
 const now = new Date("2026-10-05T18:00:00Z"),
   key = "synthetic-fixture-only-calendar-key-32";
 const savedKey = process.env.GRILLERS_CALENDAR_SIGNING_KEY;
+const savedEnforcement = process.env.GP_CALENDAR_ENFORCEMENT;
 const env = {
   GRILLERS_CALENDAR_SIGNING_KEY: key,
+  GP_CALENDAR_ENFORCEMENT: "required",
   WWEX_ORIGIN_POSTAL_CODE: "30340",
 };
 const clone = (v: any) => JSON.parse(JSON.stringify(v));
@@ -80,21 +84,21 @@ function harness(service = "GROUND") {
         entity === "cart"
           ? [clone(cart)]
           : entity === "shipping_option"
-            ? [{ id: "so_fixture", data: { service_code: service } }]
-            : [clone(cart.items[0].variant)],
+          ? [{ id: "so_fixture", data: { service_code: service } }]
+          : [clone(cart.items[0].variant)],
     })),
   };
   const module = {
     updateCarts: jest.fn(async (_id: string, data: any) =>
-      Object.assign(cart, data),
+      Object.assign(cart, data)
     ),
     updateLineItems: jest.fn(async (rows: any[]) =>
       rows.forEach((row) =>
         Object.assign(
           cart.items.find((i: any) => i.id === row.id),
-          row,
-        ),
-      ),
+          row
+        )
+      )
     ),
   };
   const scope = {
@@ -112,7 +116,7 @@ async function select(h: ReturnType<typeof harness>, extra: any = {}) {
       ...extra,
     },
     env,
-    () => now,
+    () => now
   );
   const choice = list.calendar.choices[0];
   const result: any = await fulfillmentCalendarAction(
@@ -127,7 +131,7 @@ async function select(h: ReturnType<typeof harness>, extra: any = {}) {
       ...extra,
     },
     env,
-    () => now,
+    () => now
   );
   if (result.state === "selected")
     Object.assign(h.cart.metadata, result.metadata);
@@ -137,6 +141,7 @@ beforeEach(() => {
   jest.useFakeTimers().setSystemTime(now);
   jest.clearAllMocks();
   process.env.GRILLERS_CALENDAR_SIGNING_KEY = key;
+  process.env.GP_CALENDAR_ENFORCEMENT = "required";
   (loadCalendarSource as jest.Mock).mockResolvedValue(source());
   (getPackagingConfig as jest.Mock).mockResolvedValue(packingConfig());
   (createWwexSpeedshipClientFromEnv as jest.Mock).mockReturnValue(null);
@@ -145,6 +150,130 @@ afterEach(() => {
   jest.useRealTimers();
   if (savedKey === undefined) delete process.env.GRILLERS_CALENDAR_SIGNING_KEY;
   else process.env.GRILLERS_CALENDAR_SIGNING_KEY = savedKey;
+  if (savedEnforcement === undefined)
+    delete process.env.GP_CALENDAR_ENFORCEMENT;
+  else process.env.GP_CALENDAR_ENFORCEMENT = savedEnforcement;
+});
+
+test.each(["GROUND", "PICKUP", "ATLANTA_DELIVERY", "SCHEDULED_DELIVERY"])(
+  "%s legacy checkout passes preparation and completion with enforcement unset and no calendar infrastructure",
+  async (service) => {
+    delete process.env.GP_CALENDAR_ENFORCEMENT;
+    delete process.env.GRILLERS_CALENDAR_SIGNING_KEY;
+    (loadCalendarSource as jest.Mock).mockRejectedValue(
+      new Error("calendar is not deployed")
+    );
+    const h = harness(service);
+    const warn = jest.fn();
+    const scope = {
+      resolve: (name: string) =>
+        name === "logger" ? { warn } : h.scope.resolve(name),
+    };
+    if (service === "GROUND") {
+      h.cart.shipping_methods[0].data = {
+        [SHIPPING_PACKING_PLAN_KEY]: createShippingPackingPlan(
+          h.cart.items,
+          { service, postalCode: h.cart.shipping_address.postal_code },
+          packingConfig()
+        ),
+      };
+    }
+    const next = jest.fn();
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+    await prepareNativeShippingAcceptance(
+      { scope, params: { id: h.cart.id } } as any,
+      res as any,
+      next
+    );
+    expect(next).toHaveBeenCalledWith();
+    expect(res.status).not.toHaveBeenCalled();
+    await validateCalendarAcceptance(scope, clone(h.cart));
+    await validateShippingAcceptance(scope, clone(h.cart));
+    expect(loadCalendarSource).not.toHaveBeenCalled();
+    expect(h.cart.metadata[CALENDAR_ACCEPTED_KEY]).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("calendar_enforcement_off")
+    );
+    const result = await fulfillmentCalendarAction(
+      scope,
+      { action: "validate", cart_id: h.cart.id },
+      process.env,
+      () => now
+    );
+    expect(result).toEqual({ state: "legacy", summary: null });
+    await expect(
+      fulfillmentCalendarAction(
+        scope,
+        { action: "list", cart_id: h.cart.id },
+        process.env,
+        () => now
+      )
+    ).rejects.toMatchObject({ code: "calendar_not_enabled", status: 503 });
+  }
+);
+
+test.each([
+  [undefined, "off"],
+  ["off", "off"],
+  ["required", "required"],
+  ["typo", "required"],
+])(
+  "calendar capability advertises %s without depending on CMS or a signing key",
+  async (configured, expected) => {
+    if (configured === undefined) delete process.env.GP_CALENDAR_ENFORCEMENT;
+    else process.env.GP_CALENDAR_ENFORCEMENT = configured;
+    expect(calendarEnforcementMode()).toBe(expected);
+    const res = { setHeader: jest.fn(), json: jest.fn() };
+    await calendarCapability({} as any, res as any);
+    expect(res.json).toHaveBeenCalledWith({ enforcement: expected });
+    expect(res.setHeader).toHaveBeenCalledWith("Cache-Control", "no-store");
+    expect(loadCalendarSource).not.toHaveBeenCalled();
+  }
+);
+
+test("turning enforcement off preserves a previously signed choice and still rejects a changed cart", async () => {
+  const h = harness();
+  await select(h);
+  process.env.GP_CALENDAR_ENFORCEMENT = "off";
+  await prepareCalendarAcceptance(h.scope, h.cart.id);
+  await validateCalendarAcceptance(h.scope, clone(h.cart));
+  expect(h.cart.metadata[CALENDAR_ACCEPTED_KEY]).toBeDefined();
+  h.cart.items[0].quantity += 1;
+  await expect(
+    prepareCalendarAcceptance(h.scope, h.cart.id)
+  ).rejects.toMatchObject({ code: "calendar_context_changed" });
+});
+
+test.each([
+  "fulfillment_calendar_selection_v1",
+  "fulfillment_calendar_accepted_v1",
+  "fulfillmentCalendarQuoteId",
+])(
+  "off mode cannot discard an incomplete or invalid existing %s promise",
+  async (marker) => {
+    process.env.GP_CALENDAR_ENFORCEMENT = "off";
+    delete process.env.GRILLERS_CALENDAR_SIGNING_KEY;
+    const h = harness();
+    h.cart.metadata[marker] = "invalid-existing-promise";
+    await expect(
+      prepareCalendarAcceptance(h.scope, h.cart.id)
+    ).rejects.toMatchObject({ code: "calendar_signer_unconfigured" });
+    expect(h.module.updateCarts).not.toHaveBeenCalled();
+  }
+);
+
+test("off mode rejects a workflow cart whose promise disappeared from current storage", async () => {
+  process.env.GP_CALENDAR_ENFORCEMENT = "off";
+  const h = harness();
+  const loaded = clone(h.cart);
+  loaded.metadata.fulfillmentCalendarQuoteId = "prior-promise";
+  await expect(
+    validateCalendarAcceptance(h.scope, loaded)
+  ).rejects.toMatchObject({ code: "calendar_acceptance_changed" });
+  h.cart.completed_at = now.toISOString();
+  await expect(
+    validateCalendarAcceptance(h.scope, loaded)
+  ).resolves.toBeUndefined();
 });
 test("real calendar, packing and acceptance functions preserve one signed choice through native cart preparation", async () => {
   const h = harness();
@@ -154,7 +283,7 @@ test("real calendar, packing and acceptance functions preserve one signed choice
   const plan = createShippingPackingPlan(
     h.cart.items,
     packingContextFromCalendar(c!.selection),
-    packingConfig(),
+    packingConfig()
   );
   h.cart.shipping_methods[0].data[SHIPPING_PACKING_PLAN_KEY] = plan;
   await prepareCalendarAcceptance(h.scope, h.cart.id);
@@ -170,14 +299,14 @@ test("real calendar, packing and acceptance functions preserve one signed choice
     elapsedPackingHours: 26,
   });
   expect(loaded.metadata[CALENDAR_ACCEPTED_KEY].choice.arrivalDate).toBe(
-    plan.arrivalDate,
+    plan.arrivalDate
   );
   expect(
-    publicShippingProjection(loaded).metadata[CALENDAR_ACCEPTED_KEY],
+    publicShippingProjection(loaded).metadata[CALENDAR_ACCEPTED_KEY]
   ).toBeUndefined();
   loaded.items[0].quantity = 2;
   await expect(
-    validateCalendarAcceptance(h.scope, loaded),
+    validateCalendarAcceptance(h.scope, loaded)
   ).rejects.toMatchObject({ code: "calendar_acceptance_changed" });
 });
 test.each(["PICKUP", "ATLANTA_DELIVERY", "SCHEDULED_DELIVERY"])(
@@ -190,12 +319,12 @@ test.each(["PICKUP", "ATLANTA_DELIVERY", "SCHEDULED_DELIVERY"])(
       h.cart.shipping_address.province = "SC";
     const r = await select(
       h,
-      service === "SCHEDULED_DELIVERY" ? { route_id: "approved-route" } : {},
+      service === "SCHEDULED_DELIVERY" ? { route_id: "approved-route" } : {}
     );
     expect(r.summary.transit).toBeNull();
     await prepareCalendarAcceptance(h.scope, h.cart.id);
     await validateCalendarAcceptance(h.scope, clone(h.cart));
-  },
+  }
 );
 test.each([
   {
@@ -226,11 +355,11 @@ test.each([
             arrival_date: "2026-10-08",
           },
           env,
-          () => now,
-        ),
+          () => now
+        )
       ).rejects.toMatchObject({ code });
     expect(h.module.updateCarts).not.toHaveBeenCalled();
-  },
+  }
 );
 test.each(["SC", "sc", "South Carolina", "us-sc"])(
   "regional routes use the actual normalized state %s",
@@ -245,7 +374,7 @@ test.each(["SC", "sc", "South Carolina", "us-sc"])(
         shipping_option_id: "so_fixture",
       },
       env,
-      () => now,
+      () => now
     );
     expect(page.regionalLocations).toEqual([
       { id: "approved-route", city: "Synthetic future route", state: "SC" },
@@ -254,10 +383,10 @@ test.each(["SC", "sc", "South Carolina", "us-sc"])(
     await select(h, { route_id: "approved-route" });
     h.cart.shipping_address.province = "NY";
     await expect(
-      prepareCalendarAcceptance(h.scope, h.cart.id),
+      prepareCalendarAcceptance(h.scope, h.cart.id)
     ).rejects.toBeInstanceOf(FulfillmentCalendarError);
     expect(h.module.updateCarts).not.toHaveBeenCalled();
-  },
+  }
 );
 test("native completion rejects direct date metadata before preparation or payment can continue", async () => {
   const h = harness();
@@ -270,7 +399,7 @@ test("native completion rejects direct date metadata before preparation or payme
   await prepareNativeShippingAcceptance(
     { scope: h.scope, params: { id: h.cart.id } } as any,
     res,
-    next,
+    next
   );
   expect(res.status).toHaveBeenCalledWith(409);
   expect(next).not.toHaveBeenCalled();
@@ -281,14 +410,14 @@ test("restored/changed carts and changed published closures require a new select
   await select(h);
   h.cart.shipping_address.postal_code = "10002";
   await expect(
-    currentCalendarSelection(h.scope, h.cart.id, env, () => now),
+    currentCalendarSelection(h.scope, h.cart.id, env, () => now)
   ).rejects.toBeInstanceOf(FulfillmentCalendarError);
   h.cart.shipping_address.postal_code = "10001";
   const changed = source();
   changed.policy.operationsBlackouts = ["2026-10-05"];
   (loadCalendarSource as jest.Mock).mockResolvedValue(changed);
   await expect(
-    currentCalendarSelection(h.scope, h.cart.id, env, () => now),
+    currentCalendarSelection(h.scope, h.cart.id, env, () => now)
   ).rejects.toMatchObject({ code: "calendar_context_changed" });
 });
 test("completed cart replay does not read or rewrite the old accepted promise", async () => {
@@ -309,7 +438,7 @@ test("a revised transit fallback invalidates a displayed context even when its a
       shipping_option_id: "so_fixture",
     },
     env,
-    () => now,
+    () => now
   );
   const changed = source();
   changed.transitRules[0].BusinessDays = 2;
@@ -326,8 +455,8 @@ test("a revised transit fallback invalidates a displayed context even when its a
         context_revision: displayed.contextRevision,
       },
       env,
-      () => now,
-    ),
+      () => now
+    )
   ).rejects.toMatchObject({ code: "calendar_context_changed" });
 });
 test("carrier date change returns an explicit replacement requiring another customer choice", async () => {
@@ -359,14 +488,14 @@ test("carrier date change returns an explicit replacement requiring another cust
       replacement_quote: result.replacementQuote,
     },
     env,
-    () => now,
+    () => now
   );
   expect(accepted.state).toBe("selected");
   expect(client.quoteSmallpack).toHaveBeenCalledTimes(1);
   Object.assign(h.cart.metadata, accepted.metadata);
   expect(
     (await currentCalendarSelection(h.scope, h.cart.id, env, () => now))!
-      .selection.choice.transitBusinessDays,
+      .selection.choice.transitBusinessDays
   ).toBe(2);
 });
 test("rate preview is server-derived and never makes an unsigned cart acceptable", async () => {
@@ -376,27 +505,31 @@ test("rate preview is server-derived and never makes an unsigned cart acceptable
     h.cart.id,
     "GROUND",
     env,
-    () => now,
+    () => now
   );
   expect(context).toMatchObject({
     dispatchDate: "2026-10-05",
     arrivalDate: "2026-10-06",
   });
   await expect(
-    currentCalendarSelection(h.scope, h.cart.id, env, () => now),
+    currentCalendarSelection(h.scope, h.cart.id, env, () => now)
   ).rejects.toMatchObject({ code: "calendar_selection_required" });
 });
-
 
 test.each([
   ["fulfillmentDispatchDate", "2026-10-09"],
   ["fulfillmentWindowLabel", "Invented window"],
   ["fulfillmentCalendarTimezone", "Pacific/Honolulu"],
-])("native completion rejects a changed %s projection", async (field, value) => {
-  const h = harness();
-  await select(h);
-  await prepareCalendarAcceptance(h.scope, h.cart.id);
-  const loaded = clone(h.cart);
-  loaded.metadata[field] = value;
-  await expect(validateCalendarAcceptance(h.scope, loaded)).rejects.toMatchObject({ code: "calendar_acceptance_changed" });
-});
+])(
+  "native completion rejects a changed %s projection",
+  async (field, value) => {
+    const h = harness();
+    await select(h);
+    await prepareCalendarAcceptance(h.scope, h.cart.id);
+    const loaded = clone(h.cart);
+    loaded.metadata[field] = value;
+    await expect(
+      validateCalendarAcceptance(h.scope, loaded)
+    ).rejects.toMatchObject({ code: "calendar_acceptance_changed" });
+  }
+);

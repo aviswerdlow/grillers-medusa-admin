@@ -1,5 +1,10 @@
 # Fulfillment calendar candidate — launch #362
 
+September 21 rollout correction: enforcement now defaults off for legacy carts;
+signed choices retain their checks. See [calendar rollout compatibility](calendar-rollout-372.md)
+for the capability endpoint, required-mode activation gate and remaining
+storefront/staff fallback work in #372. This is not whole-PR preview acceptance.
+
 Tracking: https://github.com/aviswerdlow/grillers-pride-strategy/issues/362
 
 This is an **in-progress, coordinated release candidate**. Do not deploy it by
