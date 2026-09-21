@@ -1,6 +1,6 @@
 # Primary-contact candidate for launch issue #365
 
-Status: work in progress, not release-ready. This branch is based on backend main `d944c5e`. It implements the C1 contact/provenance interface; #337 still owns full delta/password/history reconciliation, #366 verified receipt-email activation, and #341 operational consent reconciliation. No live customer, migration or provider writes have occurred.
+Status: staged review candidate, not activated. This branch has been actually rebased onto receipt-email PR37 (`92b49ec9`), which contains backend main `369fe762`. It implements the C1 contact/provenance interface; #337 still owns full delta/password/history reconciliation, #366 verified receipt-email activation, and #341 operational consent reconciliation. No live customer, migration or provider writes have occurred.
 
 ## Contract
 
@@ -12,17 +12,23 @@ The transaction locks the customer, reconciles the exact customer-ID/unbound-ema
 
 Marketing and order-text senders re-read the owning customer's primary destination before queue processing and again before provider I/O. Historical orders are not redirected; retired destinations and consent predating replacement are held. Already accepted/in-flight provider requests cannot be recalled. Delayed profile upserts evaluate protected phone/consent state against the current SQL row. Native Store profile writes cannot manufacture provenance or bypass the contact endpoint.
 
-## Evidence and stop
+## Standalone deployment and defaults (#372)
 
-Eight isolated PostgreSQL tests passed using installed native customer table SQL and the actual communications table migration. They cover all-or-nothing rollback, competing revisions, replay, source identity conflicts, shared-phone isolation, stale profile updates and recipient retirement. These are contact persistence tests, not a full running Medusa/customer/provider rehearsal. No production credentials are used.
+`GP_PRIMARY_CONTACT_ENABLED=true` enables the new attestation endpoint; unset, false and other values leave it disabled. The default is off. An authenticated request to the disabled endpoint returns 404, allowing the paired frontend's phone-edit fallback and independent session deferral. Native Store phone/profile edits retain current-main behavior for accounts without the new attestation state while off. A legacy write cannot manufacture new primary-contact/confirmation/provenance records; confirmed records stay protected during rollback. The native customer check still fails closed on missing identity or database errors. No production flag was changed.
 
-Initial four-suite unit run: 114 passed, one failed because an older concurrent-profile fixture lacked `whereRaw`. The targeted retry added that query method; both SMS transport suites including new after-claim replacement checks passed, but the same older fixture now expects a literal phone instead of the intentionally guarded SQL expression (`communications.unit.spec.ts`, concurrent first profile insert). Retry limit reached: no further equivalent run this session. Preserve the guard; reconcile the fixture's raw-SQL expectation and realistic readback at a later authorized recovery step. Do not represent this branch as CI-green.
+The flag is needed because the earlier candidate's unconditional native-write guard would reject current storefront main's phone edits. This source change stages the new contract safely; it does not claim the native Admin/staff and concurrent metadata mutation boundary is complete. Keep activation off until those gates below are resolved. The paired frontend never stamps a confirmation or grants SMS permission merely because a fallback succeeded; its checkbox supplies the actual choice, and account deferral is session-scoped.
 
-Initial TypeScript found the newly needed order `customer_id` type and a storefront null/undefined mismatch. Both source corrections are present; final TypeScript has not been rerun. `ORDER_FIELDS` now fetches customer ID so real transactional notices have an owner for the destination guard.
+Receipt-email behavior is inherited from PR37. Changing the primary mobile does not verify a receipt destination, change sign-in identity or rewrite an accepted order. Calendar enforcement inherited from PR34 defaults off; shipping/data and original launch prerequisites still apply. This candidate adds no schema migration, but the inherited migrating stack still requires a fresh protected database backup, recorded recovery target/procedure, previous/candidate SHAs and migration journal before release. Keep accepted contact, receipt, consent and accounting evidence on rollback.
+
+## Evidence and previous stop
+
+The original eight isolated PostgreSQL checks cover all-or-nothing rollback, competing revisions, replay, source identity conflicts, shared-phone isolation, stale profile updates and recipient retirement against native customer SQL and the actual communications schema. The rebased CI retains those checks alongside public-catalog, accounting and receipt suites in one isolated PostgreSQL service; no production database is used.
+
+The earlier run stopped on an old concurrent-profile fixture that expected a literal phone where protected SQL is now intentional. The September 21 review explicitly resumed this integration on a new base. The fixture now asserts the guarded SQL and supplies realistic persisted readback; the protection was not removed. All 121 focused contact/communications/SMS checks and TypeScript pass. Exact-head CI must verify the rebased PR before any source-ready claim. The preserved #345 consumer-form fixture stop and other native/provider gates are not cleared by these checks.
 
 ## Required completion before review/release
 
-- Reconcile the stopped legacy test fixture without weakening protected SQL semantics; finish focused action/route coverage, then obtain authoritative TypeScript and exact-head CI once the recovery is permitted. Preserve the existing PostgreSQL receipt unless changed inputs invalidate it.
+- Obtain exact-head CI for this integrated branch, including native-schema PostgreSQL contact persistence. Focused checks/type validation do not establish production or provider acceptance.
 - Finish the mutation-boundary review: staff/Admin phone updates and concurrent generic customer metadata writes must not leave the UI's phone and primary authority inconsistent or erase a new confirmation. Preserve A2 staff permissions when integrating middleware. An ORM metadata merge is not itself proof against concurrent stale writes.
 - Verify the existing form and profile editor in desktop/mobile browsers, including keyboard, saving/error/conflict recovery and permission states. Eight focused storefront tests pass; browser and deployed behavior remain unproved.
 - Rehearse a controlled legacy delta with source manifest, target-confirmed contact/opt-out preservation, legitimate old confirmations and explicit conflicts. Do not rerun production imports from this document.

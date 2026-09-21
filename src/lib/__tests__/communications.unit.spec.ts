@@ -75,6 +75,9 @@ function concurrentProfileInsertDb(
     }
     chain.update = async (data: Record<string, any>) => {
       updates.push(data)
+      // Return realistic persisted values after the guarded SQL update. The
+      // PostgreSQL suite proves the expression against actual concurrent rows.
+      if (winner) Object.assign(winner, data, { phone: data.phone?.bindings?.[0] ?? data.phone })
       return 1
     }
     return chain
@@ -289,7 +292,7 @@ describe("communications helpers", () => {
       medusa_customer_id: "cus_1",
       email_lower: "shopper@example.com",
       first_name: "Shopper",
-      phone: "4045550100",
+      phone: expect.objectContaining({ sql: expect.stringContaining("primary_contact_v1"), bindings: ["4045550100"] }),
       preference_token: "pref_winner",
     })
     expect(result).toMatchObject({

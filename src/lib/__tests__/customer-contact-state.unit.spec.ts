@@ -1,3 +1,6 @@
+const oldPrimaryContactFlag = process.env.GP_PRIMARY_CONTACT_ENABLED
+beforeEach(() => { process.env.GP_PRIMARY_CONTACT_ENABLED = "true" })
+afterEach(() => { if (oldPrimaryContactFlag === undefined) delete process.env.GP_PRIMARY_CONTACT_ENABLED; else process.env.GP_PRIMARY_CONTACT_ENABLED = oldPrimaryContactFlag })
 import { CONTACT_CONFIRMATION_VERSION, contactRevision, hasContactConfirmation,
   hasMigrationProvenance, normalizePrimaryPhone, permitsPrimaryDestination } from "../customer-contact-state"
 import { parseContactChange } from "../customer-primary-contact"
@@ -45,14 +48,14 @@ it("validates revision/idempotency and scopes supported request fields", () => {
   const p = parseContactChange({ phone: "4045550100", expected_revision: 0, request_id: "synthetic-request-1", customer_id: "other", sms_marketing_opt_in: false })
   expect(p).not.toHaveProperty("customer_id")
 })
-it.each([{ phone: "4045550100" },{ metadata: null },{ metadata: { primary_contact_v1: null } },{ metadata: { legacy_customer_id: "forged" } },{ metadata: { sms_consent: true } }])("blocks native writes bypassing contact authority: %j", (body) => {
+it.each([{ phone: "4045550100" },{ metadata: null },{ metadata: { primary_contact_v1: null } },{ metadata: { legacy_customer_id: "forged" } },{ metadata: { sms_consent: true } }])("blocks native writes bypassing contact authority: %j", async (body) => {
   const res: any = { status: jest.fn().mockReturnThis(), json: jest.fn() }; const next=jest.fn()
-  guardCustomerContactWrite({ body } as any,res,next)
+  await guardCustomerContactWrite({ body } as any,res,next)
   expect(res.status).toHaveBeenCalledWith(409);expect(next).not.toHaveBeenCalled()
 })
-it("permits ordinary name edits and signup consent, but not forged import stamps", () => {
+it("permits ordinary name edits and signup consent, but not forged import stamps", async () => {
   const next=jest.fn(); const res:any={status:jest.fn().mockReturnThis(),json:jest.fn()}
-  guardCustomerContactWrite({body:{first_name:"Synthetic"}} as any,res,next)
+  await guardCustomerContactWrite({body:{first_name:"Synthetic"}} as any,res,next)
   guardCustomerProvenanceCreate({body:{metadata:{sms_consent:true}}} as any,res,next)
   guardCustomerProvenanceCreate({body:{metadata:{contact_verified_at:date}}} as any,res,next)
   expect(next).toHaveBeenCalledTimes(2);expect(res.status).toHaveBeenCalledWith(400)
@@ -61,4 +64,25 @@ it.each([{}, {actor_id:"other", actor_type:"user"}])("refuses unauthenticated/no
   const res:any={status:jest.fn().mockReturnThis(),json:jest.fn()}; const resolve=jest.fn()
   await POST({auth_context:actor,scope:{resolve}} as any,res)
   expect(res.status).toHaveBeenCalledWith(401);expect(resolve).not.toHaveBeenCalled()
+})
+
+it("default-off contact endpoint is a 404 compatibility response without a mutation", async () => {
+  delete process.env.GP_PRIMARY_CONTACT_ENABLED
+  const res:any={status:jest.fn().mockReturnThis(),json:jest.fn()}, resolve=jest.fn()
+  await POST({auth_context:{actor_id:"cus_fixture",actor_type:"customer"},scope:{resolve}} as any,res)
+  expect(res.status).toHaveBeenCalledWith(404); expect(resolve).not.toHaveBeenCalled()
+})
+it.each([false,true])("default-off native phone edits preserve confirmed contact protection: %s", async confirmed => {
+  delete process.env.GP_PRIMARY_CONTACT_ENABLED
+  const query:any={};for(const m of ["select","where","whereNull"])query[m]=()=>query
+  query.first=async()=>({metadata:confirmed?{primary_contact_v1:primary}:{}})
+  const res:any={status:jest.fn().mockReturnThis(),json:jest.fn()},next=jest.fn()
+  await guardCustomerContactWrite({body:{phone:"4045550100"},auth_context:{actor_id:"cus_fixture",actor_type:"customer"},scope:{resolve:()=>()=>query}} as any,res,next)
+  if(confirmed){expect(res.status).toHaveBeenCalledWith(409);expect(next).not.toHaveBeenCalled()}else expect(next).toHaveBeenCalledTimes(1)
+})
+it("off-mode legacy writes cannot forge new attestation metadata", async () => {
+  delete process.env.GP_PRIMARY_CONTACT_ENABLED
+  const res:any={status:jest.fn().mockReturnThis(),json:jest.fn()},next=jest.fn()
+  await guardCustomerContactWrite({body:{metadata:{primary_contact_v1:primary}}} as any,res,next)
+  expect(res.status).toHaveBeenCalledWith(409);expect(next).not.toHaveBeenCalled()
 })
