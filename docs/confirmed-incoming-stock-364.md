@@ -48,3 +48,9 @@ This candidate intentionally has no `received`/`applied` state or completion end
 Run `npm run test:incoming-stock` with a dedicated `INCOMING_TEST_DATABASE_URL`, or `INCOMING_TEST_PG_SOCKET` on port 55464 / user `gp_incoming_test` / database `gp_incoming`. Tests execute the actual migration in a disposable schema; never use application `DATABASE_URL`. CI runs this gate on PostgreSQL 16 alongside existing unit, TypeScript and accounting gates.
 
 These tests prove ledger transactions, locking, replay and rollback. They do not reproduce the native Medusa stock module, HTTP checkout, Stripe, QBD, a published calendar, real staff browser operation or customer messages. All original #364 acceptance, dependency closures, staff screen, receiving adapter and production rehearsal remain open. #359 supplies owner/unit/usable-time decisions; #312, #318, #362 supply required source/runtime interfaces. No existing fixture stop condition is lifted by this independent test suite.
+
+## Migration recovery and release backup (#372)
+
+Before merging a change that runs this migration, the release operator must record a fresh database backup, its restore target/procedure and the exact candidate SHA. No backup is claimed by source tests. `Migration20260920150000` can resume after a completed DDL statement and can be reapplied with existing batches, commitments, receipts and event history. Existing tables/indexes and their data are retained; a divergent schema must be investigated, not dropped or replaced. Rollback still preserves this ledger and uses the reviewed recovery procedure.
+
+The `migration-replay.spec.ts` PostgreSQL tests exercise partial creation, populated replay and retained uniqueness/quantity guards. They do not prove a Railway backup, live migration or native stock rehearsal.
