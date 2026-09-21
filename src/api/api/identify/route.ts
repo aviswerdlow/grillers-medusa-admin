@@ -1,3 +1,8 @@
+import {
+  classifyMeasurement,
+  measurementKeyConfigured,
+} from "../_shared/measurement-ingress"
+import { setCorsHeaders } from "../_shared/cors"
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import {
@@ -15,7 +20,8 @@ import {
 function headerMap(req: MedusaRequest): Record<string, string> {
   const headers = req.headers as any
   return {
-    authorization: headers.authorization || headers.get?.("authorization") || "",
+    authorization:
+      headers.authorization || headers.get?.("authorization") || "",
     "x-api-key": headers["x-api-key"] || headers.get?.("x-api-key") || "",
   }
 }
@@ -36,20 +42,42 @@ function publicIdentifyMetadata(traits: Record<string, any>) {
   )
 }
 
+export async function OPTIONS(req: MedusaRequest, res: MedusaResponse) {
+  if (!setCorsHeaders(req, res)) {
+    res.status(403).send("")
+    return
+  }
+  res.status(204).send("")
+}
+
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
-  if (!verifyServiceApiKey(headerMap(req))) {
+  if (!setCorsHeaders(req, res)) {
+    res.status(403).json({ ok: false, error: "origin_not_allowed" })
+    return
+  }
+  if (!measurementKeyConfigured() || !verifyServiceApiKey(headerMap(req))) {
     res.status(401).json({ ok: false, error: "unauthorized" })
     return
   }
 
   const body = (req.body || {}) as Record<string, any>
+  const decision = classifyMeasurement(body, "identify")
+  if (decision.status === "ignored") {
+    res.status(202).json({ ok: true, accepted: 0, ignored: decision.reason })
+    return
+  }
+  if (decision.status === "rejected") {
+    res.status(decision.httpStatus).json({ ok: false, error: decision.reason })
+    return
+  }
+  const event = decision.event
   const traits = body.traits || body.properties || {}
   const logger = communicationsApiLogger(req)
 
   try {
     const db = req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION)
     const profile = await upsertCustomerProfile(db, {
-      email: traits.email || body.email,
+      email: event.email || undefined,
       // The identify key is intentionally public for storefront analytics,
       // so this endpoint is never authoritative evidence of written SMS
       // consent. Customer-created/updated subscribers read the authenticated
@@ -59,22 +87,21 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
     if (profile) {
       await recordIdentity(db, profile.id, {
-        anonymous_id: body.anonymous_id,
-        session_id: body.session_id,
-        cart_id: body.cart_id,
-        email: traits.email || body.email,
+        anonymous_id: event.anonymous_id,
+        session_id: event.session_id,
+        cart_id: event.cart_id,
+        email: event.email || undefined,
       })
     }
 
     await recordCommunicationEvent(db, {
-      event_name: "identify",
-      source: "storefront",
+      ...event,
       profile_id: profile?.id,
-      anonymous_id: body.anonymous_id,
-      session_id: body.session_id,
-      cart_id: body.cart_id,
-      email: traits.email || body.email,
-      properties: publicIdentifyMetadata(traits),
+      anonymous_id: event.anonymous_id,
+      session_id: event.session_id,
+      cart_id: event.cart_id,
+      email: event.email || undefined,
+      properties: { ...publicIdentifyMetadata(traits), ...event.properties },
     })
 
     res.status(202).json({ ok: true, profile_id: profile?.id || null })
@@ -83,7 +110,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       operation: "identify",
       path: "src/api/api/identify/route.ts",
       eventName: "identify",
-      hasEmail: Boolean(traits.email || body.email),
+      hasEmail: Boolean(event.email),
       error,
       logger,
     })
