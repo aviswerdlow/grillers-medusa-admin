@@ -1,5 +1,9 @@
 # Original order publication — launch candidate
 
+Migration retry and per-release backup requirements are documented in
+[launch migration recovery](launch-migration-recovery-372.md). No live migration,
+backup, publisher activation or rollback is implied by the source checks.
+
 This replaces the final-charge purchase producers in analytics and communications. It is a source candidate for strategy #336/#335/#368, not deployment or warehouse/GA4 acceptance. Required base: backend PR42 `9045e8b437a097964cc3f110e0926d3609cf7a2f` and its original-evidence, checkout, contact, stock, calendar, shipping and final-charge dependencies. Do not merge directly around that stack.
 
 ## Event contract

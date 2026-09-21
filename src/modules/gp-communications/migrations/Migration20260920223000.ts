@@ -1,13 +1,18 @@
 import { Migration } from "@mikro-orm/migrations";
+import { publicationCheckSql } from "../../../lib/order-publication-migration";
 
 export class Migration20260920223000 extends Migration {
   async up(): Promise<void> {
     this.addSql(`
-      alter table gp_order_publication_delivery
-        drop constraint gp_order_publication_delivery_target_check;
-      alter table gp_order_publication_delivery add constraint gp_order_publication_delivery_target_check
-        check (target in ('jitsu','gp_analytics','communications','communications_automation','jitsu_rehearsal','gp_analytics_rehearsal'));
-      create table gp_order_publication_route (
+      ${publicationCheckSql("target", [
+        "jitsu",
+        "gp_analytics",
+        "communications",
+        "communications_automation",
+        "jitsu_rehearsal",
+        "gp_analytics_rehearsal",
+      ])}
+      create table if not exists gp_order_publication_route (
         target text primary key check (target in ('jitsu_rehearsal','gp_analytics_rehearsal')),
         route_hash text not null,
         created_at timestamptz not null default now()
