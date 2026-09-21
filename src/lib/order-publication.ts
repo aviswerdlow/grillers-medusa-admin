@@ -89,15 +89,29 @@ export async function requestOrderPublication(
     !Object.prototype.hasOwnProperty.call(PUBLICATION_EVENTS, kind)
   )
     throw new Error("publication_identity_invalid");
-  await db("gp_order_publication")
+  const eventId = publicationIdentity(kind, orderId, sourceId);
+  const inserted = await db("gp_order_publication")
     .insert({
-      event_id: publicationIdentity(kind, orderId, sourceId),
+      event_id: eventId,
       kind,
       order_id: orderId,
       source_id: sourceId || null,
     })
-    .onConflict("event_id")
-    .ignore();
+    // Concurrent workers can collide through either the primary key or the
+    // original/lifecycle unique index. Arbitrate all of them without updating
+    // an existing immutable record, then verify the canonical identity.
+    .onConflict()
+    .ignore()
+    .returning("event_id");
+  if (!inserted.length) {
+    const saved = await db("gp_order_publication")
+      .where({ event_id: eventId, kind, order_id: orderId })
+      .first("source_id");
+    const sourceMismatch = saved && (kind === "finalized"
+      ? saved.source_id && sourceId && saved.source_id !== sourceId
+      : kind !== "placed" && saved.source_id !== sourceId);
+    if (!saved || sourceMismatch) throw new Error("publication_identity_conflict");
+  }
 }
 
 /** Never infer a cutover or replay an older final-charge purchase into the new basis. */

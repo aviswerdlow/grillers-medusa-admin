@@ -75,8 +75,8 @@ jest.mock("../../src/lib/communications/hebrew-calendar", () => {
 const knex = require("knex"),
   schema = `gp_publication_${randomUUID().replace(/-/g, "")}`;
 let db: any, admin: any;
-const starts = new Date("2026-09-20T00:00:00Z"),
-  now = new Date(Date.now() + 60_000);
+const starts = new Date("2026-09-20T00:00:00Z");
+let now: Date;
 const later = (seconds = 3600) => new Date(now.getTime() + seconds * 1000);
 beforeAll(async () => {
   const explicit = process.env.ORDER_PUBLICATION_TEST_DATABASE_URL;
@@ -147,6 +147,9 @@ afterAll(async () => {
   }
 });
 beforeEach(async () => {
+  // Each case has its own observation time. A slow suite must not make rows
+  // created by PostgreSQL's now() newer than a file-load-time fixture clock.
+  now = new Date(Date.now() + 60_000);
   const tables = (
     await db.raw("select tablename from pg_tables where schemaname = ?", [
       schema,
@@ -546,6 +549,39 @@ it("failed or legacy native completion never becomes a purchase from current tot
   await materializeOrderPublications(db, starts, later());
   expect((await db("gp_order_publication").first()).state).toBe("waiting");
   expect(await db("gp_order_publication_delivery")).toHaveLength(0);
+});
+it("coalesces concurrent publication intents across every unique index without rewriting evidence", async () => {
+  await Promise.all(Array.from({ length: 16 }, () => Promise.all([
+    requestOrderPublication(db, "placed", "concurrent"),
+    requestOrderPublication(db, "finalized", "concurrent", "final_concurrent"),
+    requestOrderPublication(db, "shipped", "concurrent", "ful_concurrent"),
+  ])));
+  const before = await db("gp_order_publication").orderBy("event_id");
+  expect(before).toHaveLength(3);
+  expect(before.map((row: any) => row.event_id).sort()).toEqual([
+    publicationIdentity("placed", "concurrent"),
+    publicationIdentity("finalized", "concurrent"),
+    publicationIdentity("shipped", "concurrent", "ful_concurrent"),
+  ].sort());
+  await Promise.all(Array.from({ length: 16 }, () => requestOrderPublication(db, "placed", "concurrent")));
+  expect(await db("gp_order_publication").orderBy("event_id")).toEqual(before);
+});
+it.each(["alternate_event", "wrong_order"])("refuses a conflicting publication identity %s instead of silently skipping it", async (conflict) => {
+  await db("gp_order_publication").insert({
+    event_id: conflict === "alternate_event" ? "alternate" : publicationIdentity("placed", "identity"),
+    order_id: conflict === "wrong_order" ? "different_order" : "identity", kind: "placed",
+  });
+  const before = await db("gp_order_publication").first();
+  await expect(requestOrderPublication(db, "placed", "identity")).rejects.toThrow("publication_identity_conflict");
+  expect(await db("gp_order_publication")).toEqual([before]);
+});
+it("refuses conflicting finalization sources while retaining an originally source-less intent", async () => {
+  await requestOrderPublication(db, "finalized", "known", "final_one");
+  await expect(requestOrderPublication(db, "finalized", "known", "final_two")).rejects.toThrow("publication_identity_conflict");
+  await requestOrderPublication(db, "finalized", "early");
+  await requestOrderPublication(db, "finalized", "early", "final_early");
+  expect((await db("gp_order_publication").where({ order_id: "early" }).first()).source_id).toBeNull();
+  expect((await db("gp_order_publication").where({ order_id: "known" }).first()).source_id).toBe("final_one");
 });
 it("reconciles missed events and concurrent workers with one original and fixed zero", async () => {
   const x = await bound("zero", 0);

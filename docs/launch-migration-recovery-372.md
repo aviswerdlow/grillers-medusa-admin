@@ -60,3 +60,9 @@ schemas, with populated rows and deliberate missing-object fixtures. They are
 source/recovery tests, not evidence of live backup custody, deployment, external
 provider delivery or full launch acceptance. Existing integration gates cover
 the unchanged business behavior as part of each candidate's exact-SHA CI.
+
+## Concurrent publication correction found during CI
+
+One automatically triggered run at `9bc9f8f` passed all gates; another failed three existing publication tests. The migration-replay suite passed in both. The failed concurrency case hit the original-order unique index while the insert handled only the event-ID conflict. Publication requests now arbitrate all applicable unique constraints without updating stored evidence, then verify the canonical event/order/kind and applicable source identity after a skipped insert. An inconsistent existing identity still fails loudly. This follows PostgreSQL's documented [conflict-target behavior](https://www.postgresql.org/docs/16/sql-insert.html#SQL-ON-CONFLICT).
+
+Two later assertions used a clock initialized once when the test file loaded; the slower run exceeded that clock's one-minute offset, so newly inserted rows were not yet due in the fixture. The observation time now resets before each case. Production timing and assertions were not relaxed. Four new database cases cover concurrent inserts, conflicting event/order identities and finalization-source conflicts. The three original failing cases are included in the focused recheck. Retain the failed-run receipt alongside the corrected revision's evidence; a passing duplicate did not erase that counterexample.
