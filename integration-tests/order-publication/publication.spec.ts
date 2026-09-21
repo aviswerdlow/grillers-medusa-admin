@@ -4,6 +4,9 @@ import { projectNativeCartActivity, expireInactiveCarts, cartRecoveryAllowed, sy
 import { recordCommunicationEvent } from "../../src/lib/communications/core";
 import { runDueFlowEnrollments } from "../../src/lib/communications/flows";
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils";
+import { reconcileOperationalMeasurements } from "../../src/lib/order-operational-measurement";
+import { Migration20260921033000 } from "../../src/modules/gp-communications/migrations/Migration20260921033000";
+import { Migration20260525170000 } from "../../src/modules/gp-inventory-allocation/migrations/Migration20260525170000";
 import { captureCustomerMeasurement } from "../../src/lib/analytics/customer-measurement-context";
 import { randomUUID } from "node:crypto";
 import { Migration20260921001500 } from "../../src/modules/gp-communications/migrations/Migration20260921001500";
@@ -43,6 +46,7 @@ import {
   publicationIdentity,
   reconcileOrderPublications,
   requestOrderPublication,
+  hasProductionPublicationBacklog,
   settlePublicationDelivery,
 } from "../../src/lib/order-publication";
 import { deliverPublicationToCommunications } from "../../src/lib/order-publication-communications";
@@ -116,6 +120,8 @@ beforeAll(async () => {
     Migration20260920223000,
     Migration20260920235000,
     Migration20260921001500,
+    Migration20260921033000,
+    Migration20260525170000,
   ]) {
     const sql: string[] = [];
     await migration.prototype.up.call({
@@ -141,7 +147,7 @@ beforeEach(async () => {
     `truncate ${tables.map((r: any) => `"${r.tablename}"`).join(", ")} cascade`
   );
 });
-async function prepared(suffix = "1", total = 91.25, attribution: any = {}) {
+async function prepared(suffix = "1", total = 91.25, attribution: any = {}, edit?: (p: any) => void) {
   const cart = `cart_${suffix}`,
     order = `order_${suffix}`;
   const promise = promiseFixture(cart, "cus_publication");
@@ -154,6 +160,7 @@ async function prepared(suffix = "1", total = 91.25, attribution: any = {}) {
     experiment_assignments: [],
     ...attribution,
   };
+  edit?.(promise);
   await db("cart").insert({
     id: cart,
     customer_id: promise.customer_id,
@@ -1655,5 +1662,114 @@ describe("native cart source and recovery", () => {
     } finally {
       blackout.mockImplementation(jest.requireActual("../../src/lib/communications/hebrew-calendar").isInSendBlackout);
     }
+  });
+});
+
+describe("original shipping and allocation measurement", () => {
+  const scan = (limit = 100) => reconcileOperationalMeasurements(db, starts,
+    (kind, order, source) => requestOrderPublication(db, kind, order, source), limit);
+  async function allocation(order: string, id = "allocation_one") {
+    await db("gp_inventory_allocation").insert({ id, order_id: order, product_id: "product_fixture",
+      variant_id: "variant_fixture", quantity: 0, status: "released", customer_email: "private@example.test" });
+    return id;
+  }
+  async function audit(id: string, allocationId: string, event = "created", quantity: number | null = 3) {
+    await db("gp_inventory_allocation_audit").insert({ id, allocation_id: allocationId, event_type: event,
+      previous_status: event === "created" ? null : "reserved", next_status: event === "created" ? "reserved" : "released",
+      previous_quantity: event === "created" ? null : quantity, next_quantity: quantity,
+      actor_email: "private@example.test", note: "private note", created_at: new Date(promiseNow.getTime() + 1000) });
+  }
+  it("keeps shipping intent before binding and original price/time after mutable order changes", async () => {
+    const x = await prepared("shipping_early");
+    await requestOrderPublication(db, "shipping_forecast", x.order, x.order);
+    expect((await materializeOrderPublications(db, starts, now)).waiting).toBe(1);
+    await x.bind();
+    await db("order").where({ id: x.order }).update({ total: 777, metadata: { shipping_total: 888 } });
+    expect((await materializeOrderPublications(db, starts, later(61))).ready).toBe(1);
+    const row = await db("gp_order_publication").where({ kind: "shipping_forecast" }).first();
+    expect(row.properties).toMatchObject({ accepted_customer_shipping: 25, charged_shipping: null,
+      analytics_consent: true, test_order: false, event_timestamp_ms: promiseNow.getTime() });
+    expect(row.properties).not.toHaveProperty("value");
+    expect(JSON.stringify(row.properties)).not.toMatch(/private|example.invalid|Fixture Road|8000-FIXTURE/);
+    expect((await db("gp_order_publication_delivery")).map((r: any) => r.target).sort()).toEqual(["gp_analytics", "jitsu"]);
+    await expect(db("gp_order_publication").where({ event_id: row.event_id }).update({ properties: {} })).rejects.toThrow("immutable");
+  });
+  it("excludes pickup intent without creating carrier measurement receipts", async () => {
+    const x = await prepared("pickup", 91.25, {}, p => { p.fulfillment.mode = "plant_pickup"; }); await x.bind();
+    await scan(); await materializeOrderPublications(db, starts, now);
+    expect((await db("gp_order_publication").first()).state).toBe("excluded");
+    expect(await db("gp_order_publication_delivery")).toHaveLength(0);
+  });
+  it("discovers audit evidence after binding without reading today's changed allocation quantity", async () => {
+    const x = await prepared("audit_early"), id = await allocation(x.order);
+    await audit("audit_original", id);
+    expect(await scan()).toEqual({ shipping: 0, inventory: 0 });
+    await x.bind(); expect(await scan()).toEqual({ shipping: 1, inventory: 1 });
+    await materializeOrderPublications(db, starts, now);
+    const row = await db("gp_order_publication").where({ kind: "inventory_created" }).first();
+    expect(row.properties).toMatchObject({ next_quantity: 3, next_status: "reserved", created_count: 1,
+      allocation_audit_id: "audit_original", count_basis: "individual_audit_transition", retry_skip_count: null });
+    expect(row.properties).not.toHaveProperty("value");
+    expect(JSON.stringify(row.properties)).not.toMatch(/private|customer_email|actor_email|qbd_list_id/);
+    expect(await scan()).toEqual({ shipping: 0, inventory: 0 });
+    expect(await db("gp_customer_profile")).toHaveLength(0);
+  });
+  it("keeps equal release transitions distinct by audit identity", async () => {
+    const x = await bound("two_releases"), id = await allocation(x.order);
+    await audit("release_a", id, "released"); await audit("release_b", id, "released");
+    await scan(); await materializeOrderPublications(db, starts, now);
+    const rows = await db("gp_order_publication").where({ kind: "inventory_released" });
+    expect(rows).toHaveLength(2); expect(new Set(rows.map((r: any) => r.event_id)).size).toBe(2);
+    expect(rows.every((r: any) => r.properties.released_count === 1 && r.properties.previous_quantity === 3)).toBe(true);
+  });
+  it("holds malformed audit evidence rather than inventing quantities from the allocation row", async () => {
+    const x = await bound("bad_audit"), id = await allocation(x.order);
+    await audit("bad_quantity", id, "created", null); await scan();
+    expect((await materializeOrderPublications(db, starts, now)).waiting).toBe(1);
+    const row = await db("gp_order_publication").where({ kind: "inventory_created" }).first();
+    expect(row).toMatchObject({ state: "waiting", reason: "original_or_operational_evidence_unavailable", properties: null });
+  });
+  it("does not fabricate a transition when a stock write has no audit", async () => {
+    const x = await bound("no_audit"); await allocation(x.order); await scan();
+    expect(await db("gp_order_publication").where("kind", "like", "inventory_%")).toHaveLength(0);
+  });
+  it("recovers only the missing transport using saved original operational properties", async () => {
+    await bound("transport"); await scan(); await materializeOrderPublications(db, starts, now);
+    const seen: any[] = [], send = jest.fn(async (claim: any) => {
+      seen.push(claim); if (claim.target === "gp_analytics") throw new Error("fixture outage");
+      return { status: "accepted" } as const;
+    });
+    await deliverOrderPublications(db, send, now);
+    expect(seen.map(c => c.target).sort()).toEqual(["gp_analytics", "jitsu"]);
+    const original = seen.find(c => c.target === "gp_analytics");
+    send.mockImplementation(async claim => { seen.push(claim); return { status: "accepted" }; });
+    await deliverOrderPublications(db, send, later(61));
+    expect(seen.filter(c => c.target === "jitsu")).toHaveLength(1);
+    expect(seen[2].properties).toEqual(original.properties);
+  });
+  it("preserves test and declined measurement classification with no communications targets", async () => {
+    await bound("test_operation", 91.25, { test_order: true, analytics_consent: false });
+    await scan(); await materializeOrderPublications(db, starts, now);
+    const send = jest.fn(async () => ({ status: "accepted" } as const));
+    await deliverOrderPublications(db, send, now);
+    expect(send).not.toHaveBeenCalled();
+    expect((await db("gp_order_publication_delivery")).every((r: any) => !r.target.startsWith("communications"))).toBe(true);
+    expect(await db("gp_communication_event")).toHaveLength(0);
+  });
+  it("advances bounded discovery past already recorded and malformed sources", async () => {
+    const x = await bound("bounded"), id = await allocation(x.order);
+    await audit("audit_a", id, "created", null); await audit("audit_b", id);
+    expect((await scan(1)).inventory).toBe(1);
+    expect((await scan(1)).inventory).toBe(1);
+    expect((await scan(1)).inventory).toBe(0);
+    expect(await db("gp_order_publication").where({ kind: "inventory_created" })).toHaveLength(2);
+  });
+  it("distinguishes a held test destination from a known production delivery backlog", async () => {
+    await bound("test_backlog", 91.25, { test_order: true }); await scan();
+    await materializeOrderPublications(db, starts, now);
+    await deliverOrderPublications(db, async () => ({ status: "held", reason: "fixture target unavailable" }), now);
+    expect(await hasProductionPublicationBacklog(db)).toBe(false);
+    await bound("live_backlog"); await scan(); await materializeOrderPublications(db, starts, now);
+    expect(await hasProductionPublicationBacklog(db)).toBe(true);
   });
 });

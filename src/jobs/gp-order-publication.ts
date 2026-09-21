@@ -8,7 +8,10 @@ import {
   reconcileOrderPublications,
   PUBLICATION_EVENTS,
   type PublicationKind,
+  requestOrderPublication,
+  hasProductionPublicationBacklog,
 } from "../lib/order-publication";
+import { reconcileOperationalMeasurements } from "../lib/order-operational-measurement";
 import { deliverPublicationToCommunications } from "../lib/order-publication-communications";
 import { emitOpsAlert } from "../lib/ops-alert";
 import { pinRehearsalRoute } from "../lib/order-publication-rehearsal";
@@ -23,6 +26,8 @@ export default async function gpOrderPublication(container: MedusaContainer) {
       process.env.GP_ORDER_PUBLICATION_START_AT
     );
     await reconcileOrderPublications(db, starts);
+    await reconcileOperationalMeasurements(db, starts,
+      (kind, orderId, sourceId) => requestOrderPublication(db, kind, orderId, sourceId));
     const evidence = await materializeOrderPublications(db, starts);
     const analytics = new GpAnalyticsProviderService(
       { logger },
@@ -79,7 +84,9 @@ export default async function gpOrderPublication(container: MedusaContainer) {
     const summary = { ...evidence, ...delivery };
     if (Object.values(summary).some(Boolean))
       logger.info(`[order-publication] ${JSON.stringify(summary)}`);
-    if (summary.waiting || summary.held || summary.retry)
+    if ((summary.waiting || summary.held || summary.retry) &&
+        (process.env.STRIPE_API_KEY || "").startsWith("sk_live_") &&
+        await hasProductionPublicationBacklog(db))
       await emitOpsAlert({
         alertKind: "order_publication_pending",
         severity: "warn",
@@ -93,7 +100,7 @@ export default async function gpOrderPublication(container: MedusaContainer) {
     logger.error(
       "Order publication worker unavailable; durable intents and receipts retained"
     );
-    await emitOpsAlert({
+    if ((process.env.STRIPE_API_KEY || "").startsWith("sk_live_")) await emitOpsAlert({
       alertKind: "order_publication_worker_failed",
       severity: "warn",
       title: "Order publication worker unavailable",

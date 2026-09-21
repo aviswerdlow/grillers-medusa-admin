@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { claimRefundMeasurement } from "./refund-provider-publication";
+import { OPERATIONAL_MEASUREMENT_EVENTS, isOperationalMeasurement, readOperationalMeasurement } from "./order-operational-measurement";
 import {
   orderPromiseAnalytics,
   readOriginalOrderPromise,
@@ -14,6 +15,7 @@ export const PUBLICATION_EVENTS = {
   placed: "order_completed",
   finalized: "order_finalized",
   ...LIFECYCLE_EVENTS,
+  ...OPERATIONAL_MEASUREMENT_EVENTS,
 } as const;
 export type PublicationKind = keyof typeof PUBLICATION_EVENTS;
 export type PublicationTarget =
@@ -67,6 +69,11 @@ export function publicationIdentity(
     return `order.final_charge_succeeded:${orderId}:order_finalized`;
   if (!sourceId || !/^[a-zA-Z0-9_-]{1,200}$/.test(sourceId))
     throw new Error("publication_source_invalid");
+  if (kind === "shipping_forecast") {
+    if (sourceId !== orderId) throw new Error("publication_source_invalid");
+    return `order.placed:${orderId}:shipping_forecast`;
+  }
+  if (isOperationalMeasurement(kind)) return `order.measurement:${kind}:${orderId}:${sourceId}`;
   return `order.lifecycle:${kind}:${orderId}:${sourceId}`;
 }
 
@@ -286,6 +293,19 @@ export async function materializeOrderPublications(
               payment_evidence: "recorded_successful_final_charge",
               finalization_id: f.id,
             });
+          } else if (isOperationalMeasurement(intent.kind)) {
+            const fact = await readOperationalMeasurement(read, intent, original);
+            if (!fact) {
+              await read("gp_order_publication").where({ event_id: intent.event_id })
+                .update({ state: "excluded", reason: "not_carrier_shipping", ready_at: now });
+              return "excluded";
+            }
+            at = iso(fact.at);
+            if (new Date(at) > now || new Date(at) < new Date(properties.placed_at))
+              throw new Error("operational_measurement_time_invalid");
+            for (const field of ["value", "total", "estimated_value", "tax", "shipping", "discount", "items", "item_count"])
+              delete properties[field];
+            Object.assign(properties, fact.properties);
           } else if (
             Object.prototype.hasOwnProperty.call(LIFECYCLE_EVENTS, intent.kind)
           ) {
@@ -350,7 +370,7 @@ export async function materializeOrderPublications(
           await read("gp_order_publication_delivery")
             .insert(
               [
-                ...PUBLICATION_TARGETS,
+                ...(isOperationalMeasurement(intent.kind) ? ["jitsu", "gp_analytics"] : PUBLICATION_TARGETS),
                 ...(properties.test_order === true
                   ? ["jitsu_rehearsal", "gp_analytics_rehearsal"]
                   : []),
@@ -369,7 +389,7 @@ export async function materializeOrderPublications(
           .where({ event_id: intent.event_id })
           .update({
             attempts: intent.attempts + 1,
-            reason: Object.prototype.hasOwnProperty.call(
+            reason: isOperationalMeasurement(intent.kind) ? "original_or_operational_evidence_unavailable" : Object.prototype.hasOwnProperty.call(
               LIFECYCLE_EVENTS,
               intent.kind
             )
@@ -453,6 +473,17 @@ export async function claimPublicationDelivery(db: any, now = new Date()) {
       lease_token: token,
     };
   });
+}
+
+/** Pending test or unclassified facts must not page the production destination. */
+export async function hasProductionPublicationBacklog(db: any) {
+  return Boolean(await db("gp_order_publication as p")
+    .join("gp_order_publication_delivery as d", "d.event_id", "p.event_id")
+    .where("p.state", "ready")
+    .whereRaw("p.properties -> 'test_order' = 'false'::jsonb")
+    .whereIn("d.status", ["pending", "held", "retry"])
+    .whereIn("d.target", ["jitsu", "gp_analytics", "communications", "communications_automation"])
+    .select("p.event_id").first());
 }
 
 export async function settlePublicationDelivery(

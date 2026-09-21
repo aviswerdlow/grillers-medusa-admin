@@ -654,7 +654,7 @@ class GpAnalyticsProviderService extends AbstractAnalyticsProviderService {
 
   async track(data: ProviderTrackAnalyticsEventDTO): Promise<void> {
     // Customer facts belong to the immutable native capture/recovery path.
-    if (["customer_created", "customer_updated", "cart_updated", "checkout_completed", "gp_cart_created", "gp_cart_expired"].includes(data.event)) return
+    if (["customer_created", "customer_updated", "cart_updated", "checkout_completed", "gp_cart_created", "gp_cart_expired", "shipping_forecast", "inventory_allocation_created", "inventory_allocation_released"].includes(data.event)) return
     // Fail-soft: analytics is a side-channel and must NEVER throw back into a
     // subscriber (a throw here surfaces as "Failed to track <event>" and, worse,
     // the Jitsu sink and the GP dual-run share this method — one synchronous
