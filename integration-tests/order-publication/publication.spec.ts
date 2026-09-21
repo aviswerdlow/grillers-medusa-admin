@@ -54,6 +54,12 @@ jest.mock("../../src/lib/communications/destinations", () => ({
 jest.mock("../../src/lib/communications/queue", () => ({
   enqueueCommunicationEvent: jest.fn().mockResolvedValue(true),
 }));
+// Preserve the real calendar except when a case deliberately reaches the next
+// guard. SWC exposes read-only exports, so a direct spy cannot replace them.
+jest.mock("../../src/lib/communications/hebrew-calendar", () => {
+  const actual = jest.requireActual("../../src/lib/communications/hebrew-calendar");
+  return { ...actual, isInSendBlackout: jest.fn(actual.isInSendBlackout) };
+});
 const knex = require("knex"),
   schema = `gp_publication_${randomUUID().replace(/-/g, "")}`;
 let db: any, admin: any;
@@ -1636,7 +1642,8 @@ describe("native cart source and recovery", () => {
     await db("gp_customer_profile").where({ id: "profile_cart" }).update({ preferences: { cart_recovery: false } });
     const runner = await enrolledRecovery(expired);
     const calendar = require("../../src/lib/communications/hebrew-calendar");
-    const blackout = jest.spyOn(calendar, "isInSendBlackout").mockReturnValue({ blocked: false });
+    const blackout = calendar.isInSendBlackout as jest.Mock;
+    blackout.mockReturnValue({ blocked: false });
     try {
       const result = await runDueFlowEnrollments(runner.container);
       expect(result).toMatchObject({ sent: 0, errors: 0 });
@@ -1645,6 +1652,8 @@ describe("native cart source and recovery", () => {
       expect(suppressed.context.cart_source_event_id).toBe(expired.event_id);
       expect(await db("gp_communication_event").where({ event_name: "gp_abandon_email_sent" })).toHaveLength(0);
       expect(runner.notify).not.toHaveBeenCalled();
-    } finally { blackout.mockRestore(); }
+    } finally {
+      blackout.mockImplementation(jest.requireActual("../../src/lib/communications/hebrew-calendar").isInSendBlackout);
+    }
   });
 });

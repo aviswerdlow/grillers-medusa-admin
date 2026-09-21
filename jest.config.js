@@ -42,4 +42,7 @@ if (process.env.TEST_TYPE === "integration:order-promise") {
 
 if (process.env.TEST_TYPE === "integration:order-publication") {
   module.exports.testMatch = ["**/integration-tests/order-publication/*.spec.[jt]s"];
+  // Source imports name the emitted Node16 .js files; SWC executes their .ts
+  // counterparts in this real-database harness without replacing the modules.
+  module.exports.moduleNameMapper = { "^(\\.{1,2}/.*)\\.js$": "$1" };
 }
