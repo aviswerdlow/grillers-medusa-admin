@@ -24,6 +24,8 @@ import {
   verifyStripeWebhookSignature,
 } from "../lib/stripe-webhook-signature"
 
+import { filterPublicCatalog, guardNewCartItems, guardAddedCartItem, guardUpdatedCartItem, guardCompletedCart, guardCartPaymentSession, guardInventoryVariants, guardInventoryResolution } from "./middlewares/public-catalog"
+
 const MIDDLEWARES_PATH = "src/api/middlewares.ts"
 
 /**
@@ -117,58 +119,6 @@ function emitGuardFailureAlert(input: {
     meta: { error_message: message.slice(0, 300) },
     logger: input.logger,
   })
-}
-
-const INTERNAL_RAW_MATERIAL_SKU = /^RM-/i
-
-function isInternalRawMaterialSku(sku: unknown) {
-  return (
-    typeof sku === "string" && INTERNAL_RAW_MATERIAL_SKU.test(sku.trim())
-  )
-}
-
-async function blockInternalRawMaterialLineItems(
-  req: MedusaRequest,
-  res: MedusaResponse,
-  next: MedusaNextFunction
-) {
-  const body = (req.body || {}) as { variant_id?: string }
-  const variantId = body.variant_id
-
-  if (!variantId) {
-    return next()
-  }
-
-  try {
-    const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
-    const { data } = await query.graph({
-      entity: "product_variant",
-      fields: ["id", "sku"],
-      filters: { id: variantId },
-    })
-    const variant = data?.[0]
-
-    if (isInternalRawMaterialSku(variant?.sku)) {
-      res.status(400).json({
-        type: "invalid_request",
-        message: "This item is not available for online ordering.",
-      })
-      return
-    }
-  } catch (error) {
-    const logger = req.scope.resolve(ContainerRegistrationKeys.LOGGER)
-    const message = error instanceof Error ? error.message : String(error)
-    logger.warn(`[store-cart] RM line guard lookup failed: ${message}`)
-    emitGuardFailureAlert({
-      logger,
-      alertKind: "mw_rm_guard_failed",
-      severity: "warn",
-      title: "middleware: RM line-item guard lookup failed",
-      error,
-    })
-  }
-
-  return next()
 }
 
 export async function blockFulfillmentBeforeFinalCharge(
@@ -670,6 +620,16 @@ export default defineMiddlewares({
   // See ./middlewares/ops-error-handler.ts.
   errorHandler: opsErrorHandler,
   routes: [
+    { matcher: "/store/products", method: ["GET"], middlewares: [filterPublicCatalog] },
+    { matcher: "/store/products/:id", method: ["GET"], middlewares: [filterPublicCatalog] },
+    { matcher: "/store/carts", method: ["POST"], middlewares: [guardNewCartItems] },
+    { matcher: "/store/carts/:id/line-items/:line_id", method: ["POST"], middlewares: [guardUpdatedCartItem] },
+    { matcher: "/store/carts/:id/complete", method: ["POST"], middlewares: [guardCompletedCart] },
+    { matcher: "/store/payment-collections", method: ["POST"], middlewares: [guardCompletedCart] },
+    { matcher: "/store/payment-collections/:id/payment-sessions", method: ["POST"], middlewares: [guardCartPaymentSession] },
+    { matcher: "/store/grillers/checkout/place-order", method: ["POST"], middlewares: [guardCompletedCart] },
+    { matcher: "/store/gp-inventory/availability", method: ["POST"], middlewares: [guardInventoryVariants] },
+    { matcher: "/store/gp-inventory/resolution", method: ["POST"], middlewares: [guardInventoryResolution] },
     {
       matcher: "/store/shipping-options",
       method: ["GET"],
@@ -724,11 +684,10 @@ export default defineMiddlewares({
     {
       matcher: "/store/carts/:id/line-items",
       method: ["POST"],
-      // Heal stale unserviceable methods first (always runs, fail-open), then
-      // the RM line-item guard (which may short-circuit with a 400).
+      // Establish eligibility before any shipping/cart mutation.
       middlewares: [
+        guardAddedCartItem,
         dropUnserviceableShippingMethodsBeforeMutation,
-        blockInternalRawMaterialLineItems,
       ],
     },
     {

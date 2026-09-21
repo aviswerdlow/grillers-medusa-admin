@@ -1,3 +1,4 @@
+import { isInternalCatalogRecord, isInternalCatalogProduct } from "./public-catalog"
 import { randomUUID } from "crypto"
 
 export type AvailabilityLifecycle =
@@ -429,6 +430,9 @@ async function fetchVariants(
     "+inventory_quantity",
     "product.*",
     "product.metadata",
+    "product.variants.id",
+    "product.variants.sku",
+    "product.variants.metadata",
     "inventory_items.*",
     "inventory_items.required_quantity",
     "inventory_items.inventory.*",
@@ -459,6 +463,9 @@ async function fetchVariants(
           "+inventory_quantity",
           "product.*",
           "product.metadata",
+          "product.variants.id",
+          "product.variants.sku",
+          "product.variants.metadata",
         ],
         filters: { id: variantIds },
       })
@@ -576,7 +583,8 @@ export async function checkInventoryAvailability(
       textValue(variant.product_id) ||
       textValue(product.id) ||
       undefined
-    const lifecycle = lifecycleFromMetadata(variantMetadata, productMetadata)
+    const lifecycle = isInternalCatalogRecord(variant) || isInternalCatalogProduct(product)
+      ? "internal_only" : lifecycleFromMetadata(variantMetadata, productMetadata)
     const qbdListId =
       line.qbd_list_id ||
       qbdListIdFromMetadata(line.metadata, variantMetadata, productMetadata)
