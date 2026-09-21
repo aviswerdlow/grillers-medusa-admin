@@ -54,6 +54,8 @@ import { sanitizeOrderSmsConsentMetadata } from "../../../../../lib/communicatio
 
 import { ShippingInputError } from "../../../../../lib/shipping-weights";
 import { FulfillmentCalendarError } from "../../../../../lib/fulfillment-calendar";
+import { STAFF_CART_AUTHORITY } from "../../../../../lib/staff-cart-authority";
+import { staffBoundaryMode } from "../../../../../lib/staff-boundary-rollout";
 
 const PLACE_ORDER_PATH = "store/grillers/checkout/place-order";
 
@@ -107,6 +109,58 @@ type PlaceOrderBody = {
   // #283: "invoice" routes an approved B2B account to the no-card A/R path.
   payment_method?: string;
 };
+
+function cartTargetsCustomer(cart: any, customerId: string): boolean {
+  return ["staff_target_customer_id", "staff_selected_customer_id"].every(
+    (key) => !cart.metadata?.[key] || cart.metadata[key] === customerId
+  );
+}
+
+/** Current storefront carts start under the office JWT and are transferred to
+ * the selected buyer at placement. Only the independently verified payment
+ * context can authorize that compatibility path; metadata never grants it. */
+function isLegacyStaffCheckout(
+  req: MedusaRequest,
+  cart: any,
+  context: Awaited<ReturnType<typeof getPaymentContextCustomer>>,
+  body: PlaceOrderBody
+): boolean {
+  const { customer, staffCustomer, staffTargetCustomerId } = context;
+  return Boolean(
+    customer && staffCustomer &&
+    staffTargetCustomerId === customer.id &&
+    (req as any).auth_context?.actor_id === staffCustomer.id &&
+    staffBoundaryMode() === "log" && !requiresOrderReview(cart, body) &&
+    cart.metadata?.[STAFF_CART_AUTHORITY] == null && !(req as any).gp_staff_cart &&
+    [staffCustomer.id, customer.id].includes(cart.customer_id) &&
+    cartTargetsCustomer(cart, customer.id)
+  );
+}
+
+/** Recheck inside the native cart lock before transferring a legacy cart. A
+ * concurrent owner/target change, signed handoff or accepted review cannot be
+ * overwritten by a request that began in compatibility mode. */
+function checkoutIdentityUpdate(
+  current: any,
+  original: any,
+  customer: any,
+  legacyStaff: boolean,
+  requireReview: boolean,
+  body: PlaceOrderBody
+) {
+  if (
+    current.id !== original.id || current.completed_at ||
+    current.customer_id !== original.customer_id ||
+    (current.metadata?.[STAFF_CART_AUTHORITY] ?? null) !==
+      (original.metadata?.[STAFF_CART_AUTHORITY] ?? null) ||
+    (!requireReview && requiresOrderReview(current, body)) ||
+    (legacyStaff && (staffBoundaryMode() !== "log" ||
+      !cartTargetsCustomer(current, customer.id)))
+  ) throw new OrderPromiseError("order_review_changed_refresh_required");
+  return legacyStaff
+    ? { customer_id: customer.id, email: customer.email || current.email }
+    : {};
+}
 
 type CheckoutCartLine = {
   id?: string | null;
@@ -502,6 +556,8 @@ async function placeInvoiceOrder(
     staffTargetCustomerId?: string | null;
     paymentTerms: string;
     requireReview: boolean;
+    ownedCart: any;
+    legacyStaff: boolean;
   }
 ) {
   const {
@@ -510,6 +566,8 @@ async function placeInvoiceOrder(
     staffTargetCustomerId,
     paymentTerms,
     requireReview,
+    ownedCart,
+    legacyStaff,
   } = ctx;
   const cartModule = req.scope.resolve(Modules.CART);
   const orderModule = req.scope.resolve(Modules.ORDER);
@@ -613,8 +671,9 @@ async function placeInvoiceOrder(
     const current = await cartModule.retrieveCart(cartId, {
       select: ["id", "customer_id", "email", "metadata", "completed_at"],
     });
-    if (current.completed_at || current.customer_id !== customer.id)
-      throw new OrderPromiseError("order_review_changed_refresh_required");
+    const identity = checkoutIdentityUpdate(
+      current, ownedCart, customer, legacyStaff, requireReview, req.body as PlaceOrderBody
+    );
     const preserved = Object.fromEntries(
       Object.entries(current.metadata || {}).filter(
         ([key]) =>
@@ -623,6 +682,7 @@ async function placeInvoiceOrder(
       )
     );
     await cartModule.updateCarts(cartId, {
+      ...identity,
       metadata: { ...current.metadata, ...checkoutMetadata, ...preserved },
     });
   });
@@ -720,16 +780,18 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   }
 
   try {
-    const { customer, staffTargetCustomerId } = await getPaymentContextCustomer(
-      req
-    );
+    const paymentContext = await getPaymentContextCustomer(req);
+    const { customer, staffTargetCustomerId } = paymentContext;
     if (!customer) {
       return jsonError(res, 401, "You must be signed in to place this order.");
     }
 
     const ownedCart = await reviewCart(req.scope, cartId);
-    const reviewOwner = await assertReviewOwner(req, ownedCart);
-    if (ownedCart.customer_id !== customer.id)
+    const legacyStaff = isLegacyStaffCheckout(req, ownedCart, paymentContext, body);
+    const reviewOwner = legacyStaff
+      ? { staff: true, customerId: customer.id }
+      : await assertReviewOwner(req, ownedCart);
+    if (ownedCart.customer_id !== customer.id && !legacyStaff)
       throw new OrderPromiseError("order_review_cart_unavailable", 403);
     const accepted = requiresOrderReview(ownedCart, body)
       ? await acceptCheckoutReview(
@@ -790,6 +852,8 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           ? customer.metadata.gp_payment_terms
           : "Net 10",
         requireReview: Boolean(accepted),
+        ownedCart,
+        legacyStaff,
       });
     }
 
@@ -876,8 +940,9 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       const current = await cartModule.retrieveCart(cartId, {
         select: ["id", "customer_id", "email", "metadata", "completed_at"],
       });
-      if (current.completed_at || current.customer_id !== customer.id)
-        throw new OrderPromiseError("order_review_changed_refresh_required");
+      const identity = checkoutIdentityUpdate(
+        current, ownedCart, customer, legacyStaff, Boolean(accepted), body
+      );
       const preserved = Object.fromEntries(
         Object.entries(current.metadata || {}).filter(
           ([key]) =>
@@ -886,6 +951,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         )
       );
       await cartModule.updateCarts(cartId, {
+        ...identity,
         metadata: { ...current.metadata, ...checkoutMetadata, ...preserved },
       });
     });
