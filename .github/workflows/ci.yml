@@ -39,6 +39,11 @@ jobs:
         env:
           CATALOG_TEST_DATABASE_URL: postgres://gp_launch_test:isolated_fixture@127.0.0.1:5432/gp_launch
         run: yarn test:catalog
+      - name: Contact transaction and migration identity tests
+        env:
+          CONTACT_TEST_DATABASE_URL: postgres://gp_launch_test:isolated_fixture@127.0.0.1:5432/gp_launch
+          TEST_TYPE: integration:contacts
+        run: yarn jest --runInBand
       - name: TypeScript
         run: npx tsc --noEmit
       - name: Accounting transaction and delivery tests
@@ -53,11 +58,6 @@ jobs:
         run: TEST_TYPE=integration:receipt-email yarn jest --runInBand
         env:
           RECEIPT_TEST_DATABASE_URL: postgres://gp_launch_test:isolated_fixture@127.0.0.1:5432/gp_launch
-      - name: Contact transaction and migration identity tests
-        env:
-          CONTACT_TEST_DATABASE_URL: postgres://gp_launch_test:isolated_fixture@127.0.0.1:5432/gp_launch
-          TEST_TYPE: integration:contacts
-        run: yarn jest --runInBand
       - name: Emit ops.ci
         if: always()
         env:
