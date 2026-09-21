@@ -752,7 +752,7 @@ export default defineMiddlewares({
     { matcher: "/store/*", middlewares: [hideShippingInternals] },
     {
       matcher: "/store/carts/:id/order-review",
-      method: ["POST"],
+      method: ["GET", "POST"],
       middlewares: [
         authenticate("customer", ["session", "bearer"], {
           allowUnauthenticated: true,

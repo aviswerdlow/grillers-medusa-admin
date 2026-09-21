@@ -1,3 +1,5 @@
+import { POST as nativeComplete } from "@medusajs/medusa/api/store/carts/[id]/complete/route";
+import { requiresOrderReview } from "../../../../../lib/order-review-rollout";
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
 import {
@@ -16,6 +18,14 @@ import { OrderPromiseError } from "../../../../../lib/order-promise";
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   try {
     const cart = await reviewCart(req.scope, req.params.id);
+    const identifiers = {
+      review_id: req.headers["x-gp-order-review-id"],
+      request_id: req.headers["x-gp-order-request-id"],
+    };
+    // Preserve native guest/payment response handling on an unreviewed legacy
+    // cart; the existing staff, inventory, final-charge and native hooks run.
+    if (!requiresOrderReview(cart, identifiers))
+      return nativeComplete(req, res);
     const owner = await assertReviewOwner(req, cart);
     if (
       !owner.staff ||
@@ -36,15 +46,13 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     );
     const { errors, result } = await completeReviewedCart(req.scope, cart.id);
     if (errors?.[0])
-      return res
-        .status(409)
-        .json({
-          type: "cart",
-          error: {
-            message:
-              "The order could not be completed. Review the order and payment status before retrying.",
-          },
-        });
+      return res.status(409).json({
+        type: "cart",
+        error: {
+          message:
+            "The order could not be completed. Review the order and payment status before retrying.",
+        },
+      });
     const { data } = await req.scope
       .resolve(ContainerRegistrationKeys.QUERY)
       .graph({

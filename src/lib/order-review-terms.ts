@@ -116,9 +116,9 @@ const query = `
   }
 `;
 export const FINAL_CHARGE_CONSENT_VERSION =
-  "catch-weight-final-charge-2026-05-31";
+  "catch-weight-final-charge-2026-09-21";
 export const FINAL_CHARGE_CONSENT_TEXT =
-  "I agree that Griller's Pride will save my card today and charge the final order total when my order is packed and ready to leave.";
+  "For items sold by the pound, checkout prices are estimates; the final food total reflects the actual packed weight. I agree that Griller's Pride will save my card today and charge the final order total when my order is packed and ready to leave.";
 export const STAFF_CARD_CONSENT_VERSION = "staff-card-at-placement-2026-09-20";
 export const STAFF_CARD_CONSENT_TEXT =
   "The customer authorizes the card payment for the reviewed order total now.";

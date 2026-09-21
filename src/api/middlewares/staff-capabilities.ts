@@ -1,3 +1,4 @@
+import { orderReviewEnforcementMode } from "../../lib/order-review-rollout"
 import type { MedusaRequest, MedusaResponse, MedusaNextFunction } from "@medusajs/framework/http"
 import { staffBoundaryMode, reportStaffBoundaryDenial } from "../../lib/staff-boundary-rollout"
 import { isDeepStrictEqual } from "node:util"
@@ -9,7 +10,7 @@ import { adminRouteCapability, isServiceRoute } from "../../lib/staff-route-capa
 export async function enforceStaffCapabilities(req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) {
   try {
     const principal = await resolveStaffPrincipal(req)
-    if (req.method === "POST" && (/^\/admin\/draft-orders(?:\/[^/]+\/convert-to-order)?\/?$/.test(req.path) || /^\/admin\/orders\/?$/.test(req.path))) {
+    if (orderReviewEnforcementMode() === "required" && req.method === "POST" && (/^\/admin\/draft-orders(?:\/[^/]+\/convert-to-order)?\/?$/.test(req.path) || /^\/admin\/orders\/?$/.test(req.path))) {
       throw new StaffAccessDenied("Create orders through the reviewed customer or staff checkout. Native draft conversion has no accepted-order review.")
     }
     const capability = adminRouteCapability(req.path, req.method, req.body)

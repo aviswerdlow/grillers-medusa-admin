@@ -1,3 +1,7 @@
+import {
+  orderReviewEnforcementMode,
+  requiresOrderReview,
+} from "../../../../../lib/order-review-rollout";
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http";
 import { z } from "zod";
 import {
@@ -20,6 +24,22 @@ const bodySchema = z
   })
   .strict();
 
+export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
+  try {
+    const cart = await reviewCart(req.scope, req.params.id);
+    await assertReviewOwner(req, cart);
+    return res
+      .status(200)
+      .json({
+        enforcement: requiresOrderReview(cart)
+          ? "required"
+          : orderReviewEnforcementMode(),
+      });
+  } catch (error) {
+    return reviewErrorResponse(res, error);
+  }
+};
+
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   try {
     const body = bodySchema.safeParse(req.body);
@@ -31,6 +51,8 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     if (body.data.payment_mode === "card_at_placement" && !owner.staff)
       throw new OrderPromiseError("order_review_payment_mode_unavailable", 403);
     if (body.data.action === "review") {
+      if (!requiresOrderReview(cart))
+        throw new OrderPromiseError("order_review_not_enabled", 404);
       const review = await issueCheckoutReview(
         req.scope,
         cart.id,

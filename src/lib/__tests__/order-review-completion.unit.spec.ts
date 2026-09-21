@@ -66,3 +66,39 @@ test("an uncertain binding leaves recovery explicit without another native call"
   expect(run).toHaveBeenCalledTimes(1);
   expect(ensureFinalizationForOrder).not.toHaveBeenCalled();
 });
+
+test("legacy completion needs no review binding but still initializes finalization", async () => {
+  (completeCartWorkflow as unknown as jest.Mock).mockReturnValue({
+    run: async () => completedPromiseCart(),
+  });
+  await completeReviewedCart(scope, "cart_promise", { requireReview: false });
+  expect(bindOrderPromise).not.toHaveBeenCalled();
+  expect(ensureFinalizationForOrder).toHaveBeenCalled();
+});
+test("a promise copied by native completion cannot be dropped by a legacy request", async () => {
+  (completeCartWorkflow as unknown as jest.Mock).mockReturnValue({
+    run: async () => completedPromiseCart(),
+  });
+  const concurrentScope = {
+    resolve: (key: string) =>
+      key === "query"
+        ? {
+            graph: async () => ({
+              data: [
+                {
+                  id: "order_promise",
+                  metadata: {
+                    gp_order_promise_snapshot_id: "accepted_fixture",
+                  },
+                },
+              ],
+            }),
+          }
+        : "isolated-db",
+  };
+  await completeReviewedCart(concurrentScope, "cart_promise", {
+    requireReview: false,
+  });
+  expect(bindOrderPromise).toHaveBeenCalled();
+  expect(ensureFinalizationForOrder).toHaveBeenCalled();
+});

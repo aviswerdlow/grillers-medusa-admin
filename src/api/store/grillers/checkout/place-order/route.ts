@@ -1,3 +1,4 @@
+import { requiresOrderReview } from "../../../../../lib/order-review-rollout";
 import {
   acceptCheckoutReview,
   assertReviewOwner,
@@ -500,9 +501,16 @@ async function placeInvoiceOrder(
     customer: any;
     staffTargetCustomerId?: string | null;
     paymentTerms: string;
+    requireReview: boolean;
   }
 ) {
-  const { cartId, customer, staffTargetCustomerId, paymentTerms } = ctx;
+  const {
+    cartId,
+    customer,
+    staffTargetCustomerId,
+    paymentTerms,
+    requireReview,
+  } = ctx;
   const cartModule = req.scope.resolve(Modules.CART);
   const orderModule = req.scope.resolve(Modules.ORDER);
   const db = req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION);
@@ -631,7 +639,9 @@ async function placeInvoiceOrder(
     },
   });
 
-  const { errors, result } = await completeReviewedCart(req.scope, cartId);
+  const { errors, result } = await completeReviewedCart(req.scope, cartId, {
+    requireReview,
+  });
 
   if (errors?.[0]) {
     const message =
@@ -721,17 +731,21 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     const reviewOwner = await assertReviewOwner(req, ownedCart);
     if (ownedCart.customer_id !== customer.id)
       throw new OrderPromiseError("order_review_cart_unavailable", 403);
-    const accepted = await acceptCheckoutReview(
-      req.scope,
-      cartId,
-      customer.id,
-      readReviewAcceptance({
-        ...body,
-        analytics_consent: reviewOwner.staff ? null : body.analytics_consent,
-      }),
-      wantsInvoice ? "invoice" : "card"
-    );
-    if (accepted.completed) {
+    const accepted = requiresOrderReview(ownedCart, body)
+      ? await acceptCheckoutReview(
+          req.scope,
+          cartId,
+          customer.id,
+          readReviewAcceptance({
+            ...body,
+            analytics_consent: reviewOwner.staff
+              ? null
+              : body.analytics_consent,
+          }),
+          wantsInvoice ? "invoice" : "card"
+        )
+      : null;
+    if (accepted?.completed) {
       const completion = await completeReviewedCart(req.scope, cartId);
       if (completion.errors?.length)
         throw new OrderPromiseError(
@@ -746,10 +760,13 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         );
       return res.status(200).json({ type: "order", order: originalOrder });
     }
-    // Consent comes from the server-issued review the customer just accepted.
-    body.consent_version =
-      accepted.snapshot.promise.terms.payment_consent_version;
-    body.consent_text = accepted.snapshot.promise.terms.payment_consent_text;
+    // Reviewed orders bind the exact displayed terms. During default-off rollout
+    // keep accepting the legacy client's explicit consent_version/consent_text.
+    if (accepted) {
+      body.consent_version =
+        accepted.snapshot.promise.terms.payment_consent_version;
+      body.consent_text = accepted.snapshot.promise.terms.payment_consent_text;
+    }
 
     // #283: approved B2B accounts can place a no-card invoice order. Fail closed — a
     // non-approved customer asking to pay by invoice is rejected, never silently let through.
@@ -765,7 +782,14 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         cartId,
         customer,
         staffTargetCustomerId,
-        paymentTerms: accepted.snapshot.promise.terms.invoice_terms!,
+        // Preserve current-main invoice behavior only in the compatibility lane;
+        // required review still rejects approval without actual account terms.
+        paymentTerms: accepted
+          ? accepted.snapshot.promise.terms.invoice_terms!
+          : typeof customer.metadata?.gp_payment_terms === "string"
+          ? customer.metadata.gp_payment_terms
+          : "Net 10",
+        requireReview: Boolean(accepted),
       });
     }
 
@@ -882,7 +906,9 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       },
     });
 
-    const { errors, result } = await completeReviewedCart(req.scope, cartId);
+    const { errors, result } = await completeReviewedCart(req.scope, cartId, {
+      requireReview: Boolean(accepted),
+    });
 
     if (errors?.[0]) {
       const message =
@@ -977,12 +1003,10 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     if (error instanceof OrderPromiseError)
       return reviewErrorResponse(res, error);
     if (error instanceof FulfillmentCalendarError) {
-      res
-        .status(error.status)
-        .json({
-          type: "fulfillment_date_review_required",
-          message: error.message,
-        });
+      res.status(error.status).json({
+        type: "fulfillment_date_review_required",
+        message: error.message,
+      });
       return;
     }
     if (error instanceof ShippingInputError) {

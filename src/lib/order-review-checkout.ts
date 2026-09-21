@@ -1,3 +1,4 @@
+import { requiresOrderReview } from "./order-review-rollout";
 import { Modules, ContainerRegistrationKeys } from "@medusajs/framework/utils";
 import type { MedusaRequest } from "@medusajs/framework/http";
 import { z } from "zod";
@@ -617,6 +618,7 @@ export async function acceptCheckoutReview(
 
 /** Compose inside the existing single native validate hook. */
 export async function validateCheckoutReview(scope: any, cart: any) {
+  if (!requiresOrderReview(cart)) return;
   const db = dbFor(scope),
     snapshotId = cart.metadata?.[ORDER_PROMISE_KEY];
   const customerId = cart.customer_id || cart.customer?.id;

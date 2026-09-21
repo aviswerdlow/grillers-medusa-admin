@@ -1,3 +1,6 @@
+const priorReviewMode = process.env.GP_ORDER_REVIEW_ENFORCEMENT
+beforeEach(() => { process.env.GP_ORDER_REVIEW_ENFORCEMENT = "required"; jest.clearAllMocks() })
+afterEach(() => { if (priorReviewMode === undefined) delete process.env.GP_ORDER_REVIEW_ENFORCEMENT; else process.env.GP_ORDER_REVIEW_ENFORCEMENT = priorReviewMode })
 import { acceptCheckoutReview } from "../../../../../../lib/order-review-checkout"
 import { OrderPromiseError } from "../../../../../../lib/order-promise"
 import {
@@ -307,4 +310,28 @@ it("rejects a stale review before payment or native order effects", async () => 
   expect(res.status).toHaveBeenCalledWith(409)
   expect(createPaymentSessionsWorkflow).not.toHaveBeenCalled()
   expect(completeCartWorkflow).not.toHaveBeenCalled()
+})
+
+it("default-off keeps the legacy consent and reaches the inventory guard without a review", async () => {
+  delete process.env.GP_ORDER_REVIEW_ENFORCEMENT
+  ;(getPaymentContextCustomer as jest.Mock).mockResolvedValueOnce({ customer: { id: "cus_medusa_123", metadata: {} } })
+  ;(checkInventoryAvailability as jest.Mock).mockResolvedValueOnce([{ variant_id: "variant_123", requested_quantity: 3, available_to_promise_quantity: 0, decision: "blocked", reason: "out_of_stock" }])
+  const { req, res } = makeReqRes()
+  await POST(req, res)
+  expect(acceptCheckoutReview).not.toHaveBeenCalled()
+  expect(checkInventoryAvailability).toHaveBeenCalled()
+  expect(req.body.consent_version).toBe("v1")
+  expect(req.body.consent_text).toBe("I consent")
+  expect(res.status).toHaveBeenCalledWith(409)
+  expect(createPaymentSessionsWorkflow).not.toHaveBeenCalled()
+})
+it("default-off still requires final-charge consent before any payment", async () => {
+  delete process.env.GP_ORDER_REVIEW_ENFORCEMENT
+  ;(getPaymentContextCustomer as jest.Mock).mockResolvedValueOnce({ customer: { id: "cus_medusa_123", metadata: {} } })
+  const { req, res } = makeReqRes()
+  delete req.body.consent_text
+  await POST(req, res)
+  expect(res.status).toHaveBeenCalledWith(400)
+  expect(res.json).toHaveBeenCalledWith({ message: "Final charge consent is required." })
+  expect(createPaymentSessionsWorkflow).not.toHaveBeenCalled()
 })
