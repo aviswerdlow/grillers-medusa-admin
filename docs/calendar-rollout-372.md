@@ -11,6 +11,23 @@ Any other nonempty configured value also enforces the calendar rather than
 silently disabling it. Keep the existing payment, inventory, shipping-weight,
 packing-policy and staff-identity controls in either mode.
 
+## Seasonal packing boundary in PR35 and descendants
+
+The predecessor calendar PR34 retains its prior undated UPS packing path while
+calendar enforcement is off. This seasonal-packing branch intentionally cannot
+use that fallback: #363/#374 require validated transit/exposure and approved
+seasonal data. Quote and method selection still load calendar transit; UPS
+completion still requires a verified selected date. Only pickup and local
+legacy completion are released from the new calendar-token requirement here.
+The new tests assert that off mode cannot bypass this shipping boundary.
+
+Consequently the UPS deployment-order gap is still open in #372. Complete the
+storefront fallback/activation work and reconcile the legacy UPS transition
+with the accepted #374 publication lock before claiming independent deployment.
+Do not turn off seasonal safeguards, manufacture transit dates or automatically
+replace a customer's arrival date to force a passing checkout. The carrier
+fallback description below applies to predecessor PR34 only.
+
 ## Contract
 
 - `GET /store/grillers/checkout/fulfillment-calendar` returns

@@ -135,16 +135,17 @@ describe("GrillersFulfillmentProviderService", () => {
     else process.env.GP_CALENDAR_ENFORCEMENT = originalCalendarEnforcement
   })
 
-  it("quotes and selects legacy UPS shipping before calendar infrastructure is activated", async () => {
-    mockShippingZones([{ ZoneCode: "Fedex3Day", ShippingZoneBreakpoints: [{ BreakpointPrice: 0, ShippingRate: 75 }] }])
+  it("off mode cannot bypass the cold-chain transit requirement in quotes or selection", async () => {
+    ;(calendarPackingContextForRate as jest.Mock)
+      .mockRejectedValueOnce(new FulfillmentCalendarError("calendar_source_unavailable", 503))
+      .mockRejectedValueOnce(new FulfillmentCalendarError("calendar_source_unavailable", 503))
     const svc = service()
     const context = { id: "cart_fixture", items: [shippingLine()], shipping_address: { postal_code: "90048" } }
-    const rate = await svc.calculatePrice({ service_code: "3_DAY_SELECT" } as any, {} as any, context as any)
-    const selected = await svc.validateFulfillmentData({ service_code: "3_DAY_SELECT" }, {}, context)
-    expect(rate.calculated_amount).toBe(75)
-    expect(selected.shipping_packing_plan_v1.arrivalDate).toBeNull()
-    expect(selected.shipping_packing_plan_v1.weights.physicalWeightLb).toBe(1.5)
-    expect(calendarPackingContextForRate).not.toHaveBeenCalled()
+    global.fetch = jest.fn()
+    await expect(svc.calculatePrice({ service_code: "3_DAY_SELECT" } as any, {} as any, context as any)).rejects.toThrow()
+    await expect(svc.validateFulfillmentData({ service_code: "3_DAY_SELECT" }, {}, context)).rejects.toThrow()
+    expect(calendarPackingContextForRate).toHaveBeenCalledTimes(2)
+    expect(global.fetch).not.toHaveBeenCalled()
   })
 
   it.each([
