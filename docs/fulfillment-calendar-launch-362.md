@@ -76,6 +76,13 @@ calendar code. Peter's #358 answer, #324 closures and #325 routes supply it.
   five-day or April ZIP-table fallback exists. This candidate requires a fallback
   to present initial UPS choices; a configured carrier then checks the selected
   dated shipment. Carrier-only initial choice discovery is not implemented.
+  The CMS uses `UPS_3_DAY_SELECT` and `UPS_2ND_DAY_AIR` so its GraphQL schema can
+  start. This adapter maps those values to the existing `3_DAY_SELECT` and
+  `2ND_DAY_AIR` carrier codes; `GROUND` and `OVERNIGHT` are unchanged. Publish the
+  corrected Strapi schema with this backend adapter in the coordinated calendar
+  release. Old digit-leading CMS values are invalid and are not accepted as a
+  substitute. Existing carrier requests and customer shipping methods retain
+  their current identifiers.
 
 All clock comparisons use real Eastern offsets, including daylight saving. Carrier
 business days are not elapsed cold-chain days. `packingDays = ceil(elapsedHours/24)`

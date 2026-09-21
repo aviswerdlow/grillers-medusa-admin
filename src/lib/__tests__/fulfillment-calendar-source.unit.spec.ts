@@ -183,6 +183,21 @@ test("fallback uses the most specific approved origin, service and destination r
 });
 
 const originalFetch = global.fetch;
+test.each([
+  ["UPS_3_DAY_SELECT", "3_DAY_SELECT"],
+  ["UPS_2ND_DAY_AIR", "2ND_DAY_AIR"],
+  ["GROUND", "GROUND"],
+  ["OVERNIGHT", "OVERNIGHT"],
+])("maps CMS %s to the existing carrier service %s", (cmsService, carrierService) => {
+  const input = { rules: [{ ...rule, Service: cmsService }], service: carrierService,
+    postalCode: "10001", originPostalCode: "30340", now };
+  expect(approvedTransitFallback(input)).toMatchObject({ service: carrierService, businessDays: 2, source: "approved_fallback" });
+  expect(approvedTransitFallback({ ...input, service: "UNRELATED_SERVICE" })).toBeNull();
+});
+test.each(["3_DAY_SELECT", "2ND_DAY_AIR", "UPS_UNKNOWN"])("rejects invalid or unknown CMS service %s", (service) => {
+  expect(() => approvedTransitFallback({ rules: [{ ...rule, Service: service }], service,
+    postalCode: "10001", originPostalCode: "30340", now })).toThrow(expect.objectContaining({ code: "transit_rules_invalid", status: 503 }));
+});
 afterEach(() => {
   global.fetch = originalFetch;
 });

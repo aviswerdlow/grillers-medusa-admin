@@ -138,7 +138,11 @@ export function calendarPolicyFromStrapi(
 
 const ruleSchema = z
   .object({
-    Service: z.enum(["GROUND", "3_DAY_SELECT", "2ND_DAY_AIR", "OVERNIGHT"]),
+    // GraphQL enum names cannot start with digits. Keep the CMS identifiers
+    // valid and normalize only at this boundary; carrier/checkout codes stay put.
+    Service: z.enum(["GROUND", "UPS_3_DAY_SELECT", "UPS_2ND_DAY_AIR", "OVERNIGHT"])
+      .transform((service) => service === "UPS_3_DAY_SELECT" ? "3_DAY_SELECT"
+        : service === "UPS_2ND_DAY_AIR" ? "2ND_DAY_AIR" : service),
     OriginPostalCode: z.string().regex(/^\d{5}$/),
     DestinationZipPrefix: z.string().regex(/^\d{1,5}$/),
     BusinessDays: z.number().int().min(1).max(14),
