@@ -127,11 +127,13 @@ module.exports = defineConfig({
       options: {
         providers: [
           {
-            resolve: "@medusajs/medusa/payment-stripe",
+            resolve: "./src/modules/gp-stripe-evidence",
             id: "stripe",
             options: {
               apiKey: process.env.STRIPE_API_KEY,
               webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+              recordRefundEvidence:
+                process.env.GP_STRIPE_REFUND_EVIDENCE_ENABLED === "true",
             },
           },
         ],

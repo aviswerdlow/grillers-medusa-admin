@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { claimRefundMeasurement } from "./refund-provider-publication";
 import {
   orderPromiseAnalytics,
   readOriginalOrderPromise,
@@ -289,6 +290,8 @@ export async function materializeOrderPublications(
             Object.prototype.hasOwnProperty.call(LIFECYCLE_EVENTS, intent.kind)
           ) {
             const fact = await readLifecyclePublication(read, intent);
+            if ("livemode" in fact && properties.test_order !== !fact.livemode)
+              throw new Error("publication_refund_mode_mismatch");
             at = iso(fact.at);
             if (
               new Date(at) > now ||
@@ -319,6 +322,15 @@ export async function materializeOrderPublications(
               payment_evidence: "not_implied_by_lifecycle",
               ...fact.properties,
             });
+            if (
+              ["refunded", "refund_updated"].includes(intent.kind) &&
+              properties.refund_provider_status === "succeeded"
+            )
+              properties.ga4_refund_owner = await claimRefundMeasurement(
+                read,
+                intent,
+                properties
+              );
           }
           Object.assign(properties, {
             idempotency_key: intent.event_id,

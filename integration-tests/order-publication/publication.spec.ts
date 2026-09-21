@@ -1,4 +1,13 @@
 import { randomUUID } from "node:crypto";
+import { Migration20260921001500 } from "../../src/modules/gp-communications/migrations/Migration20260921001500";
+import {
+  claimRefundLease,
+  pinRefundScope,
+  queueRefundNotification,
+  queueRefundPage,
+  recordRefundObservation,
+  reconcileRefunds,
+} from "../../src/lib/refund-provider";
 import { Migration20260920235000 } from "../../src/modules/gp-communications/migrations/Migration20260920235000";
 import { Migration20260920223000 } from "../../src/modules/gp-communications/migrations/Migration20260920223000";
 import { pinRehearsalRoute } from "../../src/lib/order-publication-rehearsal";
@@ -77,7 +86,7 @@ beforeAll(async () => {
     "create table fulfillment (id text primary key, created_at timestamptz, shipped_at timestamptz, delivered_at timestamptz, deleted_at timestamptz)",
     "create table order_fulfillment (id text primary key, order_id text, fulfillment_id text, deleted_at timestamptz)",
     'create table "return" (id text primary key, order_id text, requested_at timestamptz, deleted_at timestamptz)',
-    "create table payment (id text primary key, payment_collection_id text, currency_code text, deleted_at timestamptz)",
+    "create table payment (id text primary key, payment_collection_id text, currency_code text, data jsonb, deleted_at timestamptz)",
     "create table order_payment_collection (id text primary key, order_id text, payment_collection_id text, deleted_at timestamptz)",
     "create table refund (id text primary key, payment_id text, amount numeric, deleted_at timestamptz)",
     "create table order_transaction (id text primary key, order_id text, reference text, reference_id text, amount numeric, currency_code text, created_at timestamptz, deleted_at timestamptz)",
@@ -93,6 +102,7 @@ beforeAll(async () => {
     Migration20260920214500,
     Migration20260920223000,
     Migration20260920235000,
+    Migration20260921001500,
   ]) {
     const sql: string[] = [];
     await migration.prototype.up.call({
@@ -934,3 +944,454 @@ it("backfills only known test receipts without reopening production delivery", a
     await db("gp_order_publication_delivery").where({ status: "excluded" })
   ).toHaveLength(8);
 });
+
+const refundScope = {
+  account_id: "acct_fixture",
+  livemode: false,
+  starts_at: starts.toISOString(),
+};
+function providerRefund(patch: any = {}) {
+  return {
+    object: "refund",
+    id: "re_fixture",
+    payment_intent: "pi_fixture",
+    amount: 1250,
+    currency: "usd",
+    status: "pending",
+    created: Math.floor(actionTime().getTime() / 1000),
+    metadata: { gp_native_refund_id: "ref_fixture" },
+    ...patch,
+  };
+}
+function refundEvent(patch: any = {}, eventPatch: any = {}) {
+  return {
+    id: "evt_fixture",
+    type: "refund.updated",
+    livemode: false,
+    created: Math.floor(actionTime().getTime() / 1000),
+    data: { object: providerRefund(patch) },
+    ...eventPatch,
+  };
+}
+async function refundSetup(
+  native = true,
+  attribution: any = { test_order: true }
+) {
+  const x = await bound("provider", 91.25, attribution);
+  await refundFixture(x.order, "ref_fixture");
+  await db("payment").update({ data: { id: "pi_fixture" } });
+  if (!native) await db("refund").where({ id: "ref_fixture" }).delete();
+  await publicationEpoch(db, starts.toISOString());
+  await pinRefundScope(db, refundScope, {
+    object: "account",
+    id: "acct_fixture",
+  });
+  const token = (await claimRefundLease(db, refundScope))!;
+  await queueRefundNotification(db, refundScope, refundEvent());
+  const queue = await db("gp_refund_provider_queue")
+    .where({ refund_id: "re_fixture" })
+    .first();
+  return { ...x, token, queue };
+}
+
+it("pins the verified account/mode to the publication epoch and preserves immutable scope", async () => {
+  await expect(
+    pinRefundScope(db, refundScope, { object: "account", id: "acct_fixture" })
+  ).rejects.toThrow("epoch_unavailable");
+  await publicationEpoch(db, starts.toISOString());
+  await expect(
+    pinRefundScope(db, refundScope, { object: "account", id: "acct_other" })
+  ).rejects.toThrow("account_mismatch");
+  await pinRefundScope(db, refundScope, {
+    object: "account",
+    id: "acct_fixture",
+  });
+  await expect(
+    pinRefundScope(
+      db,
+      { ...refundScope, livemode: true },
+      { object: "account", id: "acct_fixture" }
+    )
+  ).rejects.toThrow("scope_changed");
+  await expect(
+    db("gp_refund_provider_scope").update({ livemode: true })
+  ).rejects.toThrow("immutable");
+});
+
+it("deduplicates notifications by ID, detects conflict and refuses another mode or Connect account", async () => {
+  await refundSetup();
+  expect(await queueRefundNotification(db, refundScope, refundEvent())).toBe(
+    "duplicate"
+  );
+  await expect(
+    queueRefundNotification(db, refundScope, refundEvent({ status: "failed" }))
+  ).rejects.toThrow("event_conflict");
+  await expect(
+    queueRefundNotification(
+      db,
+      refundScope,
+      refundEvent({}, { id: "evt_live", livemode: true })
+    )
+  ).rejects.toThrow("scope_invalid");
+  await expect(
+    queueRefundNotification(
+      db,
+      refundScope,
+      refundEvent({}, { id: "evt_connect", account: "acct_other" })
+    )
+  ).rejects.toThrow("scope_invalid");
+  expect(await db("gp_refund_provider_event")).toHaveLength(1);
+  expect((await db("gp_refund_provider_queue").first()).generation).toBe(1);
+  await expect(
+    db("gp_refund_provider_event").update({ event_type: "refund.failed" })
+  ).rejects.toThrow("immutable");
+});
+
+it("appends pending/success/failure/success observations with one successful-refund measurement owner", async () => {
+  const x = await refundSetup();
+  for (const [index, status] of [
+    "pending",
+    "succeeded",
+    "failed",
+    "succeeded",
+  ].entries()) {
+    const result = await recordRefundObservation(
+      db,
+      x.token,
+      x.queue,
+      providerRefund({ status }),
+      new Date(actionTime().getTime() + index * 1000)
+    );
+    expect(result.held).toBe(false);
+    expect(result.attention).toBe(status === "failed");
+    await ready();
+  }
+  expect(await db("gp_refund_provider_receipt")).toHaveLength(4);
+  const events = await db("gp_order_publication")
+    .where({ kind: "refund_updated" })
+    .orderBy("source_id");
+  expect(events).toHaveLength(4);
+  expect(
+    events.filter((r: any) => r.properties.ga4_refund_owner === true)
+  ).toHaveLength(1);
+  expect(
+    events.every(
+      (r: any) =>
+        r.state === "ready" &&
+        r.properties.test_order === true &&
+        r.properties.value === 12.5
+    )
+  ).toBe(true);
+  expect(
+    (await db("gp_order_publication").where({ kind: "placed" }).first())
+      .properties.value
+  ).toBe(91.25);
+  expect(
+    (await db("gp_order_publication").where({ kind: "refunded" }).first())
+      .properties.refund_provider_status
+  ).toBe("unverified");
+  expect(await db("order_transaction")).toHaveLength(1);
+  await expect(
+    db("gp_refund_provider_receipt").update({ status: "failed" })
+  ).rejects.toThrow("immutable");
+  await expect(db("gp_refund_provider_binding").delete()).rejects.toThrow(
+    "immutable"
+  );
+  await expect(db("gp_refund_provider_metric").delete()).rejects.toThrow(
+    "immutable"
+  );
+});
+
+it("retains missing native evidence and binds on a later read without repeating a refund or observation", async () => {
+  const x = await refundSetup(false);
+  expect(
+    (
+      await recordRefundObservation(
+        db,
+        x.token,
+        x.queue,
+        providerRefund(),
+        actionTime()
+      )
+    ).held
+  ).toBe(true);
+  expect(await db("gp_refund_provider_receipt")).toHaveLength(1);
+  expect(await db("gp_refund_provider_binding")).toHaveLength(0);
+  await db("refund").insert({
+    id: "ref_fixture",
+    payment_id: `pay_${x.order}`,
+    amount: 12.5,
+  });
+  expect(
+    await recordRefundObservation(
+      db,
+      x.token,
+      x.queue,
+      providerRefund(),
+      actionTime()
+    )
+  ).toMatchObject({ held: false, changed: false });
+  expect(await db("gp_refund_provider_receipt")).toHaveLength(1);
+  await ready();
+  expect(
+    await db("gp_order_publication").where({ kind: "refund_updated" })
+  ).toHaveLength(1);
+});
+
+it("records an external provider refund without inventing a native refund or transaction", async () => {
+  const x = await refundSetup(false);
+  await db("order_transaction").delete();
+  expect(
+    (
+      await recordRefundObservation(
+        db,
+        x.token,
+        x.queue,
+        providerRefund({ metadata: {} }),
+        actionTime()
+      )
+    ).held
+  ).toBe(false);
+  expect((await db("gp_refund_provider_binding").first()).origin).toBe(
+    "provider_only"
+  );
+  expect(await db("refund")).toHaveLength(0);
+  expect(await db("order_transaction")).toHaveLength(0);
+});
+
+it.each(["mode", "currency", "ambiguous", "native_amount"])(
+  "holds %s mismatch without losing authentic processor evidence",
+  async (failure) => {
+    const x = await refundSetup(true, {
+      test_order: failure === "mode" ? false : true,
+    });
+    if (failure === "currency")
+      await db("payment").update({ currency_code: "cad" });
+    if (failure === "native_amount") await db("refund").update({ amount: 1 });
+    if (failure === "ambiguous")
+      await db("order_payment_collection").insert({
+        id: "link_other",
+        order_id: "order_other",
+        payment_collection_id: `pc_${x.order}`,
+      });
+    expect(
+      (
+        await recordRefundObservation(
+          db,
+          x.token,
+          x.queue,
+          providerRefund(),
+          actionTime()
+        )
+      ).held
+    ).toBe(true);
+    expect(await db("gp_refund_provider_receipt")).toHaveLength(1);
+    expect(await db("gp_refund_provider_binding")).toHaveLength(0);
+  }
+);
+
+it("refuses changed identity/amount facts and gives equal partial refunds independent identities", async () => {
+  const x = await refundSetup();
+  await recordRefundObservation(
+    db,
+    x.token,
+    x.queue,
+    providerRefund(),
+    actionTime()
+  );
+  await expect(
+    recordRefundObservation(
+      db,
+      x.token,
+      x.queue,
+      providerRefund({ amount: 1500 }),
+      actionTime()
+    )
+  ).rejects.toThrow("facts_changed");
+  await db("refund").insert({
+    id: "ref_other",
+    payment_id: `pay_${x.order}`,
+    amount: 12.5,
+  });
+  const second = providerRefund({
+    id: "re_other",
+    metadata: { gp_native_refund_id: "ref_other" },
+    status: "succeeded",
+  });
+  await queueRefundNotification(
+    db,
+    refundScope,
+    refundEvent(second, { id: "evt_other" })
+  );
+  const queue = await db("gp_refund_provider_queue")
+    .where({ refund_id: "re_other" })
+    .first();
+  await recordRefundObservation(db, x.token, queue, second, actionTime());
+  expect(await db("gp_refund_provider_binding")).toHaveLength(2);
+  expect(await db("gp_refund_provider_receipt")).toHaveLength(2);
+});
+
+it("does not let an in-flight GET defer a newer notification, including an older notification timestamp", async () => {
+  const x = await refundSetup();
+  await queueRefundNotification(
+    db,
+    refundScope,
+    refundEvent(
+      { status: "succeeded" },
+      { id: "evt_older", created: Math.floor(actionTime().getTime() / 1000) - 120 }
+    )
+  );
+  const queued = await db("gp_refund_provider_queue").first();
+  expect(queued.generation).toBe(2);
+  await recordRefundObservation(
+    db,
+    x.token,
+    x.queue,
+    providerRefund(),
+    actionTime()
+  );
+  expect((await db("gp_refund_provider_queue").first()).due_at).toEqual(
+    queued.due_at
+  );
+});
+
+it("advances bounded missed-notification discovery without resetting already scheduled rows", async () => {
+  const x = await refundSetup();
+  await db("gp_refund_provider_queue").update({ due_at: later() });
+  await queueRefundPage(
+    db,
+    x.token,
+    {
+      object: "list",
+      data: [{ id: "re_fixture" }, { id: "re_next" }],
+      has_more: true,
+    },
+    null
+  );
+  expect((await db("gp_refund_provider_scope").first()).scan_after).toBe(
+    "re_next"
+  );
+  expect(
+    (
+      await db("gp_refund_provider_queue")
+        .where({ refund_id: "re_fixture" })
+        .first()
+    ).due_at
+  ).toEqual(later());
+  await queueRefundPage(
+    db,
+    x.token,
+    { object: "list", data: [{ id: "re_last" }], has_more: false },
+    "re_next"
+  );
+  expect((await db("gp_refund_provider_scope").first()).scan_after).toBeNull();
+  expect(await db("gp_refund_provider_queue")).toHaveLength(3);
+});
+
+it("fences stale workers from cursor, receipt and queue changes", async () => {
+  const x = await refundSetup();
+  await db("gp_refund_provider_scope").update({ lease_until: new Date(0) });
+  const newer = await claimRefundLease(db, refundScope);
+  expect(newer).not.toBe(x.token);
+  await expect(
+    queueRefundPage(
+      db,
+      x.token,
+      { object: "list", data: [{ id: "re_lost" }], has_more: false },
+      null
+    )
+  ).rejects.toThrow("lease_lost");
+  await expect(
+    recordRefundObservation(
+      db,
+      x.token,
+      x.queue,
+      providerRefund(),
+      actionTime()
+    )
+  ).rejects.toThrow("lease_lost");
+  expect(await db("gp_refund_provider_receipt")).toHaveLength(0);
+  expect(await db("gp_refund_provider_queue")).toHaveLength(1);
+});
+
+it("uses current GET status instead of notification status, recovers missed events, and retains failed reads", async () => {
+  await refundSetup();
+  await db("gp_refund_provider_scope").update({ lease_until: new Date(0) });
+  const client = {
+    account: jest
+      .fn()
+      .mockResolvedValue({ object: "account", id: "acct_fixture" }),
+    list: jest
+      .fn()
+      .mockResolvedValue({
+        object: "list",
+        has_more: false,
+        data: [{ id: "re_fixture" }, { id: "re_missing" }],
+      }),
+    refund: jest.fn(async (id: string) => {
+      if (id === "re_missing") throw new Error("private");
+      return providerRefund({ status: "succeeded" });
+    }),
+  };
+  const result = await reconcileRefunds(db, refundScope, client);
+  expect(result).toMatchObject({ observed: 1, readFailures: 1 });
+  expect((await db("gp_refund_provider_receipt").first()).status).toBe(
+    "succeeded"
+  );
+  expect(
+    (
+      await db("gp_refund_provider_queue")
+        .where({ refund_id: "re_missing" })
+        .first()
+    ).reason
+  ).toBe("refund_read_or_evidence_unavailable");
+  expect((await db("gp_refund_provider_scope").first()).lease_token).toBeNull();
+  expect(client.refund).toHaveBeenCalledTimes(2);
+});
+
+it.each(["pending", "succeeded"])(
+  "does not double count an earlier %s direct-final-charge record",
+  async (status) => {
+    const x = await bound("direct_provider", 91.25, { test_order: true });
+    await final(x.order);
+    await db("gp_order_finalization").update({
+      stripe_payment_intent_id: `pi_${x.order}`,
+    });
+    await db("gp_final_charge_attempt").update({
+      stripe_payment_intent_id: `pi_${x.order}`,
+    });
+    await directRefundFixture(x.order, status);
+    await ready();
+    await publicationEpoch(db, starts.toISOString());
+    await pinRefundScope(db, refundScope, {
+      object: "account",
+      id: "acct_fixture",
+    });
+    const token = (await claimRefundLease(db, refundScope))!;
+    const data = providerRefund({
+      id: `re_${x.order}`,
+      payment_intent: `pi_${x.order}`,
+      metadata: {},
+      status: "succeeded",
+    });
+    await queueRefundNotification(db, refundScope, refundEvent(data));
+    await recordRefundObservation(
+      db,
+      token,
+      await db("gp_refund_provider_queue").first(),
+      data,
+      actionTime()
+    );
+    await ready();
+    const direct = await db("gp_order_publication")
+      .where({ kind: "refunded" })
+      .first();
+    const observed = await db("gp_order_publication")
+      .where({ kind: "refund_updated" })
+      .first();
+    expect(observed.state).toBe("ready");
+    expect(observed.properties.ga4_refund_owner).toBe(status !== "succeeded");
+    expect(direct.properties.refund_provider_status).toBe(status);
+    expect(await db("gp_refund_provider_metric")).toHaveLength(1);
+  }
+);

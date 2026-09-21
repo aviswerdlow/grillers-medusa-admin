@@ -913,6 +913,11 @@ export default defineMiddlewares({
       bodyParser: { preserveRawBody: true },
     },
     {
+      matcher: "/webhooks/stripe/refunds",
+      method: ["POST"],
+      bodyParser: { preserveRawBody: true },
+    },
+    {
       // Slack `/gp` slash-command query bot. Outside /admin and /store, so it
       // bypasses Medusa auth; the Slack signing secret is the ONLY gate. Slack
       // sends application/x-www-form-urlencoded, so preserve the raw body — it

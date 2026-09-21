@@ -1,3 +1,4 @@
+import { readProviderRefundPublication } from "./refund-provider-publication";
 /** Native records are the durable source. Polling does not depend on delivery of
  * the transient Medusa event and never invokes a payment or fulfillment action. */
 export const LIFECYCLE_EVENTS = {
@@ -7,6 +8,7 @@ export const LIFECYCLE_EVENTS = {
   delivered: "order_delivered",
   return_requested: "return_created",
   refunded: "order_refunded",
+  refund_updated: "order_refund_updated",
 } as const;
 export type LifecycleKind = keyof typeof LIFECYCLE_EVENTS;
 
@@ -48,6 +50,13 @@ export async function reconcileLifecyclePublications(
   const base = () =>
     db("gp_order_promise_binding as b").where("b.placed_at", ">=", starts);
   const sources: Array<{ kind: LifecycleKind; source: string; query: any }> = [
+    {
+      kind: "refund_updated",
+      source: "r.id",
+      query: base()
+        .join("gp_refund_provider_binding as rb", "rb.order_id", "b.order_id")
+        .join("gp_refund_provider_receipt as r", "r.refund_id", "rb.refund_id"),
+    },
     {
       kind: "canceled",
       source: "o.id",
@@ -147,6 +156,8 @@ export async function reconcileLifecyclePublications(
  * contact data, mutable totals or provider payloads into the analytics record. */
 export async function readLifecyclePublication(db: any, intent: any) {
   const { kind, order_id: orderId, source_id: sourceId } = intent;
+  if (kind === "refund_updated")
+    return readProviderRefundPublication(db, intent);
   if (kind === "canceled") {
     const row = one(
       await db("order")
@@ -262,6 +273,7 @@ export async function readLifecyclePublication(db: any, intent: any) {
       total: value,
       refund_amount: value,
       refund_id: sourceId,
+      ...(direct.length ? { provider_refund_id: sourceId } : {}),
       currency: currencyCode,
       currency_code: currencyCode,
       amount_basis: "recorded_refund_v1",
