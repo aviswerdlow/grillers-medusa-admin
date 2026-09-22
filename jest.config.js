@@ -19,7 +19,9 @@ module.exports = {
   setupFiles: ["./integration-tests/setup.js"],
 };
 
-if (process.env.TEST_TYPE === "integration:catalog") {
+if (process.env.TEST_TYPE === "integration:inventory") {
+  module.exports.testMatch = ["**/integration-tests/inventory/*.spec.[jt]s"];
+} else if (process.env.TEST_TYPE === "integration:catalog") {
   module.exports.testMatch = ["**/integration-tests/catalog/*.spec.[jt]s"];
 } else if (process.env.TEST_TYPE === "integration:http") {
   module.exports.testMatch = ["**/integration-tests/http/*.spec.[jt]s"];

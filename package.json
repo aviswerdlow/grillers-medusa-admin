@@ -32,7 +32,8 @@
     "test:accounting": "TEST_TYPE=integration:accounting jest --silent --runInBand",
     "predeploy": "medusa db:migrate",
     "test:catalog": "TEST_TYPE=integration:catalog NODE_OPTIONS=--experimental-vm-modules jest --runInBand --forceExit",
-    "test:incoming-stock": "TEST_TYPE=integration:incoming-stock NODE_OPTIONS=--experimental-vm-modules jest --runInBand --forceExit"
+    "test:incoming-stock": "TEST_TYPE=integration:incoming-stock NODE_OPTIONS=--experimental-vm-modules jest --runInBand --forceExit",
+    "test:inventory": "TEST_TYPE=integration:inventory NODE_OPTIONS=--experimental-vm-modules jest --runInBand --forceExit"
   },
   "dependencies": {
     "@clickhouse/client": "^1.18.5",
