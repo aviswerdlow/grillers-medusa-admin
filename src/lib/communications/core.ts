@@ -1,4 +1,3 @@
-import { primaryContactEnabled, hasPrimaryContactState } from "../customer-contact-rollout"
 import crypto from "crypto"
 import type { Logger, MedusaContainer } from "@medusajs/framework/types"
 import {
@@ -8,6 +7,7 @@ import {
 import { emitOpsAlert } from "../ops-alert"
 import { isInSendBlackout } from "./hebrew-calendar"
 import { instrumentEmailHtml } from "./links"
+import { primaryContactEnabled, hasPrimaryContactState } from "../customer-contact-rollout"
 
 type KnexLike = any
 
