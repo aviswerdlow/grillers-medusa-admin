@@ -1138,6 +1138,20 @@ export async function sendTrackedEmail(
     .where("idempotency_key", idempotencyKey)
     .first()
 
+  if (existing && input.template_key === "order-final-charge-declined") {
+    if (
+      ["sent", "delivered", "opened", "clicked", "bounced", "complained", "unsubscribed"].includes(existing.status) &&
+      existing.postmark_message_id &&
+      existing.provider_response?.status === "success" &&
+      existing.provider_response?.external_id === existing.postmark_message_id
+    ) {
+      return { ok: true, skipped: true, messageId: existing.postmark_message_id }
+    }
+    // An accepted send can lose its acknowledgement. Never retry a prior
+    // queued/failed attempt until its provider receipt is reconciled.
+    return { ok: false, error: "final_charge_decline_provider_reconciliation_required" }
+  }
+
   if (input.metadata?.account_welcome_source_id && existing) {
     if (["sent", "delivered", "opened", "clicked", "bounced", "complained", "unsubscribed"].includes(existing.status) && existing.postmark_message_id &&
       existing.provider_response?.status === "success" && existing.provider_response?.external_id === existing.postmark_message_id) {
