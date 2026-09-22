@@ -100,3 +100,27 @@ it("uses stable import identity and holds ambiguous/email-only mappings before w
  await expect(findLegacyImportCustomer(db,"source-1","changed@example.invalid")).rejects.toThrow("source_email_changed")
  expect(await findLegacyImportCustomer(db,"source-3","new@example.invalid")).toBeNull()
 })
+
+
+describe("profile identity rollout compatibility", () => {
+  const previous = process.env.GP_PRIMARY_CONTACT_ENABLED
+  afterEach(() => {
+    if (previous === undefined) delete process.env.GP_PRIMARY_CONTACT_ENABLED
+    else process.env.GP_PRIMARY_CONTACT_ENABLED = previous
+  })
+  it("preserves the legacy email association while contact activation is off", async () => {
+    delete process.env.GP_PRIMARY_CONTACT_ENABLED
+    await db("gp_customer_profile").insert({ id: "profile_legacy", medusa_customer_id: "cus_old", email_lower: "synthetic@example.invalid" })
+    const updated = await upsertCustomerProfile(db, { medusa_customer_id: "cus_test", email: "synthetic@example.invalid" })
+    expect(updated.medusa_customer_id).toBe("cus_test")
+  })
+  it.each(["enabled", "attested", "explicit"])("holds a conflicting profile when %s", async mode => {
+    delete process.env.GP_PRIMARY_CONTACT_ENABLED
+    if (mode === "enabled") process.env.GP_PRIMARY_CONTACT_ENABLED = "true"
+    await db("gp_customer_profile").insert({ id: "profile_legacy", medusa_customer_id: "cus_old", email_lower: "synthetic@example.invalid",
+      metadata: mode === "attested" ? { primary_contact_v1: { version: 1, revision: 1 } } : {} })
+    await expect(upsertCustomerProfile(db, { medusa_customer_id: "cus_test", email: "synthetic@example.invalid" },
+      { requireIdentityMatch: mode === "explicit" })).rejects.toThrow("identity conflict")
+    expect((await db("gp_customer_profile").first()).medusa_customer_id).toBe("cus_old")
+  })
+})

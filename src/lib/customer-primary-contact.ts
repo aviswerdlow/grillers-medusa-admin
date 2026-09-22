@@ -83,7 +83,7 @@ export async function changePrimaryContact(db: any, customerId: string, input: C
     // Only a customer ID or an unbound exact-email profile may be associated.
     // upsert rejects another account's bound email; phone never joins identity.
     const profile = await upsertCustomerProfile(trx, { medusa_customer_id: customerId,
-      email: customer.email, first_name: customer.first_name, last_name: customer.last_name })
+      email: customer.email, first_name: customer.first_name, last_name: customer.last_name }, { requireIdentityMatch: true })
     if (!profile) throw new Error("Contact profile unavailable")
     const lockedProfile = await trx("gp_customer_profile").where({ id: profile.id }).whereNull("deleted_at").forUpdate().first()
     const profileMetadata = contactObject(lockedProfile.metadata)

@@ -1,3 +1,4 @@
+import { primaryContactEnabled, hasPrimaryContactState } from "../customer-contact-rollout"
 import crypto from "crypto"
 import type { Logger, MedusaContainer } from "@medusajs/framework/types"
 import {
@@ -513,7 +514,8 @@ export async function emitCommunicationEventSideEffectAlert({
 
 export async function upsertCustomerProfile(
   db: KnexLike,
-  input: CustomerProfileInput
+  input: CustomerProfileInput,
+  options: { requireIdentityMatch?: boolean } = {}
 ): Promise<Record<string, any> | null> {
   const emailLower = normalizeEmail(input.email)
   const now = new Date()
@@ -594,7 +596,9 @@ export async function upsertCustomerProfile(
   }
 
   if (existing) {
-    if (input.medusa_customer_id && existing.medusa_customer_id &&
+    const strictIdentity = options.requireIdentityMatch || primaryContactEnabled() || hasPrimaryContactState(existing.metadata)
+    if (strictIdentity &&
+        input.medusa_customer_id && existing.medusa_customer_id &&
         input.medusa_customer_id !== existing.medusa_customer_id) {
       throw new Error("Communications identity conflict; account association requires review")
     }
@@ -695,7 +699,10 @@ export async function upsertCustomerProfile(
       )
     }
     const update = db("gp_customer_profile").where("id", existing.id)
-    if (input.medusa_customer_id) update.whereRaw("(medusa_customer_id is null or medusa_customer_id = ?)", [input.medusa_customer_id])
+    if (input.medusa_customer_id) {
+      if (strictIdentity) update.whereRaw("(medusa_customer_id is null or medusa_customer_id = ?)", [input.medusa_customer_id])
+      else update.whereRaw("((metadata->'primary_contact_v1' is null and metadata->'contact_confirmation_v2' is null) or medusa_customer_id is null or medusa_customer_id = ?)", [input.medusa_customer_id])
+    }
     const affected = await update.update(dbPatch)
     if (affected === 0) throw new Error("Communications identity changed during update")
     if (input.sms_consent !== undefined || input.phone !== undefined || existingMetadata.primary_contact_v1) {
