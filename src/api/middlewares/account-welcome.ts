@@ -23,11 +23,7 @@ export function captureAccountWelcomeResponse(
   res: MedusaResponse,
   next: MedusaNextFunction
 ) {
-  if (
-    process.env.GP_ACCOUNT_WELCOME_ENABLED !== "true" ||
-    req.method !== "POST"
-  )
-    return next()
+  if (req.method !== "POST") return next()
   const raw = req.headers[MEASUREMENT_HEADER],
     context = requestMeasurementContext(raw, Date.now(), true)
   const holder: WelcomeHolder = {

@@ -35,6 +35,11 @@ const email = (v: unknown) =>
 const date = (v: any) =>
   v && Number.isFinite(new Date(v).getTime()) ? new Date(v).toISOString() : null
 export const welcomeKey = (id: string) => `customer-welcome:${id}`
+/** Required service mail stays on at handover; explicit false/invalid pauses sending. */
+export function accountWelcomeEnabled() {
+  const value = process.env.GP_ACCOUNT_WELCOME_ENABLED?.trim()
+  return !value || value === "true"
+}
 export function welcomeServerLane(): WelcomeLane {
   const key = process.env.STRIPE_API_KEY || ""
   return key.startsWith("sk_live_")
@@ -46,11 +51,8 @@ export function welcomeServerLane(): WelcomeLane {
 
 /** Capture native return data before refetch/response fields can change it. */
 export function captureWelcomeCustomers(customers: any, execution: any) {
-  if (
-    process.env.GP_ACCOUNT_WELCOME_ENABLED !== "true" ||
-    !execution.transactionId
-  )
-    return
+  // Retain the original even while sending is paused. Resume must not refetch it.
+  if (!execution.transactionId) return
   let holder: WelcomeHolder
   try {
     holder = execution.container.resolve(ACCOUNT_WELCOME_CONTEXT)
@@ -234,7 +236,7 @@ export async function welcomeSendGuard(
   input: any,
   checkCurrentRecipient = true
 ): Promise<string | null> {
-  if (process.env.GP_ACCOUNT_WELCOME_ENABLED !== "true")
+  if (!accountWelcomeEnabled())
     return "account_welcome_disabled"
   const row = await db("gp_communication_event")
     .where({ event_id: input.metadata?.account_welcome_source_id || "" })

@@ -98,6 +98,17 @@ const signup = () =>
       first_name: customer.first_name,
     }),
   })
+it("captures a successful account with the release defaults and analytics disabled", async () => {
+  delete process.env.GP_ACCOUNT_WELCOME_ENABLED
+  delete process.env.GP_CUSTOMER_MEASUREMENT_ENABLED
+  delete process.env.GP_CART_MEASUREMENT_ENABLED
+  const response = await signup()
+  expect(response.status).toBe(200)
+  expect(emit).toHaveBeenCalledTimes(1)
+  expect(emit.mock.calls[0][0].data).toMatchObject({
+    lane: "production", context: null, customer: { email: customer.email },
+  })
+})
 it.each([
   { id: customer.id },
   { ...customer, email: "later@example.test", first_name: "Later" },

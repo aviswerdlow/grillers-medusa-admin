@@ -15,6 +15,7 @@ import {
 } from "./hebrew-calendar"
 import { validateSmsMarketingContent } from "./sms"
 import { readMaterializedSegmentMembers, SegmentAudienceUnavailable } from "./segment-membership"
+import { emitCommunicationsAudienceHoldAlert } from "../communications-job-alerts"
 
 type KnexLike = any
 
@@ -849,7 +850,8 @@ export async function evaluateFlowsForEvent(
  * runner downtime; holdouts apply exactly as with event triggers.
  */
 export async function enrollCalendarAnchoredFlows(
-  db: KnexLike
+  db: KnexLike,
+  logger?: Parameters<typeof emitCommunicationsAudienceHoldAlert>[0]["logger"]
 ): Promise<{ evaluated: number; enrolled: number; unavailable: number }> {
   const flows = await db("gp_communication_flow")
     .whereNull("deleted_at")
@@ -921,6 +923,10 @@ export async function enrollCalendarAnchoredFlows(
       if (enrolled) summary.enrolled += 1
     }
   }
+  await emitCommunicationsAudienceHoldAlert({
+    stage: "calendar", unavailable: summary.unavailable,
+    evaluated: summary.evaluated, logger,
+  })
   return summary
 }
 

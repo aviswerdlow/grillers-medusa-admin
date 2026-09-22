@@ -28,7 +28,8 @@ import { communicationQueueHealth, enqueueCampaignSend } from "./queue"
 import { communicationReporting } from "./reporting"
 import { listEmailTemplates, seedEmailTemplates } from "./templates"
 import { resolvePostmarkMonthlyLimit } from "./postmark-usage"
-import { readMaterializedSegmentMembers, refreshMaterializedSegment, SegmentAudienceUnavailable } from "./segment-membership"
+import { readMaterializedSegmentMembers, refreshMaterializedSegment, segmentMembershipState, SegmentAudienceUnavailable } from "./segment-membership"
+import { emitCommunicationsAudienceHoldAlert } from "../communications-job-alerts"
 
 type KnexLike = any
 
@@ -1375,7 +1376,7 @@ export async function runCommunicationMaintenance(container: MedusaContainer) {
   const segments = await refreshSegmentMembership(container)
   // Calendar-anchored flows enroll AFTER segments refresh so a same-tick
   // "6 weeks before seder" fire sees today's membership.
-  const calendarEnrollment = await enrollCalendarAnchoredFlows(db)
+  const calendarEnrollment = await enrollCalendarAnchoredFlows(db, container.resolve("logger"))
   const campaigns = await sendDueScheduledCampaigns(container)
   const sunset = await sunsetInactiveProfiles(db)
   const result = await runDueFlowEnrollments(container, 100)
@@ -1624,7 +1625,10 @@ export async function refreshProfileLifecycle(container: MedusaContainer) {
   return { updated }
 }
 
-export async function refreshSegmentMembership(container: MedusaContainer) {
+export async function refreshSegmentMembership(
+  container: MedusaContainer,
+  options: { onlyDue?: boolean } = {}
+) {
   const db = dbFrom(container)
   await seedCommunicationDefaults(db)
   await seedGpSegmentLibrary(db)
@@ -1636,8 +1640,18 @@ export async function refreshSegmentMembership(container: MedusaContainer) {
   let refreshed = 0
   let unavailable = 0
   let activeMembers = 0
+  let skipped = 0
 
   for (const segment of segments) {
+    const state = segmentMembershipState(segment)
+    // Refresh well before the 24-hour reader limit. A failed/missing receipt is
+    // always due; old member rows never make that failure look successful.
+    if (options.onlyDue && state.available &&
+      Date.now() - Date.parse(state.receipt.completed_at) < 6 * 60 * 60 * 1000) {
+      skipped += 1
+      activeMembers += state.receipt.member_count
+      continue
+    }
     const result = await refreshMaterializedSegment(db, segment.id, async (trx, definition) => {
       if (isClickHouseSegmentDefinition(definition)) {
         return clickHouseSegmentProfileIds(trx, definition)
@@ -1656,5 +1670,9 @@ export async function refreshSegmentMembership(container: MedusaContainer) {
     }
   }
 
-  return { refreshed, unavailable, active_members: activeMembers }
+  await emitCommunicationsAudienceHoldAlert({
+    stage: "refresh", unavailable, evaluated: segments.length - skipped,
+    logger: container.resolve("logger"),
+  })
+  return { refreshed, unavailable, active_members: activeMembers, skipped }
 }

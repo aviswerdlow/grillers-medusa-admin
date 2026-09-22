@@ -17,7 +17,7 @@ service email is independent of analytics or marketing consent.
   storage without profile creation, destinations or flows. Duplicate notification
   cannot replace the original recipient or context. Native account/profile work
   remains independent; failure before bus acceptance is a distinct source gap.
-- A disabled, bounded worker uses the existing source delivery lock/receipt.
+- A bounded minute worker uses the existing source delivery lock/receipt.
   Test/unknown sources cannot send through production or raise production-send
   alerts. Current account deletion, loss of account status or changed recipient
   veto the saved welcome; they never redirect it to a new address.
@@ -35,14 +35,33 @@ service email is independent of analytics or marketing consent.
   operational service record remains. Welcome outcomes cannot enroll marketing
   flows. A callback or current profile cannot grant original analytics permission.
 
-`GP_ACCOUNT_WELCOME_ENABLED=true` enables capture and the minute worker together;
-it is unset by default. The old delayed customer.created welcome subscriber is
-retired with this source owner and is not a fallback. Native guest/import/staff
-customer creation is not evidence of successful Store account registration.
+`GP_ACCOUNT_WELCOME_ENABLED` defaults to **enabled** (unset/empty or `true`).
+Explicit `false` or an invalid nonempty value pauses the worker and send guard.
+Capture remains active during a pause so resuming can use the original successful
+registration, without repeating signup or reconstructing a recipient. This removes
+the unapproved default-off service-mail gap; it does not turn analytics or marketing
+on. Both the saved source and current server must still be the production lane.
+Current Stripe test mode does not send production welcomes, and old test/unknown
+sources never become production after a key change.
+
+Against current storefront main, no new request header or frontend flag is needed
+for a service welcome. The backend API must capture the source and its paired worker
+must run this revision. Warm up and verify that handover before removing the old
+release; mixed old/new API and worker versions are not a proven transition. Retain
+the shared idempotency key and reconcile in-flight provider attempts. The old delayed
+customer.created subscriber remains retired: it can precede failed auth linking and
+cannot supply the original recipient safely. Native guest/import/staff customer
+creation is not evidence of successful Store account registration.
+
 No new schema is needed; retain the five publication migrations and existing
 communications tables, source/message history and delivery receipts on rollback.
+Before the inherited migrating stack releases, verify a fresh protected database
+backup, restore access/procedure, migration journal and previous/candidate SHAs.
 Paired deployment, request-scope propagation through nested native workflows,
 event-bus acceptance/retention, concurrent account changes and controlled recipient/
 Postmark/operator readback remain #332 gates. Do not repeat signup to repair email.
+The wider PR remains held by #372/#373: this default fixes the service-welcome
+configuration gap, not the separate retired purchase-producer gap or missing
+isolated rehearsal destinations. Do not deploy the whole PR alone.
 This does not complete other calendar/segment/SMS/custom-flow/provider producers,
 back-in-stock/review-click or browser identity/exposure work. No send is authorized.

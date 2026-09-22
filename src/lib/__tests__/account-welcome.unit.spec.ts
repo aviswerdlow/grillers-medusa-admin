@@ -11,6 +11,7 @@ import {
   welcomeSourceFromRow,
   welcomeMeasurementProperties,
   welcomeServerLane,
+  accountWelcomeEnabled,
 } from "../account-welcome"
 import { nativeSnapshotHash } from "../analytics/customer-measurement-context"
 import {
@@ -170,11 +171,22 @@ it("keeps successful signup independent of event-bus failure", async () => {
     "[account-welcome] source notification unavailable"
   )
 })
-it("is disabled by default without replacing the native response", () => {
-  delete process.env.GP_ACCOUNT_WELCOME_ENABLED
+it.each([undefined, "false", "invalid"])("retains original registration evidence with flag %s", (flag) => {
+  if (flag === undefined) delete process.env.GP_ACCOUNT_WELCOME_ENABLED
+  else process.env.GP_ACCOUNT_WELCOME_ENABLED = flag
   const x = setup()
-  expect(x.res.json).toBe(x.json)
-  expect(x.scope.hasRegistration(ACCOUNT_WELCOME_CONTEXT)).toBe(false)
+  captureWelcomeCustomers([customer], { container: x.scope, transactionId: "tx_paused" })
+  x.res.json({ customer: { id: customer.id } })
+  expect(x.emit).toHaveBeenCalledTimes(1)
+  expect(x.emit.mock.calls[0][0].data.customer.email).toBe(customer.email)
+  expect(x.json).toHaveBeenCalledWith({ customer: { id: customer.id } })
+})
+it.each([
+  [undefined, true], ["", true], ["true", true], ["false", false], ["invalid", false],
+] as const)("service delivery default/explicit pause %s => %s", (flag, enabled) => {
+  if (flag === undefined) delete process.env.GP_ACCOUNT_WELCOME_ENABLED
+  else process.env.GP_ACCOUNT_WELCOME_ENABLED = flag
+  expect(accountWelcomeEnabled()).toBe(enabled)
 })
 it("validates saved source hashes and keeps recipient/name out of measurement properties", () => {
   const x = setup()

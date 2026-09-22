@@ -1,6 +1,7 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import {
+  accountWelcomeEnabled,
   deliverAccountWelcomes,
   welcomeKey,
   welcomeServerLane,
@@ -10,7 +11,7 @@ import { buildWelcomeEmail } from "../lib/emails/templates/welcome"
 import { emitOpsAlert } from "../lib/ops-alert"
 
 export default async function gpAccountWelcome(container: MedusaContainer) {
-  if (process.env.GP_ACCOUNT_WELCOME_ENABLED !== "true") return
+  if (!accountWelcomeEnabled()) return
   const db = container.resolve(ContainerRegistrationKeys.PG_CONNECTION),
     logger = container.resolve("logger")
   const summary = await deliverAccountWelcomes(db, async (s) => {

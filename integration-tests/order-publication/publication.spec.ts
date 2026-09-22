@@ -2,6 +2,7 @@ import { saveAccountWelcome, deliverAccountWelcomes, welcomeFromResponse, welcom
 import gpAccountWelcome from "../../src/jobs/gp-account-welcome";
 import { updatePostmarkMessageState, recordSuppression } from "../../src/lib/communications/core";
 import { emitOpsAlert } from "../../src/lib/ops-alert";
+import { emitCommunicationsAudienceHoldAlert } from "../../src/lib/communications-job-alerts";
 import { saveCustomerMeasurement, deliverCustomerMeasurements } from "../../src/lib/customer-measurement";
 import { captureCartResponse, cartSourceFromRow, saveCartMeasurement, deriveCartMeasurement, deliverCartMeasurements } from "../../src/lib/cart-measurement";
 import { projectNativeCartActivity, expireInactiveCarts, cartRecoveryAllowed, syncCartLifecycleFromEvent } from "../../src/lib/communications/cart-lifecycle";
@@ -1893,9 +1894,32 @@ describe("account welcome source and service delivery", () => {
     const { container, notify } = await welcomeFixture({ lane });await gpAccountWelcome(container);
     expect(notify).not.toHaveBeenCalled();expect(await db("gp_customer_profile")).toHaveLength(0);expect(emitOpsAlert).not.toHaveBeenCalled();
   });
-  it("pauses without advancing a saved source when the flag is unset", async () => {
-    const { container, notify } = await welcomeFixture();delete process.env.GP_ACCOUNT_WELCOME_ENABLED;await gpAccountWelcome(container);
+  it.each([undefined, ""])("sends once with default flag %s while analytics flags are disabled", async flag => {
+    const { container, notify, snapshot } = await welcomeFixture({ consent: false });
+    if (flag === undefined) delete process.env.GP_ACCOUNT_WELCOME_ENABLED;
+    else process.env.GP_ACCOUNT_WELCOME_ENABLED = flag;
+    process.env.GP_CUSTOMER_MEASUREMENT_ENABLED = "false";
+    process.env.GP_CART_MEASUREMENT_ENABLED = "false";
+    process.env.GP_ORDER_PUBLICATION_ENABLED = "false";
+    await gpAccountWelcome(container);await gpAccountWelcome(container);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0].to).toBe(snapshot.customer.email);
+    expect((await db("gp_message_log").first()).postmark_message_id).toBe("pm_message_original");
+    expect(await db("gp_flow_enrollment")).toHaveLength(0);
+  });
+  it.each(["false", "invalid"])("explicit pause %s retains the source and resumes once at the original recipient", async flag => {
+    const { container, notify, snapshot } = await welcomeFixture();process.env.GP_ACCOUNT_WELCOME_ENABLED = flag;await gpAccountWelcome(container);
     expect(await db("gp_event_delivery")).toHaveLength(0);expect(notify).not.toHaveBeenCalled();
+    expect(welcomeSourceFromRow(await db("gp_communication_event").first())).toEqual(snapshot);
+    delete process.env.GP_ACCOUNT_WELCOME_ENABLED;await gpAccountWelcome(container);await gpAccountWelcome(container);
+    expect(notify).toHaveBeenCalledTimes(1);expect(notify.mock.calls[0][0].to).toBe(snapshot.customer.email);
+  });
+  it("does not redirect a welcome when the account email changes during a pause", async () => {
+    const { container, notify } = await welcomeFixture();process.env.GP_ACCOUNT_WELCOME_ENABLED = "false";await gpAccountWelcome(container);
+    await db("customer").update({ email: "changed@example.test" });
+    delete process.env.GP_ACCOUNT_WELCOME_ENABLED;await gpAccountWelcome(container);
+    expect(notify).not.toHaveBeenCalled();
+    expect((await db("gp_event_delivery").where({ target: "account_welcome_email" }).first()).status).toBe("skipped");
   });
   it("holds an ambiguous failed provider attempt instead of automatically resending", async () => {
     const { container, notify } = await welcomeFixture();notify.mockRejectedValue(new Error("transport outcome unknown"));await gpAccountWelcome(container);
@@ -2019,6 +2043,8 @@ describe("materialized audience selection receipts", () => {
   });
 
   it("calendar enrollment holds unavailable audiences and retains the successful refresh identity", async () => {
+    await emitCommunicationsAudienceHoldAlert({ stage: "calendar", unavailable: 0, evaluated: 0 });
+    (emitOpsAlert as jest.Mock).mockClear();
     await audienceFixture();
     await db("gp_communication_flow").insert({ id: "calendar_fixture", key: "calendar-fixture", name: "Calendar fixture", status: "active", trigger_event: "calendar_anchor",
       trigger_conditions: { anchor: "pesach", segment_key: "fixture-audience" }, metadata: { holdout_pct: 0 }, steps: JSON.stringify([{ type: "delay", minutes: 1 }]) });
@@ -2026,6 +2052,10 @@ describe("materialized audience selection receipts", () => {
     calendar.resolveCalendarAnchor.mockReturnValue({ fireAt: new Date(Date.now() - 1000), holiday: { hebrewYear: 5787 } });
     try {
       expect(await enrollCalendarAnchoredFlows(db)).toEqual({ evaluated: 1, enrolled: 0, unavailable: 1 });
+      expect(emitOpsAlert).toHaveBeenCalledWith(expect.objectContaining({
+        alertKind: "communications_audience_held",
+        meta: expect.objectContaining({ stage: "calendar", unavailable: 1 }),
+      }));
       expect(await db("gp_flow_enrollment")).toHaveLength(0);
       await refresh(["profile_one"]);
       const receipt = (await read()).receipt;

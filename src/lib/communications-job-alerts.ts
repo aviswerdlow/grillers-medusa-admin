@@ -54,3 +54,50 @@ export function emitCommunicationsFlowStepErrorsAlert(input: {
     },
   })
 }
+
+// Two fixed keys, independent of recipients/segments; bound repeated manual runs.
+const AUDIENCE_ALERT_INTERVAL_MS = 15 * 60 * 1000
+const audienceHolds = new Map<
+  "refresh" | "calendar",
+  { reportedAt: number; suppressed: number }
+>()
+
+export async function emitCommunicationsAudienceHoldAlert(input: {
+  stage: "refresh" | "calendar"
+  unavailable: number
+  evaluated: number
+  logger?: LoggerLike
+}) {
+  if (!input.unavailable) {
+    audienceHolds.delete(input.stage)
+    return
+  }
+  const now = Date.now()
+  const prior = audienceHolds.get(input.stage)
+  if (prior && now >= prior.reportedAt && now - prior.reportedAt < AUDIENCE_ALERT_INTERVAL_MS) {
+    prior.suppressed += 1
+    return
+  }
+  audienceHolds.set(input.stage, { reportedAt: now, suppressed: 0 })
+  const meta = {
+    stage: input.stage,
+    unavailable: input.unavailable,
+    evaluated: input.evaluated,
+    suppressed_since_last_alert: prior?.suppressed || 0,
+  }
+  input.logger?.warn?.(`[communications-audience] ${JSON.stringify(meta)}`)
+  try {
+    await emitOpsAlert({
+      alertKind: "communications_audience_held",
+      severity: "warn",
+      title: `Communications audience ${input.stage} needs review`,
+      path: "src/lib/communications/admin.ts",
+      source: "medusa-server",
+      logger: input.logger,
+      meta,
+    })
+  } catch {
+    // An alert failure neither clears the hold nor interrupts unrelated work.
+    input.logger?.warn?.("[communications-audience] hold alert unavailable")
+  }
+}
