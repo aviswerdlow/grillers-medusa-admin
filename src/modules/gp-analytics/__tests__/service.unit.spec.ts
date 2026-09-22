@@ -259,7 +259,7 @@ describe("GpAnalyticsProviderService", () => {
     )
 
     await service.track({
-      event: "cart_updated",
+      event: "product_viewed",
       actor_id: "cus_789",
       properties: {
         cart_id: "cart_789",
@@ -273,10 +273,10 @@ describe("GpAnalyticsProviderService", () => {
     expect(emitOpsAlert).toHaveBeenCalledWith(
       expect.objectContaining({
         alertKind: "analytics_delivery_failed",
-        title: "Analytics delivery to jitsu failed for cart_updated",
+        title: "Analytics delivery to jitsu failed for product_viewed",
         meta: expect.objectContaining({
           target: "jitsu",
-          event_type: "cart_updated",
+          event_type: "product_viewed",
           stage: "http_rejected",
           status: 503,
           cart_id: "cart_789",

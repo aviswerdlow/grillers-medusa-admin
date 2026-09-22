@@ -45,6 +45,7 @@ async function findLastClick(db: KnexLike, event: Record<string, any>) {
       "gp_message_log.cart_id as message_cart_id"
     )
     .where("gp_link_click.clicked_at", ">=", cutoff)
+    .where("gp_link_click.clicked_at", "<=", occurredAt(event))
     .orderBy("gp_link_click.clicked_at", "desc")
     .limit(1)
 
@@ -65,6 +66,7 @@ async function findLastMessage(db: KnexLike, event: Record<string, any>) {
     .whereIn("message_purpose", ["broadcast", "marketing_1to1"])
     .whereIn("status", ["sent", "delivered"])
     .where("sent_at", ">=", cutoff)
+    .where("sent_at", "<=", occurredAt(event))
     .orderBy("sent_at", "desc")
     .limit(1)
 
@@ -87,7 +89,7 @@ export async function attributeOrderFromEvent(
   const existing = await db("gp_attribution")
     .whereNull("deleted_at")
     .where("order_id", event.order_id)
-    .where("attribution_type", "last_click")
+    .whereIn("attribution_type", ["last_click", "last_touch"])
     .first()
   if (existing) return existing
 
@@ -121,15 +123,17 @@ export async function attributeOrderFromEvent(
     updated_at: now(),
   }
 
-  await db("gp_attribution")
+  const inserted = await db("gp_attribution")
     .insert(row)
     .onConflict(db.raw('("order_id", "attribution_type") where "deleted_at" is null'))
-    .ignore()
+    .ignore().returning("id")
+  if (!inserted.length) return null
 
   if (row.campaign_id) {
     const campaign = await db("gp_campaign")
       .whereNull("deleted_at")
       .where("id", row.campaign_id)
+      .forUpdate()
       .first()
     const metrics = campaign?.metrics || {}
     await db("gp_campaign").where("id", row.campaign_id).update({

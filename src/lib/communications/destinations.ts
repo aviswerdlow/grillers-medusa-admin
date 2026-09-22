@@ -4,6 +4,15 @@ import { emitOpsAlert } from "../ops-alert"
 
 type KnexLike = any
 
+function excludedCartMeasurement(event: Record<string, any>) {
+  const p = event.properties || {}
+  if (event.source === "medusa-account-welcome-v1") return true
+  if (event.source === "communications-account") return p.original_account_source_valid !== true ||
+    p.analytics_consent !== true || p.test_event !== false || p.analytics_environment !== "production"
+  return event.source === "communications-cart" && (p.original_cart_source_valid !== true ||
+    p.analytics_consent !== true || p.test_event !== false || p.analytics_environment !== "production")
+}
+
 const id = (prefix: string) => `${prefix}_${crypto.randomUUID()}`
 const ALERT_PATH = "src/lib/communications/destinations.ts"
 const ALERTED_EVENT_NAMES = new Set([
@@ -206,6 +215,10 @@ export async function writeEventToClickHouse(
   db: KnexLike,
   event: Record<string, any>
 ) {
+  if (excludedCartMeasurement(event)) {
+    await delivery(db, event, "clickhouse", "skipped", { reason: "original_cart_measurement_not_permitted" })
+    return false
+  }
   const client = clickHouseClient()
   if (!client) {
     await delivery(db, event, "clickhouse", "skipped", { reason: "not_configured" })
@@ -293,6 +306,10 @@ export async function writeEventToGa4(
   db: KnexLike,
   event: Record<string, any>
 ) {
+  if (excludedCartMeasurement(event)) {
+    await delivery(db, event, "ga4", "skipped", { reason: "original_cart_measurement_not_permitted" })
+    return false
+  }
   if (!ga4Configured()) {
     await delivery(db, event, "ga4", "skipped", { reason: "not_configured" })
     return false

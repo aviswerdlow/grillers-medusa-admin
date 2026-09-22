@@ -9,12 +9,6 @@ export default async function inventoryAllocationOrderCanceledHandler({
 }: SubscriberArgs<{ id: string; reason?: string }>) {
   const logger = container.resolve("logger")
   const db = container.resolve(ContainerRegistrationKeys.PG_CONNECTION)
-  let analytics: any = null
-  try {
-    analytics = container.resolve("analytics")
-  } catch {
-    analytics = null
-  }
 
   try {
     const released = await releaseAllocationsForOrder({
@@ -28,16 +22,8 @@ export default async function inventoryAllocationOrderCanceledHandler({
       `[inventory-allocation] order=${data.id} cancellation released=${released}`
     )
 
-    if (analytics?.track && released > 0) {
-      await analytics.track({
-        event: "inventory_allocation_released",
-        properties: {
-          order_id: data.id,
-          released_count: released,
-          reason: "released_cancellation",
-        },
-      })
-    }
+    // Measurement recovers individual persisted release audits independently;
+    // never repeat release to repair reporting or report a retry as a new release.
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     logger.error(

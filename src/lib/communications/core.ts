@@ -1,3 +1,4 @@
+import { accountWelcomeEnabled, welcomeSourceFromRow, welcomeMeasurementProperties, welcomeOutcomeTracking, welcomeSendGuard } from "../account-welcome"
 import crypto from "crypto"
 import type { Logger, MedusaContainer } from "@medusajs/framework/types"
 import {
@@ -749,8 +750,26 @@ export async function recordIdentity(
 
 export async function recordCommunicationEvent(
   db: KnexLike,
-  input: CommunicationEventInput
+  input: CommunicationEventInput,
+  options: { deferSideEffects?: boolean } = {}
 ): Promise<Record<string, any>> {
+  if (input.source === "communications-account") {
+    const row = await db("gp_communication_event").where({ event_id: input.context?.account_welcome_source_id || "" }).whereNull("deleted_at").first()
+    const original = welcomeMeasurementProperties(welcomeSourceFromRow(row))
+    const allowed = ["stream", "purpose", "topic", "reason", "postmark_message_id", "provider_record_type", "provider_occurred_at"]
+    const properties = Object.fromEntries(Object.entries(input.properties || {}).filter(([key]) => allowed.includes(key)))
+    input = { ...input, event_id: input.event_id || `account-welcome-outcome:${input.context?.account_welcome_source_id || input.message_id || "unavailable"}:${input.event_name}:${input.message_id || properties.reason || "unsent"}`,
+      properties: { ...properties, ...original }, context: { ...(input.context || {}), experiment_context: original.experiment_context } }
+  }
+  if (input.source === "communications-cart") {
+    const { cartSourceFromRow, cartMeasurementProperties } = await import("../cart-measurement.js")
+    const source = await db("gp_communication_event").where({ event_id: input.context?.cart_source_event_id || "" }).whereNull("deleted_at").first()
+    const snapshot = cartSourceFromRow(source)
+    const original = cartMeasurementProperties(snapshot)
+    input = { ...input, properties: { ...(input.properties || {}), ...original, original_cart_source_valid: Boolean(snapshot) },
+      context: { ...(input.context || {}), experiment_context: original.experiment_context,
+        native_cart_source_hash: snapshot ? source.context.native_cart_hash : null } }
+  }
   const now = new Date()
   const eventId = input.event_id || crypto.randomUUID()
   const experimentContext = experimentContextFrom(input.context, input.properties)
@@ -827,6 +846,10 @@ export async function recordCommunicationEvent(
     .onConflict(db.raw('("event_id") where "deleted_at" is null'))
     .ignore()
 
+  // The order publication journal owns purchase destinations and durable
+  // automation retries. Its caller commits the row and counters atomically.
+  if (options.deferSideEffects) return row
+
   try {
     const { writeEventDestinations } = await import("./destinations.js")
     await writeEventDestinations(db, row)
@@ -840,6 +863,11 @@ export async function recordCommunicationEvent(
     })
     // External delivery must never block event ingestion.
   }
+
+  // A service receipt is not a marketing-flow trigger.
+  if (row.source === "communications-account") return row
+
+  if (row.source === "communications-cart" && (row.properties.original_cart_source_valid !== true || row.properties.test_event !== false)) return row
 
   try {
     const { enqueueCommunicationEvent } = await import("./queue.js")
@@ -971,10 +999,44 @@ export async function sendTrackedEmail(
   const emailLower = normalizeEmail(input.to)
   const now = new Date()
   const purpose = input.purpose || inferredPurpose(input.stream, input.template_key)
+  if ((input.template_key === "customer-welcome" && accountWelcomeEnabled()) || input.metadata?.account_welcome_source_id) {
+    const veto = await welcomeSendGuard(db, input, false)
+    if (veto) return { ok: false, error: veto }
+    const prior = await db("gp_message_log").whereNull("deleted_at").where("idempotency_key", input.idempotency_key).first()
+    if (prior) {
+      if (["sent", "delivered", "opened", "clicked", "bounced", "complained", "unsubscribed"].includes(prior.status) && prior.postmark_message_id &&
+        prior.provider_response?.status === "success" && prior.provider_response?.external_id === prior.postmark_message_id) {
+        await recordCommunicationEvent(db, {
+          event_name: "email_sent", profile_id: prior.profile_id, template_key: prior.template_key, message_id: prior.id,
+          occurred_at: prior.sent_at || prior.queued_at,
+          properties: { postmark_message_id: prior.postmark_message_id, stream: prior.message_stream, purpose: prior.message_purpose, topic: prior.topic },
+          ...welcomeOutcomeTracking(prior.metadata, "customer-welcome"),
+        })
+        return { ok: true, skipped: true, messageId: prior.postmark_message_id }
+      }
+      return { ok: false, error: "account_welcome_provider_reconciliation_required" }
+    }
+    const recipientVeto = await welcomeSendGuard(db, input)
+    if (recipientVeto) return { ok: false, error: recipientVeto }
+  }
+  let messageMetadata = input.metadata || {}
+  if (messageMetadata.account_welcome_source_id) {
+    const row = await db("gp_communication_event").where({ event_id: messageMetadata.account_welcome_source_id }).whereNull("deleted_at").first()
+    messageMetadata = { ...messageMetadata, ...welcomeMeasurementProperties(welcomeSourceFromRow(row)) }
+  }
+  if (messageMetadata.cart_source_event_id) {
+    const { cartSourceFromRow, cartMeasurementProperties } = await import("../cart-measurement.js")
+    const source = await db("gp_communication_event").where({ event_id: messageMetadata.cart_source_event_id }).whereNull("deleted_at").first()
+    messageMetadata = { ...messageMetadata, ...cartMeasurementProperties(cartSourceFromRow(source)) }
+  }
   const experimentContext = experimentContextFrom(
-    input.metadata,
+    messageMetadata,
     input.template_model
   )
+  const cartTracking = input.metadata?.account_welcome_source_id ? welcomeOutcomeTracking(input.metadata) : input.metadata?.cart_source_event_id ? {
+    source: "communications-cart",
+    context: { cart_source_event_id: input.metadata.cart_source_event_id },
+  } : { context: experimentContext ? { experiment_context: experimentContext } : {} }
   const identityCustomer = input.medusa_customer_id
     // Historical service notices retain the account identity even after soft deletion.
     ? await db("customer").where({ id: input.medusa_customer_id }).first()
@@ -1011,7 +1073,7 @@ export async function sendTrackedEmail(
         topic: input.topic,
         reason: "missing_marketing_consent",
       },
-      context: experimentContext ? { experiment_context: experimentContext } : {},
+      ...cartTracking,
     })
     return { ok: true, skipped: true }
   }
@@ -1036,7 +1098,7 @@ export async function sendTrackedEmail(
         topic: input.topic,
         reason: "topic_preference",
       },
-      context: experimentContext ? { experiment_context: experimentContext } : {},
+      ...cartTracking,
     })
     return { ok: true, skipped: true }
   }
@@ -1057,7 +1119,7 @@ export async function sendTrackedEmail(
         topic: input.topic,
         reason: "suppression",
       },
-      context: experimentContext ? { experiment_context: experimentContext } : {},
+      ...cartTracking,
     })
     return { ok: true, skipped: true }
   }
@@ -1076,7 +1138,26 @@ export async function sendTrackedEmail(
     .where("idempotency_key", idempotencyKey)
     .first()
 
-  if (existing && ["queued", "sent", "delivered"].includes(existing.status)) {
+  if (input.metadata?.account_welcome_source_id && existing) {
+    if (["sent", "delivered", "opened", "clicked", "bounced", "complained", "unsubscribed"].includes(existing.status) && existing.postmark_message_id &&
+      existing.provider_response?.status === "success" && existing.provider_response?.external_id === existing.postmark_message_id) {
+      await recordCommunicationEvent(db, {
+        event_name: "email_sent", profile_id: existing.profile_id, template_key: existing.template_key, message_id: existing.id,
+        occurred_at: existing.sent_at || existing.queued_at,
+        properties: { postmark_message_id: existing.postmark_message_id, stream: existing.message_stream, purpose: existing.message_purpose, topic: existing.topic },
+        ...welcomeOutcomeTracking(existing.metadata, "customer-welcome"),
+      })
+      return { ok: true, skipped: true, messageId: existing.postmark_message_id }
+    }
+    // queued/failed can include an acceptance-before-receipt crash. Do not
+    // resend or manufacture delivery; reconcile the provider result first.
+    return { ok: false, error: "account_welcome_provider_reconciliation_required" }
+  }
+
+  if (existing?.status === "queued") {
+    return { ok: false, error: "notification_provider_receipt_unconfirmed" }
+  }
+  if (existing && ["sent", "delivered"].includes(existing.status)) {
     return {
       ok: true,
       skipped: true,
@@ -1116,9 +1197,7 @@ export async function sendTrackedEmail(
           reason: blackout.reason || "shabbat_blackout",
           defer_until: blackout.until ? blackout.until.toISOString() : null,
         },
-        context: experimentContext
-          ? { experiment_context: experimentContext }
-          : {},
+        ...cartTracking,
       })
       return {
         ok: false,
@@ -1180,9 +1259,7 @@ export async function sendTrackedEmail(
             cap,
             sent_this_week: sentThisWeek,
           },
-          context: experimentContext
-            ? { experiment_context: experimentContext }
-            : {},
+          ...cartTracking,
         })
         return { ok: true, skipped: true }
       }
@@ -1214,7 +1291,7 @@ export async function sendTrackedEmail(
     template_model: input.template_model || {},
     experiment_context: experimentContext,
     metadata: {
-      ...(input.metadata || {}),
+      ...messageMetadata,
       purpose,
       ...(experimentContext ? { experiment_context: experimentContext } : {}),
     },
@@ -1300,18 +1377,23 @@ export async function sendTrackedEmail(
           cart_id: input.cart_id,
           campaign_id: input.campaign_id,
           flow_id: input.flow_id,
-          ...(input.metadata || {}),
+          ...messageMetadata,
         }),
       },
     })
 
     const resultRecord = Array.isArray(result) ? result[0] : result
-    const messageId =
-      resultRecord?.provider_id ||
-      resultRecord?.id ||
-      resultRecord?.external_id ||
-      resultRecord?.data?.id ||
-      null
+    // Medusa provider_id identifies the provider; id identifies its internal
+    // notification. Postmark's MessageID is returned as external_id.
+    const messageId = resultRecord?.status === "success" && typeof resultRecord?.external_id === "string" && resultRecord.external_id.trim()
+      ? resultRecord.external_id : null
+    if (!messageId) {
+      await db("gp_message_log").where("id", messageRow.id).update({
+        status: "queued", provider_response: resultRecord || {},
+        error_message: "notification_provider_receipt_unconfirmed", updated_at: new Date(),
+      })
+      return { ok: false, error: "notification_provider_receipt_unconfirmed" }
+    }
 
     await db("gp_message_log")
       .where("id", messageRow.id)
@@ -1341,7 +1423,7 @@ export async function sendTrackedEmail(
         topic: input.topic,
         subject: input.subject,
       },
-      context: experimentContext ? { experiment_context: experimentContext } : {},
+      ...cartTracking,
     })
 
     return { ok: true, messageId: messageId || undefined }
@@ -1367,7 +1449,7 @@ export async function sendTrackedEmail(
       template_key: input.template_key,
       message_id: messageRow.id,
       properties: { stream: input.stream, error },
-      context: experimentContext ? { experiment_context: experimentContext } : {},
+      ...cartTracking,
     })
     await emitCommunicationEmailFailureAlert({
       logger,
@@ -1493,7 +1575,7 @@ export async function updatePostmarkMessageState(
 ): Promise<Record<string, any> | null> {
   const messageId = payload.MessageID || payload.MessageId || payload.MessageID__c
   const recordType = String(payload.RecordType || payload.Type || "").toLowerCase()
-  const email = payload.Recipient || payload.Email || payload.email
+  let email = payload.Recipient || payload.Email || payload.email
   const now = payload.ReceivedAt ? asDate(payload.ReceivedAt) : new Date()
   const patch: Record<string, any> = { updated_at: new Date() }
 
@@ -1521,6 +1603,7 @@ export async function updatePostmarkMessageState(
       .where("postmark_message_id", messageId)
       .first()
     if (message) {
+      if (message.template_key === "customer-welcome") email = message.email
       await db("gp_message_log").where("id", message.id).update(patch)
     }
   }
@@ -1595,7 +1678,12 @@ export async function updatePostmarkMessageState(
     flow_id: message?.flow_id || null,
     template_key: message?.template_key || null,
     message_id: message?.id || null,
-    properties: payload,
+    properties: message?.template_key === "customer-welcome" ? {
+      postmark_message_id: messageId, provider_record_type: recordType,
+      provider_occurred_at: payload.ReceivedAt ? now.toISOString() : null,
+    } : payload,
+    ...(message?.template_key === "customer-welcome" ? { occurred_at: now } : {}),
+    ...welcomeOutcomeTracking(message?.metadata, message?.template_key),
   })
 
   return message

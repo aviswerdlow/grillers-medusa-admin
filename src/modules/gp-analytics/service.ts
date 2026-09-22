@@ -6,6 +6,8 @@ import type {
 } from "@medusajs/types"
 import { createHash, randomUUID } from "crypto"
 import { emitOpsAlert } from "../../lib/ops-alert"
+import { PUBLICATION_EVENTS, publicationEligibility, type DeliveryResult, type PublicationTarget } from "../../lib/order-publication"
+import { rehearsalRoute, type RehearsalOptions, type RehearsalTarget } from "../../lib/order-publication-rehearsal"
 
 type InjectedDependencies = {
   logger: Logger
@@ -17,6 +19,7 @@ type Options = {
   gpAnalyticsEndpoint?: string
   gpAnalyticsServerKey?: string
   gpAnalyticsDualRun?: boolean
+  rehearsal?: RehearsalOptions
 }
 
 const UUID_RE =
@@ -463,6 +466,49 @@ class GpAnalyticsProviderService extends AbstractAnalyticsProviderService {
       return
     }
 
+    const sourceProperties = { ...(properties || {}) }
+    const body = this.gpAnalyticsPayload(eventType, actorId, properties)
+
+    fetch(`${gpAnalyticsEndpoint.replace(/\/$/, "")}/v1/track`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${gpAnalyticsServerKey}`,
+      },
+      body: JSON.stringify(body),
+    })
+      .then(async (res) => {
+        if (res.ok) return
+        const text =
+          typeof res.text === "function" ? await res.text().catch(() => "") : ""
+        const firstLine = text.split(/\r?\n/)[0] || ""
+        this.logger_.warn(
+          `Analytics: GP analytics rejected ${eventType} with ${res.status}: ${firstLine}`
+        )
+        await this.emitAnalyticsDeliveryFailureAlert({
+          target: "gp_analytics",
+          eventType,
+          stage: "http_rejected",
+          status: res.status,
+          error: firstLine || res.statusText || "GP analytics request rejected",
+          properties: sourceProperties,
+        })
+      })
+      .catch((err) => {
+        this.logger_.error(
+          `Analytics: Failed to send ${eventType} to GP analytics: ${err.message}`
+        )
+        void this.emitAnalyticsDeliveryFailureAlert({
+          target: "gp_analytics",
+          eventType,
+          stage: "request_failed",
+          error: err,
+          properties: sourceProperties,
+        }).catch(() => undefined)
+      })
+  }
+
+  private gpAnalyticsPayload(eventType: string, actorId?: string, properties?: Record<string, any>) {
     // Work from the full producer properties to DERIVE the mirror keys
     // (session, idempotency, timestamp can read PII-adjacent fields like
     // created_at), then strip raw PII before anything is POSTed.
@@ -508,7 +554,7 @@ class GpAnalyticsProviderService extends AbstractAnalyticsProviderService {
       mirrorProperties.fulfillment_tier = fulfillmentTier
     }
 
-    const body = {
+    return {
       event: eventType,
       event_id: idempotencyKey ? uuidV5(idempotencyKey) : randomUUID(),
       idempotency_key: idempotencyKey || undefined,
@@ -532,46 +578,83 @@ class GpAnalyticsProviderService extends AbstractAnalyticsProviderService {
       },
     }
 
-    fetch(`${gpAnalyticsEndpoint.replace(/\/$/, "")}/v1/track`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${gpAnalyticsServerKey}`,
-      },
-      body: JSON.stringify(body),
-    })
-      .then(async (res) => {
-        if (res.ok) return
-        const text =
-          typeof res.text === "function" ? await res.text().catch(() => "") : ""
-        const firstLine = text.split(/\r?\n/)[0] || ""
-        this.logger_.warn(
-          `Analytics: GP analytics rejected ${eventType} with ${res.status}: ${firstLine}`
-        )
-        await this.emitAnalyticsDeliveryFailureAlert({
-          target: "gp_analytics",
-          eventType,
-          stage: "http_rejected",
-          status: res.status,
-          error: firstLine || res.statusText || "GP analytics request rejected",
-          properties: sourceProperties,
-        })
-      })
-      .catch((err) => {
-        this.logger_.error(
-          `Analytics: Failed to send ${eventType} to GP analytics: ${err.message}`
-        )
-        void this.emitAnalyticsDeliveryFailureAlert({
-          target: "gp_analytics",
-          eventType,
-          stage: "request_failed",
-          error: err,
-          properties: sourceProperties,
-        }).catch(() => undefined)
-      })
+  }
+
+  /** Await a bounded transport acknowledgment. The publication journal, not
+   * track(), owns retries and per-target status for accepted order events. */
+  publicationRehearsalRoute(target: RehearsalTarget) {
+    return rehearsalRoute(target, this.options_.rehearsal, this.options_)
+  }
+
+  async deliverOrderPublication(target: Exclude<PublicationTarget, "communications" | "communications_automation">, data: ProviderTrackAnalyticsEventDTO): Promise<DeliveryResult> {
+    const p = data.properties || {}
+    if (!p.idempotency_key || !Number.isFinite(p.event_timestamp_ms) || !Object.values(PUBLICATION_EVENTS).includes(data.event as any)) throw new Error("publication_transport_contract_invalid")
+    return this.deliverClassifiedMeasurement(target, data)
+  }
+
+  async deliverCustomerMeasurement(target: Exclude<PublicationTarget, "communications" | "communications_automation">, data: ProviderTrackAnalyticsEventDTO): Promise<DeliveryResult> {
+    const p = data.properties || {}
+    if (!["customer_created", "customer_updated"].includes(data.event) || !data.actor_id ||
+      !String(p.idempotency_key || "").startsWith(`native-customer:${data.event.slice(9)}:${data.actor_id}:`) ||
+      !Number.isFinite(p.event_timestamp_ms)) throw new Error("customer_measurement_transport_contract_invalid")
+    if (target.endsWith("_rehearsal") && p.rehearsal_id !== this.options_.rehearsal?.id)
+      return { status: "held", reason: "original_rehearsal_route_unavailable" }
+    const properties = stripMirrorPii(p)
+    if (!UUID_RE.test(String(properties.session_id || ""))) {
+      properties.session_id = uuidV5(`native-source-session:${p.idempotency_key}`)
+      properties.session_context_status = "unavailable"
+    } else properties.session_context_status = "captured"
+    return this.deliverClassifiedMeasurement(target, { ...data, properties })
+  }
+
+  async deliverCartMeasurement(target: Exclude<PublicationTarget, "communications" | "communications_automation">, data: ProviderTrackAnalyticsEventDTO): Promise<DeliveryResult> {
+    const p = data.properties || {}
+    const kind = ({ cart_updated: "activity", gp_cart_created: "created", gp_cart_expired: "expired" } as Record<string, string>)[data.event]
+    if (!kind || !p.cart_id || !String(p.idempotency_key || "").startsWith(`native-cart:${kind}:${p.cart_id}:`) ||
+      !Number.isFinite(p.event_timestamp_ms)) throw new Error("cart_measurement_transport_contract_invalid")
+    if (target.endsWith("_rehearsal") && p.rehearsal_id !== this.options_.rehearsal?.id)
+      return { status: "held", reason: "original_rehearsal_route_unavailable" }
+    const properties = stripMirrorPii(p)
+    if (!UUID_RE.test(String(properties.session_id || ""))) {
+      properties.session_id = uuidV5(`native-source-session:${p.idempotency_key}`)
+      properties.session_context_status = "unavailable"
+    } else properties.session_context_status = "captured"
+    return this.deliverClassifiedMeasurement(target, { ...data, properties })
+  }
+
+  private async deliverClassifiedMeasurement(target: Exclude<PublicationTarget, "communications" | "communications_automation">, data: ProviderTrackAnalyticsEventDTO): Promise<DeliveryResult> {
+    const p = data.properties || {}
+    const ineligible = publicationEligibility(target, p)
+    if (ineligible) return ineligible
+    const rehearsal = target === "jitsu_rehearsal" || target === "gp_analytics_rehearsal"
+      ? this.publicationRehearsalRoute(target) : undefined
+    if (target.endsWith("_rehearsal") && !rehearsal) return { status: "held", reason: "rehearsal_isolation_not_configured" }
+    const properties = rehearsal ? { ...p, analytics_environment: "rehearsal", rehearsal_id: rehearsal.id } : p
+    let url: string, headers: Record<string, string>, body: any
+    if (target === "jitsu" || target === "jitsu_rehearsal") {
+      if (!this.options_.jitsuHost || !this.options_.jitsuServerSecret) return { status: "held", reason: "jitsu_not_configured" }
+      url = rehearsal?.url || `${this.options_.jitsuHost.replace(/\/$/, "")}/api/v1/s2s/event`
+      headers = { "Content-Type": "application/json", "X-Auth-Token": rehearsal?.key || this.options_.jitsuServerSecret }
+      body = this.buildPayload(data.event, data.actor_id, { ...properties, event_id: uuidV5(p.idempotency_key) })
+    } else {
+      if (!this.options_.gpAnalyticsEndpoint || !this.options_.gpAnalyticsServerKey || (!rehearsal && this.options_.gpAnalyticsDualRun === false)) return { status: "held", reason: "gp_analytics_not_enabled" }
+      url = rehearsal?.url || `${this.options_.gpAnalyticsEndpoint.replace(/\/$/, "")}/v1/track`
+      headers = { "Content-Type": "application/json", Authorization: `Bearer ${rehearsal?.key || this.options_.gpAnalyticsServerKey}` }
+      body = this.gpAnalyticsPayload(data.event, data.actor_id, properties)
+    }
+    const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000), redirect: "error" })
+    // Never persist response bodies; they can include secrets or customer data.
+    if (!response.ok) throw new Error("publication_transport_not_acknowledged")
+    if (target === "gp_analytics_rehearsal" && (
+      response.headers.get("x-gp-analytics-environment") !== "rehearsal" ||
+      response.headers.get("x-gp-rehearsal-id") !== rehearsal?.id
+    )) throw new Error("rehearsal_receiver_not_acknowledged")
+    return { status: "accepted" }
   }
 
   async track(data: ProviderTrackAnalyticsEventDTO): Promise<void> {
+    // Customer facts belong to the immutable native capture/recovery path.
+    if (["customer_created", "customer_updated", "cart_updated", "checkout_completed", "gp_cart_created", "gp_cart_expired", "shipping_forecast", "inventory_allocation_created", "inventory_allocation_released"].includes(data.event)) return
     // Fail-soft: analytics is a side-channel and must NEVER throw back into a
     // subscriber (a throw here surfaces as "Failed to track <event>" and, worse,
     // the Jitsu sink and the GP dual-run share this method — one synchronous
@@ -624,12 +707,10 @@ class GpAnalyticsProviderService extends AbstractAnalyticsProviderService {
     }
   }
 
-  async identify(data: ProviderIdentifyAnalyticsEventDTO): Promise<void> {
-    const actorId = "actor_id" in data ? data.actor_id : undefined
-    const payload = this.buildPayload("identify", actorId, data.properties)
-
-    this.logger_.debug(`Analytics: Identifying ${actorId}`)
-    this.sendToJitsu(payload)
+  async identify(_data: ProviderIdentifyAnalyticsEventDTO): Promise<void> {
+    // The old customer subscribers sent current PII without source consent.
+    // Native customer events now carry the opaque actor ID; browser authenticated
+    // identity continuity is a separate producer contract, not a PII fallback.
   }
 }
 

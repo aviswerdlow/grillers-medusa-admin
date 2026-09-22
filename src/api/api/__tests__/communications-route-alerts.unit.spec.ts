@@ -86,16 +86,47 @@ function makeDb(profile: Record<string, any> | null = null) {
   return { db, chain }
 }
 
-function makeReq(options: {
-  body?: Record<string, any>
-  db?: unknown
-  params?: Record<string, string>
-  headers?: Record<string, string>
-} = {}) {
+const originalEnvironment = { ...process.env }
+const consentContext = {
+  event_id: "00000000-0000-4000-8000-000000000001",
+  event_timestamp_ms: 1789940000000,
+  analytics_consent: true,
+  analytics_consent_at: 1789930000000,
+  analytics_environment: "production",
+  test_event: false,
+}
+
+function makeReq(
+  options: {
+    body?: Record<string, any>
+    db?: unknown
+    params?: Record<string, string>
+    headers?: Record<string, string>
+  } = {}
+) {
   const logger = { error: jest.fn(), warn: jest.fn(), info: jest.fn() }
   return {
     req: {
-      body: options.body || {},
+      body: {
+        ...(options.body || {}),
+        eventn_ctx: consentContext,
+        ...(options.body?.events
+          ? {
+              events: options.body.events.map(
+                (event: any, index: number) =>
+                  event && {
+                    ...event,
+                    eventn_ctx: {
+                      ...consentContext,
+                      event_id: `00000000-0000-4000-8000-00000000000${
+                        index + 1
+                      }`,
+                    },
+                  }
+              ),
+            }
+          : {}),
+      },
       params: options.params || {},
       headers: options.headers || { authorization: "Bearer service-key" },
       scope: {
@@ -127,7 +158,12 @@ function expectCommunicationsAlert(operation: string, extraMeta = {}) {
 }
 
 describe("communications public API route alerting", () => {
+  afterEach(() => {
+    process.env = { ...originalEnvironment }
+  })
   beforeEach(() => {
+    process.env.STRIPE_API_KEY = "sk_live_fixture"
+    process.env.COMMUNICATIONS_PUBLIC_API_KEY = "service-key"
     jest.clearAllMocks()
     ;(verifyServiceApiKey as jest.Mock).mockReturnValue(true)
     ;(recordCommunicationEvent as jest.Mock).mockResolvedValue({
@@ -197,12 +233,13 @@ describe("communications public API route alerting", () => {
           event_count: 1,
           accepted_count: 0,
           dropped_count: 1,
-          sample_event_keys: ["email", "properties"],
+          sample_event_keys: ["email", "properties", "eventn_ctx"],
         }),
       })
     )
-    expect(JSON.stringify((emitOpsAlert as jest.Mock).mock.calls[0][0].meta))
-      .not.toContain("shopper@example.com")
+    expect(
+      JSON.stringify((emitOpsAlert as jest.Mock).mock.calls[0][0].meta)
+    ).not.toContain("shopper@example.com")
   })
 
   it("alerts when /api/batch cannot persist a batched event", async () => {
@@ -211,10 +248,7 @@ describe("communications public API route alerting", () => {
     )
     const { req } = makeReq({
       body: {
-        events: [
-          { event: "product_viewed" },
-          { event: "cart_viewed" },
-        ],
+        events: [{ event: "product_viewed" }, { event: "cart_viewed" }],
       },
     })
     const res = makeRes()
@@ -257,12 +291,13 @@ describe("communications public API route alerting", () => {
           event_count: 2,
           accepted_count: 0,
           dropped_count: 2,
-          sample_event_keys: ["email", "properties"],
+          sample_event_keys: ["email", "properties", "eventn_ctx"],
         }),
       })
     )
-    expect(JSON.stringify((emitOpsAlert as jest.Mock).mock.calls[0][0].meta))
-      .not.toContain("shopper@example.com")
+    expect(
+      JSON.stringify((emitOpsAlert as jest.Mock).mock.calls[0][0].meta)
+    ).not.toContain("shopper@example.com")
   })
 
   it("alerts when /api/identify cannot write profile state", async () => {
@@ -309,16 +344,13 @@ describe("communications public API route alerting", () => {
     await identifyRoute.POST(req, res)
 
     expect(res.statusCode).toBe(202)
-    expect(upsertCustomerProfile).toHaveBeenCalledWith(
-      expect.anything(),
-      {
-        email: "shopper@example.com",
-        metadata: {
-          locale: "en-US",
-          timezone: "America/New_York",
-        },
-      }
-    )
+    expect(upsertCustomerProfile).toHaveBeenCalledWith(expect.anything(), {
+      email: "shopper@example.com",
+      metadata: {
+        locale: "en-US",
+        timezone: "America/New_York",
+      },
+    })
     expect(recordIdentity).toHaveBeenCalledWith(
       expect.anything(),
       "gpcprof_1",

@@ -38,8 +38,15 @@ function makeContainer(customers: Array<Record<string, any>>) {
   return { container, db, logger, query }
 }
 
+const previousFlag = process.env.GP_ACCOUNT_WELCOME_ENABLED
+afterEach(() => {
+  if (previousFlag === undefined) delete process.env.GP_ACCOUNT_WELCOME_ENABLED
+  else process.env.GP_ACCOUNT_WELCOME_ENABLED = previousFlag
+})
+
 describe("customer welcome email precondition alerts", () => {
   beforeEach(() => {
+    delete process.env.GP_ACCOUNT_WELCOME_ENABLED
     jest.clearAllMocks()
     mockUpsertCustomerProfile.mockResolvedValue({ id: "gpcprof_123" })
     mockSendTrackedEmail.mockResolvedValue(undefined)
@@ -152,4 +159,22 @@ describe("customer welcome email precondition alerts", () => {
     })
     expect(mockSendTrackedEmail).not.toHaveBeenCalled()
   })
+})
+
+
+it.each([undefined, "", "false", "invalid"])("keeps the legacy service welcome until explicit activation (%s)", async flag => {
+  if (flag === undefined) delete process.env.GP_ACCOUNT_WELCOME_ENABLED
+  else process.env.GP_ACCOUNT_WELCOME_ENABLED = flag
+  const { container } = makeContainer([{ id: "cus_legacy", email: "legacy@example.invalid", has_account: true, metadata: {} }])
+  await customerWelcomeEmailHandler({ event: { data: { id: "cus_legacy" } }, container } as any)
+  expect(mockSendTrackedEmail).toHaveBeenLastCalledWith(container, expect.objectContaining({
+    template_key: "customer-welcome", purpose: "service", stream: "transactional", idempotency_key: "customer-welcome:cus_legacy",
+  }))
+})
+
+it("retires the legacy subscriber when the original-source worker is explicitly enabled", async () => {
+  process.env.GP_ACCOUNT_WELCOME_ENABLED = "true"
+  const { container } = makeContainer([])
+  await customerWelcomeEmailHandler({ event: { data: { id: "cus_legacy" } }, container } as any)
+  expect(container.resolve).not.toHaveBeenCalled()
 })

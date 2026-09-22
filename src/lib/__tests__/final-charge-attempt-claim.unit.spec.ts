@@ -342,6 +342,14 @@ describe("final charge attempt claims", () => {
     expect(settled.failure_code).toBeNull()
   })
 
+  it("preserves the first success time when the same successful charge is recorded again", async () => {
+    const succeededAt = new Date("2026-07-27T11:00:00.000Z")
+    const succeeded = failedAttempt({ status: "succeeded", succeeded_at: succeededAt, stripe_status: "succeeded", stripe_payment_intent_id: "pi_succeeded" })
+    const { db } = makeAttemptDb([succeeded])
+    const settled = await settleFinalChargeAttempt(db, succeeded, { status: "succeeded", stripeStatus: "succeeded", stripePaymentIntentId: "pi_succeeded" })
+    expect(settled.succeeded_at).toEqual(succeededAt)
+  })
+
   it("prevents a stale lease owner from racing release after another caller reclaims the attempt", async () => {
     const staleOwner = failedAttempt({
       status: "pending",

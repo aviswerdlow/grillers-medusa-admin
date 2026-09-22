@@ -1,3 +1,4 @@
+import { asValue, createContainer } from "awilix"
 import path from "node:path"
 import type { Server } from "node:http"
 import { authenticate } from "@medusajs/framework/http"
@@ -50,13 +51,15 @@ describe("Store customer staff-authority boundary (native Medusa HTTP fixture)",
   beforeAll(async () => {
     const app = express()
     app.use(express.json())
+    const root = createContainer().register({
+      [ContainerRegistrationKeys.CONFIG_MODULE]: asValue(config),
+      [ContainerRegistrationKeys.REMOTE_QUERY]: asValue(remoteQuery),
+      [Modules.CUSTOMER]: asValue({ retrieveCustomer }),
+    })
     app.use((req: any, _res: any, next: any) => {
-      req.scope = { resolve: (key: string) => {
-        if (key === ContainerRegistrationKeys.CONFIG_MODULE) return config
-        if (key === ContainerRegistrationKeys.REMOTE_QUERY) return remoteQuery
-        if (key === Modules.CUSTOMER) return { retrieveCustomer }
-        throw new Error(`Unexpected dependency: ${key}`)
-      } }
+      // Exercise the real request-scoped registration used by measurement,
+      // retaining the installed auth/validator/handler and every permission check.
+      req.scope = root.createScope()
       req.queryConfig = { fields: ["id", "email"] }
       next()
     })

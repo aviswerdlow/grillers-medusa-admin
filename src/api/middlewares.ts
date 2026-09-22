@@ -1,3 +1,6 @@
+import { captureCustomerMeasurementRequest } from "./middlewares/customer-measurement"
+import { captureAccountWelcomeResponse } from "./middlewares/account-welcome"
+import { captureCartMeasurementResponse } from "./middlewares/cart-measurement"
 import {
   authenticate,
   defineMiddlewares,
@@ -652,7 +655,7 @@ export default defineMiddlewares({
   // See ./middlewares/ops-error-handler.ts.
   errorHandler: opsErrorHandler,
   routes: [
-    { matcher: "/store/carts*", middlewares: [enforceStaffCartAuthority] },
+    { matcher: "/store/carts*", middlewares: [enforceStaffCartAuthority, captureCartMeasurementResponse] },
     {
       matcher: "/store/payment-collections*",
       middlewares: [enforceStaffCartAuthority],
@@ -728,12 +731,12 @@ export default defineMiddlewares({
     {
       matcher: "/store/customers",
       method: ["POST"],
-      middlewares: [protectCustomerStaffAuthority],
+      middlewares: [protectCustomerStaffAuthority, captureCustomerMeasurementRequest, captureAccountWelcomeResponse],
     },
     {
       matcher: "/store/customers/me",
       method: ["POST"],
-      middlewares: [authenticate("customer", ["session", "bearer"]), protectCustomerStaffAuthority],
+      middlewares: [authenticate("customer", ["session", "bearer"]), protectCustomerStaffAuthority, captureCustomerMeasurementRequest],
     },
     {
       matcher: "/store/customers/me/receipt-email",
@@ -909,6 +912,11 @@ export default defineMiddlewares({
       // /store, so it bypasses customer/user auth; preserve the raw body so the
       // route can verify the Stripe-Signature HMAC over the exact bytes.
       matcher: "/webhooks/stripe/payment-failed",
+      method: ["POST"],
+      bodyParser: { preserveRawBody: true },
+    },
+    {
+      matcher: "/webhooks/stripe/refunds",
       method: ["POST"],
       bodyParser: { preserveRawBody: true },
     },

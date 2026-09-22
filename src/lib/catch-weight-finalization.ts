@@ -2856,7 +2856,7 @@ export async function settleFinalChargeAttempt(
         input.status === "succeeded" ? null : input.failureCode || null,
       failure_message:
         input.status === "succeeded" ? null : input.failureMessage || null,
-      succeeded_at: input.status === "succeeded" ? new Date() : null,
+      succeeded_at: input.status === "succeeded" ? (current.succeeded_at || new Date()) : null,
       updated_at: new Date(),
     }
     if (input.metadata) {

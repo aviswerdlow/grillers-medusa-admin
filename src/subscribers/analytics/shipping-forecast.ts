@@ -1,5 +1,6 @@
 import type { SubscriberArgs, SubscriberConfig } from "@medusajs/framework"
-import { emitAnalyticsSubscriberFailureAlert } from "../../lib/analytics/subscriber-alerts"
+import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
+import { requestOrderPublication } from "../../lib/order-publication"
 import { SHIPPING_PACKING_PLAN_KEY, type ShippingPackingPlan } from "../../lib/shipping-packing-plan"
 import {
   isUpsServiceCode,
@@ -182,9 +183,9 @@ function routeMarketForAnalytics(
 }
 
 /**
- * Builds the `shipping_forecast` analytics payload for an order, or returns null
- * when the order is not a UPS-shipped order. Pure + side-effect-free so it can be
- * unit-tested without the Medusa container.
+ * Historical diagnostic projection only, retained for legacy fixture analysis.
+ * Do not publish this mutable-order projection: live measurement must use
+ * originalShippingForecast after the immutable promise binding is verified.
  */
 export function buildShippingForecastEvent(
   order: Record<string, any>,
@@ -258,76 +259,20 @@ export function buildShippingForecastEvent(
   }
 }
 
+/** Legacy projection above is diagnostic-only. Live publication uses verified
+ * immutable order promises, never a delayed mutable graph query. */
 export default async function shippingForecastHandler({
-  event: { name, data },
-  container,
+  event: { data }, container,
 }: SubscriberArgs<{ id: string; order_id?: string }>) {
-  const logger = container.resolve("logger")
-  const query = container.resolve("query")
-  const analyticsService = container.resolve("analytics")
   const orderId = data.order_id || data.id
-
   try {
-    const { data: orders } = await query.graph({
-      entity: "order",
-      fields: [
-        "id",
-        "display_id",
-        "created_at",
-        "email",
-        "currency_code",
-        "customer_id",
-        "customer.*",
-        "customer.groups.*",
-        "customer.metadata",
-        "customer.groups.metadata",
-        "shipping_total",
-        "metadata",
-        "shipping_address.*",
-        "items.*",
-        "items.metadata",
-        "items.variant.*",
-        "items.variant.product.*",
-        "items.variant.product.metadata",
-        "shipping_methods.*",
-        "shipping_methods.shipping_option_id",
-        "shipping_methods.data",
-        "shipping_methods.metadata",
-      ],
-      filters: { id: orderId },
-    })
-
-    const order = orders?.[0] as any
-    if (!order) return
-
-    const payload = buildShippingForecastEvent(order)
-    // Not a UPS order (pickup / local / flat): nothing to forecast or reconcile.
-    if (!payload) return
-
-    // Fire-and-forget: emit through the same gp-analytics shim every other
-    // subscriber uses (server + GP dual-run). Source = medusa-fulfillment.
-    await analyticsService.track({
-      event: payload.event,
-      actor_id: payload.actor_id,
-      properties: {
-        ...payload.properties,
-        source: "medusa-fulfillment",
-      },
-    })
-  } catch (err) {
-    logger.warn(
-      `Analytics: Failed to track shipping_forecast for ${orderId}: ${
-        err instanceof Error ? err.message : String(err)
-      }`
-    )
-    void emitAnalyticsSubscriberFailureAlert({
-      logger,
-      medusaEvent: "order.placed",
-      analyticsEvent: "shipping_forecast",
-      entityId: orderId,
-      path: "src/subscribers/analytics/shipping-forecast.ts",
-      error: err,
-    }).catch(() => undefined)
+    const db = container.resolve(ContainerRegistrationKeys.PG_CONNECTION)
+    await requestOrderPublication(db, "shipping_forecast", orderId, orderId)
+  } catch {
+    container.resolve("logger").warn("Shipping measurement intent unavailable; retained source scan will recover")
+    // No unclassified production page from a possibly test/unknown order.
+    // Event-bus retry and the bound-order scan are independent recovery paths.
+    throw new Error("shipping_measurement_intent_not_recorded")
   }
 }
 

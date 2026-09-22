@@ -12,12 +12,6 @@ export default async function inventoryAllocationOrderPlacedHandler({
   const logger = container.resolve("logger")
   const db = container.resolve(ContainerRegistrationKeys.PG_CONNECTION)
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
-  let analytics: any = null
-  try {
-    analytics = container.resolve("analytics")
-  } catch {
-    analytics = null
-  }
 
   try {
     // Ordinary allocation must continue if staff signing is unconfigured.
@@ -55,17 +49,8 @@ export default async function inventoryAllocationOrderPlacedHandler({
       })
     }
 
-    if (analytics?.track) {
-      await analytics.track({
-        event: "inventory_allocation_created",
-        properties: {
-          order_id: data.id,
-          created_count: result.created,
-          skipped_count: result.skipped,
-          blocked_count: result.blocked,
-        },
-      })
-    }
+    // The independent publisher reads durable audit transitions, including after
+    // a notification-before-binding race. A retry's counts are not new stock facts.
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     logger.error(

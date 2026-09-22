@@ -13,7 +13,9 @@ jest.mock("../ops-alert", () => ({
   emitOpsAlert: jest.fn(async () => ({ ok: true, skipped: false })),
 }))
 
-const { isInSendBlackout } = jest.requireMock("../communications/hebrew-calendar")
+const { isInSendBlackout } = jest.requireMock(
+  "../communications/hebrew-calendar"
+)
 
 /**
  * Minimal chainable fake knex. Reads resolve from `state` per table;
@@ -72,8 +74,8 @@ function fakeDb() {
       const value = chain._op
         ? []
         : chain._isCount
-          ? countRows[table] || [{ count: 0 }]
-          : state[table] || []
+        ? countRows[table] || [{ count: 0 }]
+        : state[table] || []
       return Promise.resolve(value).then(resolve, reject)
     }
     return chain
@@ -88,11 +90,16 @@ function fakeContainer(db: any, notification: any) {
       if (key === "logger") {
         return { info: jest.fn(), warn: jest.fn(), error: jest.fn() }
       }
-      if (key === "notification" || key === "Notification" || key === "notificationModuleService") {
+      if (
+        key === "notification" ||
+        key === "Notification" ||
+        key === "notificationModuleService"
+      ) {
         return notification
       }
       // PG_CONNECTION and anything else
-      if (String(key).toLowerCase().includes("notification")) return notification
+      if (String(key).toLowerCase().includes("notification"))
+        return notification
       return db
     },
   } as any
@@ -131,7 +138,14 @@ describe("sendTrackedEmail gates", () => {
     jest.clearAllMocks()
     ;(isInSendBlackout as jest.Mock).mockReturnValue({ blocked: false })
     notification = {
-      createNotifications: jest.fn(async () => [{ provider_id: "pm_msg_1" }]),
+      createNotifications: jest.fn(async () => [
+        {
+          id: "noti_fixture",
+          provider_id: "postmark",
+          external_id: "pm_msg_1",
+          status: "success",
+        },
+      ]),
     }
   })
 
@@ -219,9 +233,7 @@ describe("sendTrackedEmail gates", () => {
 
   it("staff_test still honors the suppression list", async () => {
     const { db, state } = fakeDb()
-    state.gp_customer_profile = [
-      consentedProfile({ email_consent: false }),
-    ]
+    state.gp_customer_profile = [consentedProfile({ email_consent: false })]
     // hasSuppression reads gp_suppression_preference rows for the email.
     state.gp_suppression_preference = [
       {
@@ -338,5 +350,85 @@ describe("sendTrackedEmail gates", () => {
     expect(result.ok).toBe(false)
     expect(result.deferred).toBe(true)
     expect(notification.createNotifications).not.toHaveBeenCalled()
+  })
+
+  it("records Postmark's external receipt rather than the provider or internal notification ID", async () => {
+    const { db, state, writes } = fakeDb()
+    state.gp_customer_profile = [consentedProfile()]
+    const result = await sendTrackedEmail(
+      fakeContainer(db, notification),
+      baseInput({
+        stream: "transactional",
+        purpose: "service",
+        template_key: "account-service",
+      })
+    )
+    expect(result).toEqual({ ok: true, messageId: "pm_msg_1" })
+    expect(
+      writes.find((w) => w.table === "gp_message_log" && w.op === "update")
+        ?.data
+    ).toMatchObject({ status: "sent", postmark_message_id: "pm_msg_1" })
+  })
+
+  it("keeps a successful notification without an external receipt unconfirmed", async () => {
+    const { db, state, writes } = fakeDb()
+    state.gp_customer_profile = [consentedProfile()]
+    notification.createNotifications.mockResolvedValue([
+      { id: "noti_internal", provider_id: "postmark", status: "success" },
+    ])
+    const result = await sendTrackedEmail(
+      fakeContainer(db, notification),
+      baseInput({
+        stream: "transactional",
+        purpose: "service",
+        template_key: "account-service",
+      })
+    )
+    expect(result).toEqual({
+      ok: false,
+      error: "notification_provider_receipt_unconfirmed",
+    })
+    expect(
+      writes.find((w) => w.table === "gp_message_log" && w.op === "update")
+        ?.data
+    ).toMatchObject({
+      status: "queued",
+      error_message: "notification_provider_receipt_unconfirmed",
+    })
+    expect(
+      writes.filter(
+        (w) =>
+          w.table === "gp_communication_event" &&
+          w.data?.event_name === "email_sent"
+      )
+    ).toHaveLength(0)
+  })
+
+  it("neither resends nor confirms an existing queued notification", async () => {
+    const { db, state, writes } = fakeDb()
+    state.gp_customer_profile = [consentedProfile()]
+    state.gp_message_log = [
+      { id: "queued_log", status: "queued", postmark_message_id: null },
+    ]
+    const result = await sendTrackedEmail(
+      fakeContainer(db, notification),
+      baseInput({
+        stream: "transactional",
+        purpose: "service",
+        template_key: "account-service",
+      })
+    )
+    expect(result).toEqual({
+      ok: false,
+      error: "notification_provider_receipt_unconfirmed",
+    })
+    expect(notification.createNotifications).not.toHaveBeenCalled()
+    expect(
+      writes.filter(
+        (w) =>
+          w.table === "gp_communication_event" &&
+          w.data?.event_name === "email_sent"
+      )
+    ).toHaveLength(0)
   })
 })

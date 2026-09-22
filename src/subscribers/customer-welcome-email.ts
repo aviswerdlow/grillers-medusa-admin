@@ -1,3 +1,4 @@
+import { accountWelcomeEnabled } from "../lib/account-welcome"
 import type { SubscriberArgs, SubscriberConfig } from "@medusajs/framework"
 import { buildWelcomeEmail } from "../lib/emails/templates/welcome"
 import {
@@ -19,6 +20,8 @@ export default async function customerWelcomeEmailHandler({
   event: { data },
   container,
 }: SubscriberArgs<CustomerCreatedEvent>) {
+  // Preserve the existing subscriber until the replacement is explicitly live.
+  if (accountWelcomeEnabled()) return
   const logger = container.resolve("logger")
   const query = container.resolve("query")
   const db = container.resolve(ContainerRegistrationKeys.PG_CONNECTION)

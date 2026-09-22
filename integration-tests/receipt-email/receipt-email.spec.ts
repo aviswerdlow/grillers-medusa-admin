@@ -38,7 +38,7 @@ const cid = "cus_receipt",
   alternate = "receipts@example.invalid";
 const notification = {
   createNotifications: jest.fn(async (_input: any) => [
-    { provider_id: "synthetic-provider-id" },
+    { id: "noti_receipt_fixture", provider_id: "postmark", external_id: "pm_receipt_fixture", status: "success" },
   ]),
 };
 const container = {
@@ -400,6 +400,7 @@ it("delivers a service receipt without moving login or transferring marketing co
     html: "<p>Synthetic</p>",
   });
   expect(sent.ok).toBe(true);
+  expect(sent.messageId).toBe("pm_receipt_fixture");
   expect(notification.createNotifications).toHaveBeenCalledTimes(1);
   expect(notification.createNotifications.mock.calls[0][0]).toMatchObject({
     to: alternate,
@@ -440,6 +441,7 @@ it("retains historical service delivery after customer soft deletion without ado
     html: "<p>Synthetic</p>",
   });
   expect(sent.ok).toBe(true);
+  expect(sent.messageId).toBe("pm_receipt_fixture");
   expect(notification.createNotifications).toHaveBeenCalledTimes(1);
   expect(
     (await db("gp_customer_profile").where({ medusa_customer_id: cid }).first())
