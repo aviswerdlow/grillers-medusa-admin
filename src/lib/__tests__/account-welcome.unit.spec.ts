@@ -182,8 +182,8 @@ it.each([undefined, "false", "invalid"])("retains original registration evidence
   expect(x.json).toHaveBeenCalledWith({ customer: { id: customer.id } })
 })
 it.each([
-  [undefined, true], ["", true], ["true", true], ["false", false], ["invalid", false],
-] as const)("service delivery default/explicit pause %s => %s", (flag, enabled) => {
+  [undefined, false], ["", false], ["true", true], ["false", false], ["invalid", false],
+] as const)("replacement delivery requires explicit activation %s => %s", (flag, enabled) => {
   if (flag === undefined) delete process.env.GP_ACCOUNT_WELCOME_ENABLED
   else process.env.GP_ACCOUNT_WELCOME_ENABLED = flag
   expect(accountWelcomeEnabled()).toBe(enabled)

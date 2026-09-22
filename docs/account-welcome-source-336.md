@@ -1,3 +1,9 @@
+## Packet 1 transition
+
+Default behavior change: the existing `customer.created` service-welcome subscriber remains active until `GP_ACCOUNT_WELCOME_ENABLED=true`. Unset, empty, false and invalid values keep the legacy lane. This replaces the previous candidate's default-on replacement worker. Both lanes share `customer-welcome:<customer-id>` idempotency; original-source sends retain their production-lane, original-recipient and receipt guards. Capture may save source evidence before activation, but the replacement worker stays idle. #373 owns coordinated API/worker activation and provider/no-duplicate readback.
+
+Segment and calendar audience holds retain the existing bounded operational alerts. This source change sends no messages.
+
 # Original account welcome source — #336 / #341
 
 Record this contract before replacing the shared welcome sender. Required account
@@ -35,23 +41,19 @@ service email is independent of analytics or marketing consent.
   operational service record remains. Welcome outcomes cannot enroll marketing
   flows. A callback or current profile cannot grant original analytics permission.
 
-`GP_ACCOUNT_WELCOME_ENABLED` defaults to **enabled** (unset/empty or `true`).
-Explicit `false` or an invalid nonempty value pauses the worker and send guard.
-Capture remains active during a pause so resuming can use the original successful
-registration, without repeating signup or reconstructing a recipient. This removes
-the unapproved default-off service-mail gap; it does not turn analytics or marketing
-on. Both the saved source and current server must still be the production lane.
-Current Stripe test mode does not send production welcomes, and old test/unknown
-sources never become production after a key change.
+`GP_ACCOUNT_WELCOME_ENABLED` defaults to **false**. Only explicit `true`
+activates the original-source worker and retires the existing `customer.created`
+subscriber. Capture remains active before activation; analytics and marketing
+flags stay independent. Original-source sends require a production source and
+server lane, and never promote old test/unknown sources after a key change.
 
-Against current storefront main, no new request header or frontend flag is needed
-for a service welcome. The backend API must capture the source and its paired worker
-must run this revision. Warm up and verify that handover before removing the old
-release; mixed old/new API and worker versions are not a proven transition. Retain
-the shared idempotency key and reconcile in-flight provider attempts. The old delayed
-customer.created subscriber remains retired: it can precede failed auth linking and
-cannot supply the original recipient safely. Native guest/import/staff customer
-creation is not evidence of successful Store account registration.
+The legacy subscriber keeps current-main behavior, including its existing
+customer lookup and guest exclusion. It does not claim immutable registration
+or recipient provenance. At activation, API and worker must agree on the flag;
+verify source capture, worker health and in-flight provider attempts through
+#373 before changing it. Both senders use the same customer welcome idempotency
+key. This is a transition, not a claim that legacy welcome data is original
+measurement evidence.
 
 No new schema is needed; retain the five publication migrations and existing
 communications tables, source/message history and delivery receipts on rollback.
@@ -60,8 +62,7 @@ backup, restore access/procedure, migration journal and previous/candidate SHAs.
 Paired deployment, request-scope propagation through nested native workflows,
 event-bus acceptance/retention, concurrent account changes and controlled recipient/
 Postmark/operator readback remain #332 gates. Do not repeat signup to repair email.
-The wider PR remains held by #372/#373: this default fixes the service-welcome
-configuration gap, not the separate retired purchase-producer gap or missing
+The wider PR remains held by #372/#373: this fallback preserves existing welcomes, not the separate retired purchase-producer gap or missing
 isolated rehearsal destinations. Do not deploy the whole PR alone.
 This does not complete other calendar/segment/SMS/custom-flow/provider producers,
 back-in-stock/review-click or browser identity/exposure work. No send is authorized.

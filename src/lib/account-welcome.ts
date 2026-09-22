@@ -35,10 +35,10 @@ const email = (v: unknown) =>
 const date = (v: any) =>
   v && Number.isFinite(new Date(v).getTime()) ? new Date(v).toISOString() : null
 export const welcomeKey = (id: string) => `customer-welcome:${id}`
-/** Required service mail stays on at handover; explicit false/invalid pauses sending. */
+/** Explicit handover: the legacy customer.created subscriber owns the default lane. */
 export function accountWelcomeEnabled() {
   const value = process.env.GP_ACCOUNT_WELCOME_ENABLED?.trim()
-  return !value || value === "true"
+  return value === "true"
 }
 export function welcomeServerLane(): WelcomeLane {
   const key = process.env.STRIPE_API_KEY || ""

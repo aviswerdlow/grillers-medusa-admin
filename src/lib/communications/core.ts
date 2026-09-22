@@ -1,4 +1,4 @@
-import { welcomeSourceFromRow, welcomeMeasurementProperties, welcomeOutcomeTracking, welcomeSendGuard } from "../account-welcome"
+import { accountWelcomeEnabled, welcomeSourceFromRow, welcomeMeasurementProperties, welcomeOutcomeTracking, welcomeSendGuard } from "../account-welcome"
 import crypto from "crypto"
 import type { Logger, MedusaContainer } from "@medusajs/framework/types"
 import {
@@ -999,7 +999,7 @@ export async function sendTrackedEmail(
   const emailLower = normalizeEmail(input.to)
   const now = new Date()
   const purpose = input.purpose || inferredPurpose(input.stream, input.template_key)
-  if (input.template_key === "customer-welcome" || input.metadata?.account_welcome_source_id) {
+  if ((input.template_key === "customer-welcome" && accountWelcomeEnabled()) || input.metadata?.account_welcome_source_id) {
     const veto = await welcomeSendGuard(db, input, false)
     if (veto) return { ok: false, error: veto }
     const prior = await db("gp_message_log").whereNull("deleted_at").where("idempotency_key", input.idempotency_key).first()

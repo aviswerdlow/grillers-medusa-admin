@@ -1,3 +1,4 @@
+import customerWelcomeEmailHandler from "../../src/subscribers/customer-welcome-email";
 import { saveAccountWelcome, deliverAccountWelcomes, welcomeFromResponse, welcomeSourceFromRow } from "../../src/lib/account-welcome";
 import gpAccountWelcome from "../../src/jobs/gp-account-welcome";
 import { updatePostmarkMessageState, recordSuppression } from "../../src/lib/communications/core";
@@ -1894,30 +1895,41 @@ describe("account welcome source and service delivery", () => {
     const { container, notify } = await welcomeFixture({ lane });await gpAccountWelcome(container);
     expect(notify).not.toHaveBeenCalled();expect(await db("gp_customer_profile")).toHaveLength(0);expect(emitOpsAlert).not.toHaveBeenCalled();
   });
-  it.each([undefined, ""])("sends once with default flag %s while analytics flags are disabled", async flag => {
-    const { container, notify, snapshot } = await welcomeFixture({ consent: false });
+  it.each([undefined, ""])("keeps the replacement worker idle before explicit activation %s", async flag => {
+    const { container, notify } = await welcomeFixture({ consent: false });
     if (flag === undefined) delete process.env.GP_ACCOUNT_WELCOME_ENABLED;
     else process.env.GP_ACCOUNT_WELCOME_ENABLED = flag;
-    process.env.GP_CUSTOMER_MEASUREMENT_ENABLED = "false";
-    process.env.GP_CART_MEASUREMENT_ENABLED = "false";
-    process.env.GP_ORDER_PUBLICATION_ENABLED = "false";
-    await gpAccountWelcome(container);await gpAccountWelcome(container);
-    expect(notify).toHaveBeenCalledTimes(1);
-    expect(notify.mock.calls[0][0].to).toBe(snapshot.customer.email);
-    expect((await db("gp_message_log").first()).postmark_message_id).toBe("pm_message_original");
-    expect(await db("gp_flow_enrollment")).toHaveLength(0);
+    await gpAccountWelcome(container);
+    expect(notify).not.toHaveBeenCalled();
   });
+
+  it("shares the legacy receipt across activation and rollback without a second send", async () => {
+    const { container, notify } = await welcomeFixture({ consent: false });
+    const legacyContainer = { resolve: (key: string) => key === "query"
+      ? { graph: async () => ({ data: await db("customer").where({ id: "cus_welcome" }) }) }
+      : container.resolve(key) };
+    delete process.env.GP_ACCOUNT_WELCOME_ENABLED;
+    await customerWelcomeEmailHandler({ event: { data: { id: "cus_welcome" } }, container: legacyContainer } as any);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect((await db("gp_message_log").first()).idempotency_key).toBe("customer-welcome:cus_welcome");
+    process.env.GP_ACCOUNT_WELCOME_ENABLED = "true";
+    await gpAccountWelcome(container);
+    delete process.env.GP_ACCOUNT_WELCOME_ENABLED;
+    await customerWelcomeEmailHandler({ event: { data: { id: "cus_welcome" } }, container: legacyContainer } as any);
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
   it.each(["false", "invalid"])("explicit pause %s retains the source and resumes once at the original recipient", async flag => {
     const { container, notify, snapshot } = await welcomeFixture();process.env.GP_ACCOUNT_WELCOME_ENABLED = flag;await gpAccountWelcome(container);
     expect(await db("gp_event_delivery")).toHaveLength(0);expect(notify).not.toHaveBeenCalled();
     expect(welcomeSourceFromRow(await db("gp_communication_event").first())).toEqual(snapshot);
-    delete process.env.GP_ACCOUNT_WELCOME_ENABLED;await gpAccountWelcome(container);await gpAccountWelcome(container);
+    process.env.GP_ACCOUNT_WELCOME_ENABLED = "true";await gpAccountWelcome(container);await gpAccountWelcome(container);
     expect(notify).toHaveBeenCalledTimes(1);expect(notify.mock.calls[0][0].to).toBe(snapshot.customer.email);
   });
   it("does not redirect a welcome when the account email changes during a pause", async () => {
     const { container, notify } = await welcomeFixture();process.env.GP_ACCOUNT_WELCOME_ENABLED = "false";await gpAccountWelcome(container);
     await db("customer").update({ email: "changed@example.test" });
-    delete process.env.GP_ACCOUNT_WELCOME_ENABLED;await gpAccountWelcome(container);
+    process.env.GP_ACCOUNT_WELCOME_ENABLED = "true";await gpAccountWelcome(container);
     expect(notify).not.toHaveBeenCalled();
     expect((await db("gp_event_delivery").where({ target: "account_welcome_email" }).first()).status).toBe("skipped");
   });
