@@ -112,7 +112,7 @@ describe("profile identity rollout compatibility", () => {
     delete process.env.GP_PRIMARY_CONTACT_ENABLED
     await db("gp_customer_profile").insert({ id: "profile_legacy", medusa_customer_id: "cus_old", email_lower: "synthetic@example.invalid" })
     const updated = await upsertCustomerProfile(db, { medusa_customer_id: "cus_test", email: "synthetic@example.invalid" })
-    expect(updated.medusa_customer_id).toBe("cus_test")
+    expect(updated?.medusa_customer_id).toBe("cus_test")
   })
   it.each(["enabled", "attested", "explicit"])("holds a conflicting profile when %s", async mode => {
     delete process.env.GP_PRIMARY_CONTACT_ENABLED
