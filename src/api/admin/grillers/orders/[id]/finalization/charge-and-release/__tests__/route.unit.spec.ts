@@ -157,9 +157,22 @@ function baseAttempt(overrides: Record<string, any> = {}) {
   }
 }
 
+function confirmedDecline() {
+  return Object.assign(new Error("Your card was declined."), {
+    stripe_error: {
+      type: "card_error",
+      code: "card_declined",
+      decline_code: "generic_decline",
+      payment_intent: { id: "pi_declined", status: "requires_payment_method" },
+    },
+  })
+}
+
 describe("charge-and-release PI gate", () => {
+  const originalDeclineFlag = process.env.GP_FINAL_CHARGE_DECLINE_EMAIL_ENABLED
   beforeEach(() => {
     jest.clearAllMocks()
+    delete process.env.GP_FINAL_CHARGE_DECLINE_EMAIL_ENABLED
     mockRetrieveFinalizationOrder.mockResolvedValue({
       id: "order_123",
       currency_code: "usd",
@@ -196,6 +209,48 @@ describe("charge-and-release PI gate", () => {
         },
       })
     )
+  })
+  afterAll(() => {
+    if (originalDeclineFlag === undefined) delete process.env.GP_FINAL_CHARGE_DECLINE_EMAIL_ENABLED
+    else process.env.GP_FINAL_CHARGE_DECLINE_EMAIL_ENABLED = originalDeclineFlag
+  })
+
+  it("emits no decline notice when the flag is off", async () => {
+    mockCreateStripeFinalPaymentIntent.mockRejectedValueOnce(confirmedDecline())
+    const { scope, eventBus } = makeScope(makeDb())
+    const res = makeRes()
+    await POST({ params: { id: "order_123" }, body: {}, scope } as any, res)
+    expect(res.status).toHaveBeenCalledWith(402)
+    expect(eventBus.emit).not.toHaveBeenCalled()
+  })
+
+  it("emits one declined notice with the durable attempt identity when enabled", async () => {
+    process.env.GP_FINAL_CHARGE_DECLINE_EMAIL_ENABLED = "true"
+    mockCreateStripeFinalPaymentIntent.mockRejectedValueOnce(confirmedDecline())
+    const { scope, eventBus } = makeScope(makeDb())
+    const res = makeRes()
+    await POST({ params: { id: "order_123" }, body: {}, scope } as any, res)
+    expect(res.status).toHaveBeenCalledWith(402)
+    expect(eventBus.emit).toHaveBeenCalledTimes(1)
+    expect(eventBus.emit).toHaveBeenCalledWith({
+      name: "order.final_charge_declined",
+      data: {
+        id: "order_123",
+        order_id: "order_123",
+        finalization_id: "fin_123",
+        charge_attempt_id: "attempt_123",
+      },
+    })
+  })
+
+  it("emits no decline notice for an uncertain payment outcome when enabled", async () => {
+    process.env.GP_FINAL_CHARGE_DECLINE_EMAIL_ENABLED = "true"
+    mockCreateStripeFinalPaymentIntent.mockRejectedValueOnce(new Error("Stripe request timed out"))
+    const { scope, eventBus } = makeScope(makeDb())
+    const res = makeRes()
+    await POST({ params: { id: "order_123" }, body: {}, scope } as any, res)
+    expect(res.status).toHaveBeenCalledWith(402)
+    expect(eventBus.emit).not.toHaveBeenCalled()
   })
 
   it("does NOT alert and proceeds when the PaymentIntent succeeded", async () => {
