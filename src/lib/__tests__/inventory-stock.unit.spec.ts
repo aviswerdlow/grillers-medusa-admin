@@ -11,11 +11,16 @@ const commitment = (quantity = 3, line = "line", variant_id = "variant") => ({ i
 function dependencies(variants: any[], commitments: any[] = [], reservations: any[] = []) {
   const db: any = (name: string) => {
     const rows = name === "gp_inventory_allocation" ? commitments : name === "reservation_item" ? reservations : []
-    const chain: any = { select: () => chain, whereNull: () => chain, whereIn: () => chain,
-      then: (resolve: any) => resolve(rows) }
+    let filtered = rows
+    const chain: any = { select: () => chain, whereNull: () => chain,
+      whereIn: (field: string, ids: string[]) => { filtered = filtered.filter(row => !row[field] || ids.includes(row[field])); return chain },
+      then: (resolve: any) => resolve(filtered) }
     return chain
   }
-  const query = { graph: jest.fn(async ({ filters }: any) => ({ data: variants.filter(v => filters.id.includes(v.id)) })) }
+  const query = { graph: jest.fn(async ({ entity, filters }: any) => ({ data: entity === "product_variant_inventory_items"
+    ? variants.flatMap(v => (v.inventory_items || []).filter((item: any) => filters.inventory_item_id.includes(item.inventory_item_id))
+      .map((item: any) => ({ variant_id: v.id, inventory_item_id: item.inventory_item_id })))
+    : variants.filter(v => filters.id.includes(v.id)) })) }
   return { db, query }
 }
 const check = (deps: any, extras = {}) => checkInventoryAvailability({ ...deps, lines: [{ variant_id: "variant", quantity: 2 }],
@@ -80,9 +85,9 @@ it("recognizes an order's already reserved last unit without exposing that credi
   expect(nativeReservedUnitsForLine(variantNativeStock(variant()), [reservation(1)], "different_line")).toBe(0)
 })
 
-it("does not promise speculative replenishment dates or bypass stock with a future date", async () => {
+it("preserves the existing future-dated ordering window", async () => {
   const [line] = await check(dependencies([variant("variant", 0)]), { requested_fulfillment_date: "2026-10-19" })
-  expect(line).toMatchObject({ decision: "blocked", reason: "future_supply_unconfirmed" })
+  expect(line).toMatchObject({ decision: "future_allowed", reason: "future_window" })
   expect(line.earliest_available_date).toBeUndefined()
 })
 
@@ -101,5 +106,8 @@ it("combines repeated variant demand and refuses unresolved shared-stock mapping
     { variant_id: "variant", quantity: 1 }, { variant_id: "variant", quantity: 1 },
   ] })
   expect(line.decision).toBe("partial")
-  expect((await check(dependencies([variant()], [commitment(1, "line", "unmapped_variant")])))[0].reason).toBe("inventory_reconciliation_required")
+  const shared = variant("shared"); shared.manage_inventory = false
+  expect((await check(dependencies([variant(), shared], [commitment(1, "line", "shared")])))[0].reason).toBe("inventory_reconciliation_required")
+  const [unrelated] = await check(dependencies([variant()], [commitment(1, "line", "unrelated")]))
+  expect(unrelated).toMatchObject({ decision: "available", allocated_quantity: 0 })
 })

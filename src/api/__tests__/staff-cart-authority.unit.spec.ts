@@ -40,6 +40,7 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     if (entity === "cart") return { data: carts[filters.id] ? [carts[filters.id]] : [] }
     if (entity === "cart_payment_collection") return { data: filters.payment_collection_id === "paycol_1" && carts.cart_1 ? [{ cart_id: "cart_1", cart: { id: "cart_1" } }] : [] }
     if (entity === "product_variant") return { data: [variant] }
+    if (entity === "product_variant_inventory_items") return { data: [{ variant_id: variant.id, inventory_item_id: "inventory_1" }] }
     if (entity === "order") return { data: orders[filters.id] ? [orders[filters.id]] : [] }
     return { data: [] }
   }) }
@@ -82,6 +83,7 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
   })
   beforeEach(() => {
     process.env.GP_STAFF_BOUNDARY_MODE = "enforce"
+    process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED = "true"
     jest.clearAllMocks(); process.env.GP_STAFF_GATEWAY_API_KEY_ID = "apk_gateway"; count = 0; carts = {}; orders = {}; inserts = []
     customers = { cus_staff: { id: "cus_staff", email: "office@example.test", first_name: "Office", metadata: { gp_staff_role: "office", staff_access_version: 2 } },
       cus_target: { id: "cus_target", email: "customer@example.test", metadata: {} }, cus_other: { id: "cus_other", email: "other@example.test", metadata: { gp_staff_role: "office" } } }

@@ -5,6 +5,7 @@ import { emitOpsAlert } from "../../lib/ops-alert"
 
 function inventoryGuard(paymentSession: boolean, completionReplay = false) {
   return async (req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) => {
+    if (process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED !== "true") return next()
     try {
       const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
       let cartId = req.params.id || (req.body as any)?.cart_id

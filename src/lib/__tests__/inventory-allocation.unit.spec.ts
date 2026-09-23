@@ -69,8 +69,11 @@ function stock(available: number) {
 
 function makeQuery(variants: any[], order?: any) {
   return {
-    graph: jest.fn(async ({ entity }: any) => {
+    graph: jest.fn(async ({ entity, filters }: any) => {
       if (entity === "product_variant") return { data: variants }
+      if (entity === "product_variant_inventory_items") return { data: variants.flatMap(variant =>
+        (variant.inventory_items || []).filter((item: any) => filters.inventory_item_id.includes(item.inventory_item_id))
+          .map((item: any) => ({ variant_id: variant.id, inventory_item_id: item.inventory_item_id }))) }
       if (entity === "order") return { data: order ? [order] : [] }
       return { data: [] }
     }),
@@ -103,7 +106,7 @@ describe("inventory allocation availability", () => {
     })
   })
 
-  it("refuses a lead-time estimate without confirmed incoming supply", async () => {
+  it("preserves the existing future-dated ordering window", async () => {
     const { db } = makeDb()
     const query = makeQuery([
       {
@@ -123,8 +126,8 @@ describe("inventory allocation availability", () => {
     })
 
     expect(result).toMatchObject({
-      decision: "blocked",
-      reason: "future_supply_unconfirmed",
+      decision: "future_allowed",
+      reason: "future_window",
       current_stock_quantity: 0,
     })
   })

@@ -452,13 +452,26 @@ async function inventoryStateForAvailability(
   variantIds: string[],
   now: Date
 ) {
-  // Include other variants' commitments: components may share one inventory item.
+  const requested = await fetchVariants(input.query, variantIds)
+  const inventoryItemIds = [...new Set([...requested.values()].flatMap(variant =>
+    variantNativeStock(variant).components.map(component => component.inventoryItemId)))]
+  // Query only variants linked to the cart's inventory components. Another
+  // variant can consume the same item, but unrelated catalog allocations cannot.
+  const { data: links } = inventoryItemIds.length ? await input.query.graph({
+    entity: "product_variant_inventory_items",
+    fields: ["variant_id", "inventory_item_id"],
+    filters: { inventory_item_id: inventoryItemIds },
+  }) : { data: [] }
+  const linkedItems = new Set((links || []).map(link => link.inventory_item_id))
+  const linksUnverified = inventoryItemIds.some(id => !linkedItems.has(id))
+  const relatedVariantIds = [...new Set([...variantIds, ...(links || []).map(link => link.variant_id).filter(Boolean)])]
   const activeRows = (await input.db("gp_inventory_allocation")
     .select("id", "variant_id", "line_item_id", "quantity", "status", "requested_fulfillment_date")
     .whereNull("deleted_at")
+    .whereIn("variant_id", relatedVariantIds)
     .whereIn("status", ACTIVE_ALLOCATION_STATUSES as unknown as string[])) as AllocationRow[]
   const commitments = activeRows.filter(row => shouldCountAllocation(row, now))
-  const variants = await fetchVariants(input.query, [...new Set([...variantIds, ...commitments.map(row => row.variant_id)])])
+  const variants = await fetchVariants(input.query, relatedVariantIds)
   const alternativeIds = variantIds.flatMap(id => {
     const variant = variants.get(id) || {}
     return alternativeVariantIds(variant.metadata, variantProduct(variant).metadata)
@@ -473,7 +486,7 @@ async function inventoryStateForAvailability(
     .select("line_item_id", "inventory_item_id", "location_id", "quantity")
     .whereNull("deleted_at").whereIn("line_item_id", lineIds) : []
   // An unmapped commitment can consume shared stock. Do not silently ignore it.
-  const mappingUnverified = commitments.some(row => !stocks.get(row.variant_id)?.ready)
+  const mappingUnverified = linksUnverified || commitments.some(row => !stocks.get(row.variant_id)?.ready)
   const unmatched = mappingUnverified ? new Map<string, number>() : unmirroredInventoryDemand(commitments, stocks, reservations)
   return { variants, stocks, reservations, unmatched, mappingUnverified }
 }
@@ -599,10 +612,8 @@ export async function checkInventoryAvailability(
       decision = "available"
       reason = "in_stock"
     } else if (futureOrderEligible && days !== null && days >= replenishmentLeadDays) {
-      // A lead-time estimate is not incoming stock. #364 will supply a dated,
-      // quantity-limited reservation contract; until then there is no bypass.
-      decision = "blocked"
-      reason = "future_supply_unconfirmed"
+      decision = "future_allowed"
+      reason = "future_window"
     } else if (atp > 0) {
       decision = "partial"
       reason = "partial_atp"

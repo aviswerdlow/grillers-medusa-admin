@@ -21,7 +21,7 @@ const schema = "public"
 const lockNamespace = `gp_inventory_${randomUUID().replace(/-/g, "")}`
 let db: any, inventory: any, wrapper: any, shutdown: any
 let clients: Redis[] = [], locks: any[] = []
-let nativeReserve: any, nativeCancel: any
+let nativeReserve: any, nativeRollback: any, nativeCancel: any
 const variants = new Map<string, any>(), orders = new Map<string, any>(), carts = new Map<string, any>()
 
 // Capture the installed step's actual handlers while preserving its normal
@@ -58,7 +58,7 @@ beforeAll(async () => {
   const composer = require(path.join(path.dirname(require.resolve("@medusajs/workflows-sdk")), "utils/composer/create-step"))
   const original = composer.createStep
   const spy = jest.spyOn(composer, "createStep").mockImplementation((name: any, invoke: any, compensate: any) => {
-    if (name === "reserve-inventory-step") nativeReserve = invoke
+    if (name === "reserve-inventory-step") { nativeReserve = invoke; nativeRollback = compensate }
     if (name === "delete-reservations-by-line-items") nativeCancel = invoke
     return original(name, invoke, compensate)
   })
@@ -66,7 +66,7 @@ beforeAll(async () => {
     require(path.join(path.dirname(require.resolve("@medusajs/core-flows")), "cart/steps/reserve-inventory"))
     require(path.join(path.dirname(require.resolve("@medusajs/core-flows")), "reservation/steps/delete-reservations-by-line-items"))
   } finally { spy.mockRestore() }
-  if (!nativeReserve || !nativeCancel) throw new Error("Installed native reservation/cancellation steps were not captured")
+  if (!nativeReserve || !nativeRollback || !nativeCancel) throw new Error("Installed native reservation/cancellation steps were not captured")
 }, 30000)
 
 afterAll(async () => {
@@ -99,6 +99,9 @@ async function hydrated(id: string) {
 }
 const query: any = { graph: async ({ entity, filters }: any) => {
   if (entity === "product_variant") return { data: (await Promise.all(filters.id.map(hydrated))).filter(Boolean) }
+  if (entity === "product_variant_inventory_items") return { data: [...variants.values()]
+    .filter(v => filters.inventory_item_id.includes(v.itemId))
+    .map(v => ({ variant_id: v.id, inventory_item_id: v.itemId })) }
   if (entity === "order") {
     const order = orders.get(filters.id)
     return { data: order ? [{ ...order, items: await Promise.all(order.items.map(async (line: any) => ({ ...line, variant: await hydrated(line.variant_id) }))) }] : [] }
@@ -141,6 +144,16 @@ it("permits exactly one native last-unit reservation across independent Redis cl
   expect(Number(item.location_levels[0].available_quantity)).toBe(0)
 })
 
+it("rolls back a failed reservation without leaving the native counter occupied", async () => {
+  const v = await fixture()
+  const result = await reserve(v, "failed_line")
+  await nativeRollback(result.compensateInput, { container: scope() })
+  expect(await inventory.listReservationItems({ inventory_item_id: v.itemId })).toHaveLength(0)
+  const item = await inventory.retrieveInventoryItem(v.itemId, { relations: ["location_levels"] })
+  expect(item.location_levels[0].reserved_quantity).toBe(0)
+  expect(await available(v)).toMatchObject({ decision: "available", available_to_promise_quantity: 1 })
+})
+
 it("records one advisory allocation and audit on concurrent placement replay, without blocking its own last unit", async () => {
   const v = await fixture(); const order = await orderFor(v)
   await reserve(v, order.line)
@@ -158,8 +171,7 @@ it("releases native and advisory commitments once and ignores a late placement e
   const v = await fixture(); const order = await orderFor(v)
   await reserve(v, order.line)
   await createAllocationsForOrder({ db, query, orderId: order.id })
-  // Exercise Medusa's actual cancel-order step. The reserve-step rollback
-  // compensation deletes rows without adjusting inventory_level in 2.10.3.
+  // Exercise Medusa's actual cancel-order step; rollback is covered separately.
   await nativeCancel([order.line], { container: scope() })
   expect(await inventory.listReservationItems({ inventory_item_id: v.itemId })).toHaveLength(0)
   const item = await inventory.retrieveInventoryItem(v.itemId, { relations: ["location_levels"] })
@@ -202,10 +214,19 @@ it("preserves decimal component quantities in native reservations and advisory o
 })
 
 it.each([guardNativeCartInventory, guardNativePaymentInventory])("refuses unmanaged native checkout/payment endpoints before their provider handler", async guard => {
+  process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED = "true"
   const v = await fixture(10); variants.get(v.id).manage_inventory = false
   carts.set("cart", { id: "cart", metadata: { scheduledDate: "2099-01-01" }, items: [{ id: "line", variant_id: v.id, quantity: 1 }] })
   const res: any = { status: jest.fn().mockReturnThis(), json: jest.fn() }, next = jest.fn()
   await guard({ scope: scope(), params: { id: "cart" }, body: {} } as any, res, next)
   expect(res.status).toHaveBeenCalledWith(409)
   expect(next).not.toHaveBeenCalled()
+  delete process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED
+})
+
+it("leaves native checkout guards off until explicitly enabled", async () => {
+  const next = jest.fn()
+  const req: any = { scope: { resolve: () => { throw new Error("flag-off guard read inventory") } } }
+  await guardNativeCartInventory(req, {} as any, next)
+  expect(next).toHaveBeenCalledTimes(1)
 })
