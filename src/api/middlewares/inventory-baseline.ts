@@ -3,7 +3,7 @@ import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { checkInventoryAvailability, requestedFulfillmentDateFromMetadata } from "../../lib/inventory-allocation"
 import { emitOpsAlert } from "../../lib/ops-alert"
 
-function inventoryGuard(paymentSession: boolean) {
+function inventoryGuard(paymentSession: boolean, completionReplay = false) {
   return async (req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) => {
     try {
       const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
@@ -15,9 +15,10 @@ function inventoryGuard(paymentSession: boolean) {
         cartId = data[0].cart_id
       }
       if (typeof cartId !== "string" || !cartId) throw new Error("Cart identity unavailable")
-      const { data } = await query.graph({ entity: "cart", fields: ["id", "metadata", "items.id", "items.variant_id", "items.quantity"],
+      const { data } = await query.graph({ entity: "cart", fields: ["id", "metadata", "completed_at", "items.id", "items.variant_id", "items.quantity"],
         filters: { id: cartId } })
       const cart = data?.[0]
+      if (completionReplay && data?.length === 1 && cart?.completed_at) return next()
       if (data?.length !== 1 || !Array.isArray(cart?.items) || !cart.items.length) throw new Error("Cart inventory unavailable")
       if (cart.items.some((line: any) => !line.variant_id || !Number.isSafeInteger(Number(line.quantity)) || Number(line.quantity) <= 0)) {
         throw new Error("Cart quantity unavailable")
@@ -48,3 +49,4 @@ function inventoryGuard(paymentSession: boolean) {
 // workflows. Cover native endpoints as well so direct clients cannot bypass it.
 export const guardNativeCartInventory = inventoryGuard(false)
 export const guardNativePaymentInventory = inventoryGuard(true)
+export const guardNativeCompletionInventory = inventoryGuard(false, true)

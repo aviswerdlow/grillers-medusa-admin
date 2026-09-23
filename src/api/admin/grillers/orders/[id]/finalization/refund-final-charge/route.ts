@@ -465,9 +465,12 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       stage = "release_inventory_allocation"
       await releaseAllocationLineQuantities({
         db,
+        inventory: req.scope.resolve(Modules.INVENTORY),
+        locking: req.scope.resolve(Modules.LOCKING),
         orderId: allocationOrderId,
         lines: allocation.lines,
         reason: "released_refund",
+        releaseKey: requestKey,
         actorType: "staff",
         actorId,
         note: body.note || null,

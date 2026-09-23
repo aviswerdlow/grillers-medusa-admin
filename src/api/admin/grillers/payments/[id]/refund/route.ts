@@ -348,12 +348,16 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
 
     const effectiveAllocationOrderId = allocationOrderId || orderId
     if (effectiveAllocationOrderId && allocationLines.length) {
+      if (!refundId) throw new Error("Refund identity is required before inventory release")
       stage = "release_inventory_allocation"
       await releaseAllocationLineQuantities({
         db,
+        inventory: req.scope.resolve(Modules.INVENTORY),
+        locking: req.scope.resolve(Modules.LOCKING),
         orderId: effectiveAllocationOrderId,
         lines: allocationLines,
         reason: "released_refund",
+        releaseKey: `refund:${refundId}`,
         actorType: "staff",
         actorId,
         note: body.note || null,

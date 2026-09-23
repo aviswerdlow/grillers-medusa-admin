@@ -2,7 +2,7 @@ import path from "node:path"
 import { randomUUID } from "node:crypto"
 import Redis from "ioredis"
 import { Modules, toMikroOrmEntities } from "@medusajs/framework/utils"
-import { checkInventoryAvailability, createAllocationsForOrder, releaseAllocationsForOrder } from "../../src/lib/inventory-allocation"
+import { checkInventoryAvailability, createAllocationsForOrder, releaseAllocationLineQuantities, releaseAllocationsForOrder } from "../../src/lib/inventory-allocation"
 import { guardNativeCartInventory, guardNativePaymentInventory } from "../../src/api/middlewares/inventory-baseline"
 import { Migration20260525170000 } from "../../src/modules/gp-inventory-allocation/migrations/Migration20260525170000"
 
@@ -21,7 +21,7 @@ const schema = "public"
 const lockNamespace = `gp_inventory_${randomUUID().replace(/-/g, "")}`
 let db: any, inventory: any, wrapper: any, shutdown: any
 let clients: Redis[] = [], locks: any[] = []
-let nativeReserve: any, nativeCompensate: any
+let nativeReserve: any, nativeCancel: any
 const variants = new Map<string, any>(), orders = new Map<string, any>(), carts = new Map<string, any>()
 
 // Capture the installed step's actual handlers while preserving its normal
@@ -58,11 +58,15 @@ beforeAll(async () => {
   const composer = require(path.join(path.dirname(require.resolve("@medusajs/workflows-sdk")), "utils/composer/create-step"))
   const original = composer.createStep
   const spy = jest.spyOn(composer, "createStep").mockImplementation((name: any, invoke: any, compensate: any) => {
-    if (name === "reserve-inventory-step") { nativeReserve = invoke; nativeCompensate = compensate }
+    if (name === "reserve-inventory-step") nativeReserve = invoke
+    if (name === "delete-reservations-by-line-items") nativeCancel = invoke
     return original(name, invoke, compensate)
   })
-  try { require(path.join(path.dirname(require.resolve("@medusajs/core-flows")), "cart/steps/reserve-inventory")) } finally { spy.mockRestore() }
-  if (!nativeReserve || !nativeCompensate) throw new Error("Installed native reservation step was not captured")
+  try {
+    require(path.join(path.dirname(require.resolve("@medusajs/core-flows")), "cart/steps/reserve-inventory"))
+    require(path.join(path.dirname(require.resolve("@medusajs/core-flows")), "reservation/steps/delete-reservations-by-line-items"))
+  } finally { spy.mockRestore() }
+  if (!nativeReserve || !nativeCancel) throw new Error("Installed native reservation/cancellation steps were not captured")
 }, 30000)
 
 afterAll(async () => {
@@ -115,10 +119,10 @@ async function reserve(v: any, lineId: string, quantity = 1, lock = 0) {
   return nativeReserve({ items: [{ id: lineId, inventory_item_id: v.itemId, required_quantity: v.required,
     quantity, allow_backorder: false, location_ids: ["fixture_location"] }] }, { container: scope(lock) })
 }
-async function orderFor(v: any, line = `line_${randomUUID()}`) {
+async function orderFor(v: any, line = `line_${randomUUID()}`, quantity = 1) {
   const id = `order_${randomUUID()}`
   await db("order").insert({ id, status: "pending" })
-  orders.set(id, { id, items: [{ id: line, variant_id: v.id, quantity: 1 }], metadata: {} })
+  orders.set(id, { id, items: [{ id: line, variant_id: v.id, quantity }], metadata: {} })
   return { id, line }
 }
 async function available(v: any) {
@@ -152,11 +156,11 @@ it("records one advisory allocation and audit on concurrent placement replay, wi
 
 it("releases native and advisory commitments once and ignores a late placement event after cancellation", async () => {
   const v = await fixture(); const order = await orderFor(v)
-  const reservation = await reserve(v, order.line)
+  await reserve(v, order.line)
   await createAllocationsForOrder({ db, query, orderId: order.id })
-  // The native compensation handler owns the reservation counter. The custom
-  // subscriber only releases the advisory ledger after the order is canceled.
-  await nativeCompensate(reservation.compensateInput, { container: scope() })
+  // Exercise Medusa's actual cancel-order step. The reserve-step rollback
+  // compensation deletes rows without adjusting inventory_level in 2.10.3.
+  await nativeCancel([order.line], { container: scope() })
   expect(await inventory.listReservationItems({ inventory_item_id: v.itemId })).toHaveLength(0)
   const item = await inventory.retrieveInventoryItem(v.itemId, { relations: ["location_levels"] })
   expect(item.location_levels[0].reserved_quantity).toBe(0)
@@ -166,6 +170,27 @@ it("releases native and advisory commitments once and ignores a late placement e
   expect(await db("gp_inventory_allocation_audit").where({ event_type: "released" })).toHaveLength(1)
   expect((await createAllocationsForOrder({ db, query, orderId: order.id })).created).toBe(0)
   expect(await available(v)).toMatchObject({ decision: "available", available_to_promise_quantity: 1 })
+})
+
+it("partially releases native reservations for a refund once, then releases the remainder", async () => {
+  const v = await fixture(3); const order = await orderFor(v, undefined, 3)
+  await reserve(v, order.line, 3)
+  await createAllocationsForOrder({ db, query, orderId: order.id })
+  const release = (quantity: number, releaseKey: string) => releaseAllocationLineQuantities({
+    db, inventory, locking: locks[0], orderId: order.id, lines: [{ line_item_id: order.line, quantity }],
+    reason: "released_refund", releaseKey,
+  })
+  expect(await release(1, "refund:first")).toBe(1)
+  expect((await inventory.listReservationItems({ line_item_id: order.line }))[0].quantity).toBe(2)
+  let item = await inventory.retrieveInventoryItem(v.itemId, { relations: ["location_levels"] })
+  expect(item.location_levels[0].reserved_quantity).toBe(2)
+  expect((await db("gp_inventory_allocation").where({ order_id: order.id }))[0].quantity).toBe("2")
+  expect(await release(1, "refund:first")).toBe(0)
+  expect(await release(2, "refund:second")).toBe(1)
+  expect(await inventory.listReservationItems({ line_item_id: order.line })).toHaveLength(0)
+  item = await inventory.retrieveInventoryItem(v.itemId, { relations: ["location_levels"] })
+  expect(item.location_levels[0].reserved_quantity).toBe(0)
+  expect((await db("gp_inventory_allocation_audit").where({ reason: "released_refund" }))).toHaveLength(2)
 })
 
 it("preserves decimal component quantities in native reservations and advisory overlap", async () => {

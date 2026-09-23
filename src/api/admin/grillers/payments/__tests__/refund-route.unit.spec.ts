@@ -16,6 +16,9 @@ function makeAllocationDb(rows: any[] = []) {
       whereNull: jest.fn(() => chain),
       where: jest.fn(() => chain),
       whereIn: jest.fn(() => chain),
+      whereRaw: jest.fn(() => chain),
+      forUpdate: jest.fn(() => chain),
+      first: jest.fn(async () => table === "order" ? { id: "order_123", status: "pending", canceled_at: null } : undefined),
       limit: jest.fn(() => chain),
       update: jest.fn(async (payload: any) => {
         updates.push({ table, payload })
@@ -31,6 +34,7 @@ function makeAllocationDb(rows: any[] = []) {
 
     return chain
   })
+  db.transaction = async (work: any) => work(db)
 
   return { db, updates, inserts }
 }
@@ -188,7 +192,7 @@ describe("staff payment refund route", () => {
         line_item_id: "line_123",
         quantity: 3,
         status: "reserved",
-        metadata: {},
+        metadata: { native_reservation_snapshot: { line_quantity: 3, reservations: [] } },
       },
     ])
     const req = {
@@ -205,6 +209,8 @@ describe("staff payment refund route", () => {
           if (key === Modules.PAYMENT) return paymentModule
           if (key === Modules.ORDER) return orderModule
           if (key === Modules.EVENT_BUS) return eventBus
+          if (key === Modules.INVENTORY) return { updateReservationItems: jest.fn(), deleteReservationItemsByLineItem: jest.fn() }
+          if (key === Modules.LOCKING) return { execute: async (_keys: string[], work: any) => work() }
           if (key === "query") return query
           if (key === ContainerRegistrationKeys.PG_CONNECTION) return db
           throw new Error(`Unknown dependency ${key}`)
