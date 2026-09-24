@@ -19,6 +19,7 @@ import {
   reserveInstitutionalCheckout,
 } from "../../../../../../../lib/gp-institutional-checkout"
 import { withInstitutionalFinalizationWrite } from "../../../../../../../lib/gp-institutional-finalization-lock"
+import { recordDeniedInstitutionalRelease } from "../../../../../../../lib/gp-institutional-override-audit"
 import {
   institutionalReleaseIntent,
   persistInstitutionalReleaseIntent,
@@ -39,6 +40,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   })
   if (!order) return
 
+  let deniedInstitutionalReason: string | null = null
   try {
     const db = req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION)
     const orderModule = req.scope.resolve(Modules.ORDER)
@@ -67,6 +69,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           }
           const authority = await institutionalCheckoutAuthority(order.customer_id)
           if (authority.status !== "allow") {
+            deniedInstitutionalReason = authority.reason
             throw new Error("Institutional terms need a current account review.")
           }
           const preview = await previewFinalization(workDb, {
@@ -85,6 +88,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
             amountCents: reservedCents,
           })
           if (credit.status !== "reserved") {
+            deniedInstitutionalReason = credit.reason
             throw new Error("Institutional credit is on hold for review.")
           }
         }
@@ -184,6 +188,27 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       ...approved,
     })
   } catch (error) {
+    if (deniedInstitutionalReason) {
+      try {
+        await recordDeniedInstitutionalRelease({
+          db: req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION),
+          orderId: order.id,
+          actorId: staffAuditActorId(staffAuditFields(req)),
+          requestedReason: (req.body as Record<string, unknown> | null)?.institutional_override_reason,
+          authorityReason: deniedInstitutionalReason,
+        })
+      } catch (auditError) {
+        await emitFinalizationRouteFailureAlert({
+          req,
+          action: "institutional_denied_release_audit_failed",
+          error: auditError,
+          order,
+          path: "src/api/admin/grillers/orders/[id]/finalization/approve/route.ts",
+          status: 503,
+        })
+        return jsonError(res, 503, "Institutional release was denied; its audit needs review.")
+      }
+    }
     await emitFinalizationRouteFailureAlert({
       req,
       action: "approve_finalization",

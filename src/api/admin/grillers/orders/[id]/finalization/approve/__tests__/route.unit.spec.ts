@@ -64,7 +64,8 @@ function makeScope() {
       data: [{ id: "order_123", metadata: {} }],
     })),
   }
-  const db: any = jest.fn()
+  const auditInsert = jest.fn(async () => undefined)
+  const db: any = jest.fn(() => ({ insert: auditInsert }))
   const trx: any = jest.fn(() => ({
     where: () => ({ whereNull: () => ({ first: async () => ({ status: "packed_pending_review" }) }) }),
   }))
@@ -85,7 +86,7 @@ function makeScope() {
     },
   }
 
-  return { db, trx, eventBus, logger, orderModule, query, scope }
+  return { auditInsert, db, trx, eventBus, logger, orderModule, query, scope }
 }
 
 describe("approve finalization route", () => {
@@ -213,7 +214,64 @@ it("holds a flagged invoice before release when its source is stale", async () =
   process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
   mockIsInvoiceOrder.mockReturnValue(true)
   ;(institutionalCheckoutAuthority as jest.Mock).mockResolvedValueOnce({ status: "hold", reason: "stale_source" })
-  const { scope, query, orderModule } = makeScope()
+  const { scope, query, orderModule, auditInsert, db } = makeScope()
+  query.graph.mockResolvedValueOnce({ data: [{
+    id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
+    metadata: { gp_institutional_commitment_id: "cart:cart_123" },
+  }] } as any)
+  const res = makeRes()
+  await POST({ scope, params: { id: "order_123" }, body: {
+    institutional_override_reason: "staff_clicked_release",
+  } } as any, res)
+  expect(res.status).toHaveBeenCalledWith(409)
+  expect(mockApproveFinalization).not.toHaveBeenCalled()
+  expect(reserveInstitutionalCheckout).not.toHaveBeenCalled()
+  expect(orderModule.updateOrders).not.toHaveBeenCalled()
+  expect(db).toHaveBeenCalledWith("gp_institutional_override_attempt")
+  expect(auditInsert).toHaveBeenCalledWith(expect.objectContaining({
+    order_id: "order_123", reason_code: "staff_clicked_release",
+    authority_reason: "stale_source", named_capability: null, decision: "denied",
+  }))
+})
+
+it("keeps release denied and pages when the denied-attempt audit cannot be stored", async () => {
+  process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+  mockIsInvoiceOrder.mockReturnValue(true)
+  ;(institutionalCheckoutAuthority as jest.Mock).mockResolvedValueOnce({
+    status: "hold", reason: "credit_limit_exceeded",
+  })
+  const { scope, query, auditInsert } = makeScope()
+  auditInsert.mockRejectedValueOnce(new Error("audit table unavailable"))
+  query.graph.mockResolvedValueOnce({ data: [{
+    id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
+    metadata: { gp_institutional_commitment_id: "cart:cart_123" },
+  }] } as any)
+  const res = makeRes()
+  await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
+  expect(res.status).toHaveBeenCalledWith(503)
+  expect(mockApproveFinalization).not.toHaveBeenCalled()
+  expect(emitOpsAlert).toHaveBeenCalledWith(expect.objectContaining({
+    severity: "page",
+    meta: expect.objectContaining({ action: "institutional_denied_release_audit_failed" }),
+  }))
+})
+
+it("audits an over-limit release attempt after its credit transaction is denied", async () => {
+  process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+  mockIsInvoiceOrder.mockReturnValue(true)
+  ;(institutionalCheckoutAuthority as jest.Mock).mockResolvedValueOnce({
+    status: "allow", account: {
+      companyKey: "TEST_SHA", customerListId: "TEST_LIST", creditLimitCents: 100000,
+      invoices: [],
+    },
+  })
+  ;(previewFinalization as jest.Mock).mockResolvedValueOnce({
+    errors: [], totals: { final_order_total: 500 },
+  })
+  ;(reserveInstitutionalCheckout as jest.Mock).mockResolvedValueOnce({
+    status: "hold", reason: "credit_limit_exceeded", projectedCents: 105000,
+  })
+  const { scope, query, auditInsert } = makeScope()
   query.graph.mockResolvedValueOnce({ data: [{
     id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
     metadata: { gp_institutional_commitment_id: "cart:cart_123" },
@@ -222,8 +280,9 @@ it("holds a flagged invoice before release when its source is stale", async () =
   await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
   expect(res.status).toHaveBeenCalledWith(409)
   expect(mockApproveFinalization).not.toHaveBeenCalled()
-  expect(reserveInstitutionalCheckout).not.toHaveBeenCalled()
-  expect(orderModule.updateOrders).not.toHaveBeenCalled()
+  expect(auditInsert).toHaveBeenCalledWith(expect.objectContaining({
+    authority_reason: "credit_limit_exceeded", decision: "denied",
+  }))
 })
 
 it("reserves the packed invoice total in the approval transaction before A/R release", async () => {
