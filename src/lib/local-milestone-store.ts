@@ -151,7 +151,32 @@ export async function readLocalOrder(db: any, orderId: string, actor: StaffPrinc
   if (!isMilestoneOffice(actor) && state.driver_customer_id !== actor.id)
     throw new LocalMilestoneError("local_milestone_order_not_assigned", 403)
   const events = await db("gp_local_milestone_event").where({ order_id: orderId }).orderBy("version", "asc")
-  return { state, events }
+  const [summary] = await localOrderSummaries(db, [state])
+  return { state: { ...state, summary }, events }
+}
+
+async function localOrderSummaries(db: any, states: any[]) {
+  if (!states.length) return []
+  const orders = await db("order").whereIn("id", states.map(state => state.order_id))
+    .select("id", "display_id", "shipping_address_id")
+  const addresses = await db("order_address").whereIn("id", orders.map((order: any) => order.shipping_address_id).filter(Boolean))
+    .select("id", "first_name", "last_name", "address_1", "address_2", "city", "province", "postal_code", "phone")
+  const orderById = new Map(orders.map((order: any) => [order.id, order]))
+  const addressById = new Map(addresses.map((address: any) => [address.id, address]))
+  return states.map(state => {
+    const order: any = orderById.get(state.order_id)
+    const address: any = order && addressById.get(order.shipping_address_id)
+    return {
+      display_id: order?.display_id ?? null,
+      recipient: [address?.first_name, address?.last_name].filter(Boolean).join(" ") || null,
+      address_1: address?.address_1 || null,
+      address_2: address?.address_2 || null,
+      city: address?.city || null,
+      province: address?.province || null,
+      postal_code: address?.postal_code || null,
+      phone: address?.phone || null,
+    }
+  })
 }
 
 export async function listLocalOrders(db: any, actor: StaffPrincipal, exceptionsOnly = false) {
@@ -160,5 +185,7 @@ export async function listLocalOrders(db: any, actor: StaffPrincipal, exceptions
   if (!isMilestoneOffice(actor)) query = query.where({ driver_customer_id: actor.id })
   if (exceptionsOnly) query = query.whereIn("milestone", ["local_failed", "local_returned"])
   else query = query.whereNotIn("milestone", ["pickup_collected", "local_delivered", "local_returned"])
-  return query
+  const states = await query
+  const summaries = await localOrderSummaries(db, states)
+  return states.map((state: any, index: number) => ({ ...state, summary: summaries[index] }))
 }

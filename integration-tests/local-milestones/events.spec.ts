@@ -1,6 +1,6 @@
 import { applyMigration, withMigrationFixture } from "../migration-fixture"
 import { Migration20260924210000 } from "../../src/modules/gp-catch-weight/migrations/Migration20260924210000"
-import { assignLocalDriver, recordLocalMilestone } from "../../src/lib/local-milestone-store"
+import { assignLocalDriver, listLocalOrders, readLocalOrder, recordLocalMilestone } from "../../src/lib/local-milestone-store"
 import { staffCapabilities } from "../../src/lib/staff-access-policy"
 import type { StaffPrincipal } from "../../src/lib/staff-principal"
 
@@ -14,12 +14,15 @@ const release = { payment_workflow: "setup_then_final_charge", final_charge_stat
   fulfillment_gate_status: "released", finalization_status: "charged_ready_to_ship" }
 
 async function nativeFixture(db: any, mode: "plant_pickup" | "atlanta_delivery") {
-  await db.raw('create table "order" (id text primary key, status text, canceled_at timestamptz, deleted_at timestamptz, is_draft_order boolean, metadata jsonb)')
+  await db.raw('create table "order" (id text primary key, display_id integer, shipping_address_id text, status text, canceled_at timestamptz, deleted_at timestamptz, is_draft_order boolean, metadata jsonb)')
+  await db.raw('create table order_address (id text primary key, first_name text, last_name text, address_1 text, address_2 text, city text, province text, postal_code text, phone text)')
   await db.raw('create table fulfillment (id text primary key, canceled_at timestamptz, deleted_at timestamptz)')
   await db.raw('create table order_fulfillment (order_id text, fulfillment_id text)')
   await applyMigration(db, Migration20260924210000)
-  await db("order").insert({ id: "order_fixture", status: "pending", is_draft_order: false,
+  await db("order").insert({ id: "order_fixture", display_id: 367, shipping_address_id: "addr_fixture", status: "pending", is_draft_order: false,
     metadata: JSON.stringify({ ...release, fulfillmentType: mode }) })
+  await db("order_address").insert({ id: "addr_fixture", first_name: "Case", last_name: "Recipient",
+    address_1: "10 Test St", city: "Atlanta", province: "GA", postal_code: "30301", phone: "4045550100" })
   await db("fulfillment").insert({ id: "ful_fixture" })
   await db("order_fulfillment").insert({ order_id: "order_fixture", fulfillment_id: "ful_fixture" })
 }
@@ -96,5 +99,20 @@ test("local driver cannot bypass release, assignment or failed-delivery office h
     await recordLocalMilestone(db, { orderId: "order_fixture", actor: office, kind: "record",
       body: body("evt_return_01", "local_returned", 2, { reason: "Back at office" }) })
     expect((await db("gp_local_milestone_state").where({ order_id: "order_fixture" }).first()).milestone).toBe("local_returned")
+  })
+})
+
+test("the assigned driver sees the delivery address but no other order", async () => {
+  await fixture(async db => {
+    await nativeFixture(db, "atlanta_delivery")
+    await assignLocalDriver(db, { orderId: "order_fixture", fulfillmentId: "ful_fixture",
+      assignmentId: "assignment_summary_01", driverCustomerId: driver.id, actor: office })
+    const visible = await listLocalOrders(db, driver)
+    expect(visible).toHaveLength(1)
+    expect(visible[0].summary).toMatchObject({ display_id: 367, recipient: "Case Recipient", address_1: "10 Test St" })
+    expect((await readLocalOrder(db, "order_fixture", driver)).state.summary.phone).toBe("4045550100")
+    const other: StaffPrincipal = { ...driver, id: "cus_other" }
+    expect(await listLocalOrders(db, other)).toHaveLength(0)
+    await expect(readLocalOrder(db, "order_fixture", other)).rejects.toThrow("local_milestone_order_not_assigned")
   })
 })
