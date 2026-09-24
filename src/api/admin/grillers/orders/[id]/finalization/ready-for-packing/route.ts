@@ -6,6 +6,7 @@ import {
   markFinalizationReadyForPacking,
   metadataObject,
 } from "../../../../../../../lib/catch-weight-finalization"
+import { withInstitutionalFinalizationWrite } from "../../../../../../../lib/gp-institutional-finalization-lock"
 import {
   emitFinalizationRouteFailureAlert,
   jsonError,
@@ -28,22 +29,24 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   const actor = staffAuditActorId(staffAudit)
 
   try {
-    const detail = await markFinalizationReadyForPacking(db, order, actor)
-
-    const metadata = appendStaffAudit(
-      {
-        ...metadataObject(order.metadata),
-        finalization_id: detail.finalization.id,
-        finalization_status: FINALIZATION_READY_FOR_PACKING,
-        catch_weight_status: FINALIZATION_READY_FOR_PACKING,
-      },
-      {
-        action: "catch_weight_ready_for_packing",
-        status: FINALIZATION_READY_FOR_PACKING,
-        ...staffAudit,
-      }
-    )
-    await orderModule.updateOrders(order.id, { metadata })
+    const detail = await withInstitutionalFinalizationWrite(db, order, async (workDb) => {
+      const detail = await markFinalizationReadyForPacking(workDb, order, actor)
+      const metadata = appendStaffAudit(
+        {
+          ...metadataObject(order.metadata),
+          finalization_id: detail.finalization.id,
+          finalization_status: FINALIZATION_READY_FOR_PACKING,
+          catch_weight_status: FINALIZATION_READY_FOR_PACKING,
+        },
+        {
+          action: "catch_weight_ready_for_packing",
+          status: FINALIZATION_READY_FOR_PACKING,
+          ...staffAudit,
+        }
+      )
+      await orderModule.updateOrders(order.id, { metadata })
+      return detail
+    })
 
     res.status(200).json({
       order,
