@@ -20,6 +20,11 @@ import {
 } from "../../../../../../../lib/gp-institutional-checkout"
 import { withInstitutionalFinalizationWrite } from "../../../../../../../lib/gp-institutional-finalization-lock"
 import {
+  institutionalReleaseIntent,
+  persistInstitutionalReleaseIntent,
+  reconcileInstitutionalReleaseIntent,
+} from "../../../../../../../lib/gp-institutional-release-intent"
+import {
   emitFinalizationRouteFailureAlert,
   jsonError,
   loadFinalizationOrderForRoute,
@@ -92,8 +97,6 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
             institutionalDollarsToCents(approved.totals.final_order_total) !== reservedCents) {
           throw new Error("Packed invoice total changed during credit reservation.")
         }
-        // The invoice metadata update is part of the locked operation. A failed
-        // callback rolls back the finalization and credit reservation together.
         const approvedStatus = approved.finalization.status
         const metadata = isInvoiceOrder(order)
           ? invoiceArOrderMetadata({
@@ -122,10 +125,31 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
                 ...staffAudit,
               }
             )
-        await orderModule.updateOrders(order.id, { metadata })
+        if (reservedCents !== null) {
+          const intent = institutionalReleaseIntent({
+            orderId: order.id,
+            commitmentId: metadataObject(order.metadata).gp_institutional_commitment_id,
+            baseMetadata: order.metadata,
+            targetMetadata: metadata,
+            amountCents: reservedCents,
+          })
+          await persistInstitutionalReleaseIntent(workDb, approved.finalization.id, intent)
+        } else {
+          await orderModule.updateOrders(order.id, { metadata })
+        }
         return { approved, approvedStatus }
       }
     )
+    if (isInvoiceOrder(order) && process.env.GP_INSTITUTIONAL_TERMS_ENABLED === "true") {
+      // The credit and finalization transaction has committed. Only now may
+      // the order.updated path expose the unpaid invoice to the QBD writer.
+      const result = await reconcileInstitutionalReleaseIntent({
+        db, orderModule, orderId: order.id,
+      })
+      if (result.status !== "applied") {
+        throw new Error("Institutional release needs reconciliation before fulfillment.")
+      }
+    }
 
     // #9/#235: signal the fixed-price auto-charge trigger. Only for card orders now awaiting
     // the final charge (packed_pending_charge) — never invoice orders, which approve releases

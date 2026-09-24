@@ -6,6 +6,7 @@ import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { emitOpsAlert } from "../../../../../../../../lib/ops-alert"
 import { previewFinalization } from "../../../../../../../../lib/catch-weight-finalization"
 import { institutionalCheckoutAuthority, reserveInstitutionalCheckout } from "../../../../../../../../lib/gp-institutional-checkout"
+import { persistInstitutionalReleaseIntent, reconcileInstitutionalReleaseIntent } from "../../../../../../../../lib/gp-institutional-release-intent"
 
 const mockApproveFinalization = jest.fn()
 const mockInvoiceArOrderMetadata = jest.fn((_input: any) => ({
@@ -38,6 +39,11 @@ jest.mock("../../../../../../../../lib/gp-institutional-checkout", () => ({
   institutionalCheckoutAuthority: jest.fn(),
   institutionalDollarsToCents: jest.requireActual("../../../../../../../../lib/gp-institutional-checkout").institutionalDollarsToCents,
   reserveInstitutionalCheckout: jest.fn(),
+}))
+jest.mock("../../../../../../../../lib/gp-institutional-release-intent", () => ({
+  institutionalReleaseIntent: jest.fn(() => ({ status: "prepared", requestKey: "invoice_ar:order_123" })),
+  persistInstitutionalReleaseIntent: jest.fn(async () => undefined),
+  reconcileInstitutionalReleaseIntent: jest.fn(async () => ({ status: "applied" })),
 }))
 
 import { POST } from "../route"
@@ -231,7 +237,17 @@ it("reserves the packed invoice total in the approval transaction before A/R rel
     finalization: { id: "fin_123", status: "released_to_fulfillment" },
     totals: { final_order_total: 500, delta_total: 50 }, lines: [], packages: [],
   })
-  const { scope, query, trx } = makeScope()
+  const { scope, query, db, trx, orderModule } = makeScope()
+  let transactionCommitted = false
+  db.transaction.mockImplementationOnce(async (run: any) => {
+    const result = await run(trx)
+    transactionCommitted = true
+    return result
+  })
+  ;(reconcileInstitutionalReleaseIntent as jest.Mock).mockImplementationOnce(async () => {
+    expect(transactionCommitted).toBe(true)
+    return { status: "applied" }
+  })
   query.graph.mockResolvedValueOnce({ data: [{
     id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
     metadata: { gp_institutional_commitment_id: "cart:cart_123" },
@@ -242,6 +258,13 @@ it("reserves the packed invoice total in the approval transaction before A/R rel
     account, reservationId: "cart:cart_123", amountCents: 50000, transaction: trx,
   }))
   expect(mockApproveFinalization).toHaveBeenCalledTimes(1)
+  expect(persistInstitutionalReleaseIntent).toHaveBeenCalledWith(
+    trx, "fin_123", expect.objectContaining({ requestKey: "invoice_ar:order_123" })
+  )
+  expect(reconcileInstitutionalReleaseIntent).toHaveBeenCalledWith(
+    expect.objectContaining({ orderId: "order_123" })
+  )
+  expect(orderModule.updateOrders).not.toHaveBeenCalled()
   expect(res.status).toHaveBeenCalledWith(200)
 })
 
