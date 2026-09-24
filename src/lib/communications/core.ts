@@ -1577,7 +1577,7 @@ export function postmarkWebhookEventId(
 export function isHardPostmarkBounce(payload: Record<string, any>): boolean {
   if (payload.TypeCode !== undefined && payload.TypeCode !== null) {
     const code = Number(payload.TypeCode)
-    if (Number.isFinite(code)) return code === 1
+    if (Number.isFinite(code)) return [1, 100000, 100002].includes(code)
   }
   return String(payload.Type || "").toLowerCase() === "hardbounce"
 }
