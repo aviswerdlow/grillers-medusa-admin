@@ -707,6 +707,33 @@ export async function runFinalChargeAndRelease(
       failureMessage,
     })
 
+    // Only a Stripe-confirmed card decline warrants a customer notice. Unknown
+    // outcomes and succeeded charges with failed recording remain staff holds.
+    if (
+      confirmedStripeDecline &&
+      process.env.GP_FINAL_CHARGE_DECLINE_EMAIL_ENABLED === "true"
+    ) {
+      try {
+        await eventBus.emit({
+          name: "order.final_charge_declined",
+          data: {
+            id: order.id,
+            order_id: order.id,
+            finalization_id: preview.finalization.id,
+            charge_attempt_id: attempt.id,
+          },
+        })
+      } catch (notificationError) {
+        logger.error(
+          `[final-charge] decline notice event failed for order ${order.id}: ${
+            notificationError instanceof Error
+              ? notificationError.message
+              : String(notificationError)
+          }`
+        )
+      }
+    }
+
     return {
       result: succeededPaymentIntent
         ? "charge_recording_failed"

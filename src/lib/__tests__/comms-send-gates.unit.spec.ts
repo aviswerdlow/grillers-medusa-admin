@@ -431,4 +431,39 @@ describe("sendTrackedEmail gates", () => {
       )
     ).toHaveLength(0)
   })
+
+  it("holds an uncertain prior decline notice for provider reconciliation", async () => {
+    const { db, state } = fakeDb()
+    state.gp_customer_profile = [consentedProfile()]
+    state.gp_message_log = [{ id: "prior_decline", status: "failed", postmark_message_id: null }]
+    const result = await sendTrackedEmail(
+      fakeContainer(db, notification),
+      baseInput({
+        stream: "transactional",
+        purpose: "transactional",
+        template_key: "order-final-charge-declined",
+      })
+    )
+    expect(result).toEqual({ ok: false, error: "final_charge_decline_provider_reconciliation_required" })
+    expect(notification.createNotifications).not.toHaveBeenCalled()
+  })
+
+  it("deduplicates a decline notice with a confirmed Postmark receipt", async () => {
+    const { db, state } = fakeDb()
+    state.gp_customer_profile = [consentedProfile()]
+    state.gp_message_log = [{
+      id: "sent_decline", status: "sent", postmark_message_id: "pm_original",
+      provider_response: { status: "success", external_id: "pm_original" },
+    }]
+    const result = await sendTrackedEmail(
+      fakeContainer(db, notification),
+      baseInput({
+        stream: "transactional",
+        purpose: "transactional",
+        template_key: "order-final-charge-declined",
+      })
+    )
+    expect(result).toEqual({ ok: true, skipped: true, messageId: "pm_original" })
+    expect(notification.createNotifications).not.toHaveBeenCalled()
+  })
 })

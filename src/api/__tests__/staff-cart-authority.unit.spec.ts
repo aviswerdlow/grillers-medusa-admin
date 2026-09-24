@@ -5,6 +5,7 @@ import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import middlewares from "../middlewares"
 import { POST as createStaffCart } from "../admin/grillers/staff-carts/route"
 import { enforceStaffCartAuthority } from "../middlewares/staff-cart-authority"
+import { guardNativeCartInventory, guardNativeCompletionInventory, guardNativePaymentInventory } from "../middlewares/inventory-baseline"
 import { createAllocationsForOrder } from "../../lib/inventory-allocation"
 import { STAFF_CART_AUTHORITY, STAFF_LINE_OVERRIDE, verifiedStaffCartAuthority, verifiedStaffLineOverride } from "../../lib/staff-cart-authority"
 
@@ -26,14 +27,20 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
   let inserts: { table: string; data: any }[], count: number
   const customerRead = jest.fn(), workflow = jest.fn(), cartWrite = jest.fn(), otherEffects = jest.fn()
   const db: any = jest.fn((table: string) => {
-    const chain: any = { then: (resolve: any) => resolve([]), insert: async (data: any) => { inserts.push({ table, data }); return data } }
-    for (const name of ["select", "where", "whereNull", "whereIn", "limit", "orderBy"]) chain[name] = () => chain
+    let selectedId: string | undefined
+    const chain: any = { then: (resolve: any) => resolve(table === "product_variant as requested" ? [{ id: variant.id }] : []), insert: async (data: any) => { inserts.push({ table, data }); return data },
+      forUpdate: () => chain, first: async () => table === "order" && selectedId && orders[selectedId]
+        ? { id: selectedId, status: "pending", canceled_at: null } : undefined }
+    for (const name of ["select", "where", "whereNull", "whereIn", "whereRaw", "join", "limit", "orderBy"]) chain[name] = () => chain
+    chain.where = (value: any) => { if (value?.id) selectedId = value.id; return chain }
     return chain
   })
+  db.transaction = async (work: any) => work(db)
   const query = { graph: jest.fn(async ({ entity, filters }: any) => {
     if (entity === "cart") return { data: carts[filters.id] ? [carts[filters.id]] : [] }
-    if (entity === "cart_payment_collection") return { data: filters.payment_collection_id === "paycol_1" && carts.cart_1 ? [{ cart: { id: "cart_1" } }] : [] }
+    if (entity === "cart_payment_collection") return { data: filters.payment_collection_id === "paycol_1" && carts.cart_1 ? [{ cart_id: "cart_1", cart: { id: "cart_1" } }] : [] }
     if (entity === "product_variant") return { data: [variant] }
+    if (entity === "product_variant_inventory_items") return { data: [{ variant_id: variant.id, inventory_item_id: "inventory_1" }] }
     if (entity === "order") return { data: orders[filters.id] ? [orders[filters.id]] : [] }
     return { data: [] }
   }) }
@@ -58,7 +65,8 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     })
     // ApiLoader installs optional customer auth before sorted Store middleware.
     app.use("/store", authenticate("customer", ["bearer", "session"], { allowUnauthenticated: true }))
-    const selected = middlewares.routes!.filter((r: any) => r.matcher === "/admin/*" || r.middlewares.includes(enforceStaffCartAuthority))
+    const selected = middlewares.routes!.filter((r: any) => r.matcher === "/admin/*" || r.middlewares.includes(enforceStaffCartAuthority)
+      || [guardNativeCartInventory, guardNativeCompletionInventory, guardNativePaymentInventory].some(guard => r.middlewares.includes(guard)))
     for (const r of new RoutesSorter(selected).sort()) for (const method of r.methods || ["ALL"]) app[method.toLowerCase()](r.matcher, ...r.middlewares.map(wrap))
     const post = (url: string, schema: any, handler: any) => app.post(url, ...(schema ? [validateAndTransformBody(schema)] : []), wrap(handler))
     app.post("/admin/grillers/staff-carts", wrap(createStaffCart))
@@ -75,10 +83,14 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
   })
   beforeEach(() => {
     process.env.GP_STAFF_BOUNDARY_MODE = "enforce"
+    process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED = "true"
     jest.clearAllMocks(); process.env.GP_STAFF_GATEWAY_API_KEY_ID = "apk_gateway"; count = 0; carts = {}; orders = {}; inserts = []
     customers = { cus_staff: { id: "cus_staff", email: "office@example.test", first_name: "Office", metadata: { gp_staff_role: "office", staff_access_version: 2 } },
       cus_target: { id: "cus_target", email: "customer@example.test", metadata: {} }, cus_other: { id: "cus_other", email: "other@example.test", metadata: { gp_staff_role: "office" } } }
-    variant = { id: "variant_1", product_id: "prod_1", inventory_quantity: 5, manage_inventory: true, metadata: {}, product: { id: "prod_1", title: "Fixture item", metadata: {} } }
+    variant = { id: "variant_1", product_id: "prod_1", inventory_quantity: 5, manage_inventory: true, allow_backorder: false,
+      inventory_items: [{ inventory_item_id: "inventory_1", required_quantity: 1,
+        inventory: { id: "inventory_1", location_levels: [{ location_id: "fixture_location", stocked_quantity: 5, reserved_quantity: 0 }] } }],
+      metadata: {}, product: { id: "prod_1", title: "Fixture item", metadata: {} } }
     customerRead.mockImplementation(async id => customers[id])
     createRun.mockImplementation(async ({ input }) => {
       const cart = { ...input, id: `cart_${++count}`, customer_id: input.customer_id || "cus_target", items: [], completed_at: null }
@@ -99,6 +111,7 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     })
     paymentRun.mockResolvedValue({})
   })
+  const setFixtureStock = (quantity: number) => { variant.inventory_quantity = quantity; variant.inventory_items[0].inventory.location_levels[0].stocked_quantity = quantity }
   afterAll(async () => { process.env = originalEnv; server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) })
 
   async function request(url: string, body?: any, staff = false, options: { method?: string; jwt?: string; authorization?: string } = {}) {
@@ -123,7 +136,7 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
   const paymentPaths = ["/store/payment-collections", "/store/payment-collections/paycol_1/payment-sessions", "/store/carts/cart_1/complete", "/store/grillers/checkout/place-order"]
 
   it.each(["list", "select", "validate"])("calendar %s retains staff authority without demanding inventory payment readiness", async action => {
-    await prepared("collect_card_now"); variant.inventory_quantity = 0; await add(true)
+    await prepared("collect_card_now"); setFixtureStock(0); await add(true)
     // Existing date-bound override is stale; a quote must allow choosing its replacement.
     carts.cart_1.metadata.scheduledDate = "2099-01-01"
     const body = { cart_id: "cart_1", action }
@@ -227,7 +240,7 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     expect(paymentRun).not.toHaveBeenCalled()
   })
   it("requires a backend-signed override and binds it to quantity/date before payment", async () => {
-    await prepared(); variant.inventory_quantity = 0
+    await prepared(); setFixtureStock(0)
     expect((await request("/store/carts/cart_1/line-items", { variant_id: "variant_1", quantity: 2, metadata: { inventory_override_reason: "forged", inventory_override_note: "forged" } })).status).toBe(403)
     await add(true)
     const cart = carts.cart_1, line = cart.items[0], proof = verifiedStaffCartAuthority(cart, secret)
@@ -240,16 +253,18 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     expect(completeRun).not.toHaveBeenCalled()
   })
   it("denies unapproved shortages and inactive items, including a signed override", async () => {
-    await prepared(); variant.inventory_quantity = 0; await add()
+    await prepared(); setFixtureStock(0); await add()
     expect((await request("/store/carts/cart_1/complete", {})).status).toBe(403)
     carts.cart_1.items = []; await add(true); variant.metadata.availability_lifecycle = "seasonal_inactive"
     expect((await request("/store/carts/cart_1/complete", {})).status).toBe(403)
     expect(completeRun).not.toHaveBeenCalled()
   })
   it("preserves verified staff attribution through native completion and actual allocation logic", async () => {
-    await prepared(); variant.inventory_quantity = 0; await add(true)
-    const completed = await request("/store/carts/cart_1/complete", {})
-    expect(completed.status).toBe(200); expect(completed.body.type).toBe("order")
+    await prepared(); setFixtureStock(0); await add(true)
+    // Native checkout now rejects even a signed staff override when stock is
+    // absent. An already-created signed order still retains its audit identity.
+    expect((await request("/store/carts/cart_1/complete", {})).status).toBe(409)
+    await completeRun({ input: { id: "cart_1" } })
     const order = orders.order_1
     order.metadata.staff_actor_customer_id = "cus_forged_after_order"
     customers.cus_staff.metadata.staff_access_revoked = true
@@ -261,7 +276,7 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
   it("keeps native completion retries available after stock is reserved and prevents new payment preparation", async () => {
     await prepared(); await add()
     expect((await request("/store/carts/cart_1/complete", {})).status).toBe(200)
-    variant.inventory_quantity = 0
+    setFixtureStock(0)
     expect((await request("/store/carts/cart_1/complete", {})).status).toBe(200)
     expect((await request("/store/payment-collections/paycol_1/payment-sessions", { provider_id: "pp_stripe_stripe" })).status).toBe(403)
     expect(paymentRun).not.toHaveBeenCalled()
@@ -270,7 +285,7 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     orders.order_1 = { id: "order_1", cart_id: "cart_forged", email: "customer@example.test", customer_id: "cus_target",
       metadata: { source: "staff_phone_order", staff_actor_customer_id: "cus_staff" }, items: [{ id: "line_1", quantity: 2, variant,
         metadata: { inventory_override_reason: "forged", inventory_override_note: "forged", [STAFF_LINE_OVERRIDE]: "forged" } }] }
-    variant.inventory_quantity = 0
+    setFixtureStock(0)
     await createAllocationsForOrder({ db, query, orderId: "order_1", source: "staff_phone_order", staffAuthoritySecret: secret })
     expect(inserts.find(i => i.table === "gp_inventory_allocation")?.data).toMatchObject({ source: "customer_web", staff_actor_customer_id: null, override_reason: null })
     expect(inserts.find(i => i.table === "gp_inventory_allocation_audit")?.data.actor_type).toBe("system")

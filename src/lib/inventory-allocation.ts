@@ -1,6 +1,8 @@
 import { isInternalCatalogRecord, isInternalCatalogProduct } from "./public-catalog"
 import { randomUUID } from "crypto"
+import { MathBN } from "@medusajs/framework/utils"
 import { verifiedStaffCartAuthority, verifiedStaffLineOverride } from "./staff-cart-authority"
+import { variantNativeStock, unmirroredInventoryDemand, unmirroredVariantUnits, nativeReservedUnitsForLine, type NativeReservation, type NativeStock } from "./inventory-stock"
 
 export type AvailabilityLifecycle =
   | "active"
@@ -33,6 +35,8 @@ export type AllocationSource =
   | "admin"
 
 export type AvailabilityLineInput = {
+  /** Trusted order-placement caller only; public/admin request adapters do not accept this field. */
+  reservation_line_id?: string
   product_id?: string
   variant_id: string
   quantity: number
@@ -99,6 +103,7 @@ export type QueryGraph = {
 export type DbConnection = {
   (tableName: string): any
   raw?: (...args: any[]) => any
+  transaction?: <T>(work: (trx: DbConnection) => Promise<T>) => Promise<T>
 }
 
 const ACTIVE_ALLOCATION_STATUSES = [
@@ -325,70 +330,46 @@ function variantProduct(variant: Record<string, unknown>): Record<string, unknow
   return objectRecord(variant.product)
 }
 
-function variantStockQuantity(variant: Record<string, unknown>): {
-  quantity: number
-  inventoryItemId?: string
-  stockLocationId?: string
-} {
-  if (variant.manage_inventory === false) return { quantity: 999999 }
-  if (variant.allow_backorder === true) return { quantity: 999999 }
+const nativeInventoryCheckoutEnabled = () => process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED === "true"
 
-  const directInventoryQuantity = numberValue(variant.inventory_quantity)
-  if (directInventoryQuantity !== undefined) {
-    return { quantity: Math.max(0, Math.floor(directInventoryQuantity)) }
-  }
+// Preserve the pre-cutover availability calculation while the native baseline
+// lane is off. The live catalog does not yet have native levels for every item.
+function legacyVariantStockQuantity(variant: Record<string, unknown>): NativeStock {
+  const stock = (quantity: number, inventoryItemId?: string, stockLocationId?: string): NativeStock =>
+    ({ quantity, ready: true, components: [], inventoryItemId, stockLocationId })
+  if (variant.manage_inventory === false || variant.allow_backorder === true) return stock(999999)
 
-  const inventoryLinks = Array.isArray(variant.inventory_items)
-    ? variant.inventory_items
-    : []
+  const directQuantity = numberValue(variant.inventory_quantity)
+  if (directQuantity !== undefined) return stock(Math.max(0, Math.floor(directQuantity)))
+
+  const links = Array.isArray(variant.inventory_items) ? variant.inventory_items : []
   const kitQuantities: number[] = []
-  let firstInventoryItemId: string | undefined
-  let firstStockLocationId: string | undefined
-
-  for (const rawLink of inventoryLinks) {
+  let firstItemId: string | undefined
+  let firstLocationId: string | undefined
+  for (const rawLink of links) {
     const link = objectRecord(rawLink)
-    const requiredQuantity = Math.max(1, normalizeQuantity(link.required_quantity, 1))
-    const inventoryItemId =
-      textValue(link.inventory_item_id) ||
-      textValue(objectRecord(link.inventory).id)
+    const required = Math.max(1, normalizeQuantity(link.required_quantity, 1))
     const inventory = objectRecord(link.inventory)
-    const locationLevels = Array.isArray(inventory.location_levels)
-      ? inventory.location_levels
-      : []
-    const available = locationLevels.reduce((sum, rawLevel) => {
+    const itemId = textValue(link.inventory_item_id) || textValue(inventory.id)
+    const levels = Array.isArray(inventory.location_levels) ? inventory.location_levels : []
+    const available = levels.reduce((sum, rawLevel) => {
       const level = objectRecord(rawLevel)
-      const levelAvailable =
-        numberValue(level.available_quantity) ??
-        Math.max(
-          0,
-          (numberValue(level.stocked_quantity) ?? 0) -
-            (numberValue(level.reserved_quantity) ?? 0)
-        )
-      if (!firstStockLocationId) {
-        firstStockLocationId = textValue(level.location_id)
-      }
+      const levelAvailable = numberValue(level.available_quantity) ?? Math.max(0,
+        (numberValue(level.stocked_quantity) ?? 0) - (numberValue(level.reserved_quantity) ?? 0))
+      if (!firstLocationId) firstLocationId = textValue(level.location_id)
       return sum + Math.max(0, levelAvailable)
     }, 0)
-
-    if (inventoryItemId && !firstInventoryItemId) {
-      firstInventoryItemId = inventoryItemId
-    }
-    if (locationLevels.length) {
-      kitQuantities.push(Math.floor(available / requiredQuantity))
-    }
+    if (itemId && !firstItemId) firstItemId = itemId
+    if (levels.length) kitQuantities.push(Math.floor(available / required))
   }
-
-  if (kitQuantities.length) {
-    return {
-      quantity: Math.max(0, Math.min(...kitQuantities)),
-      inventoryItemId: firstInventoryItemId,
-      stockLocationId: firstStockLocationId,
-    }
-  }
+  if (kitQuantities.length) return stock(Math.max(0, Math.min(...kitQuantities)), firstItemId, firstLocationId)
 
   const qbdQuantity = numberValue(objectRecord(variant.metadata).qbd_quantity_on_hand)
-  return { quantity: Math.max(0, Math.floor(qbdQuantity ?? 0)) }
+  return stock(Math.max(0, Math.floor(qbdQuantity ?? 0)))
 }
+
+const variantStockQuantity = (variant: Record<string, unknown>): NativeStock =>
+  nativeInventoryCheckoutEnabled() ? variantNativeStock(variant) : legacyVariantStockQuantity(variant)
 
 function alternativeVariantIds(
   variantMetadata: unknown,
@@ -419,6 +400,12 @@ async function fetchVariants(
 ): Promise<Map<string, Record<string, unknown>>> {
   const out = new Map<string, Record<string, unknown>>()
   if (!variantIds.length) return out
+  if (variantIds.length > 100) {
+    for (let i = 0; i < variantIds.length; i += 100) {
+      for (const [id, variant] of await fetchVariants(query, variantIds.slice(i, i + 100))) out.set(id, variant)
+    }
+    return out
+  }
 
   const fields = [
     "id",
@@ -484,6 +471,7 @@ async function fetchVariants(
 type AllocationRow = {
   id: string
   variant_id: string
+  line_item_id?: string | null
   quantity: number | string
   status: AllocationStatus
   requested_fulfillment_date?: Date | string | null
@@ -498,27 +486,69 @@ function shouldCountAllocation(row: AllocationRow, now: Date): boolean {
   return days === null || days < 14
 }
 
-async function allocatedQuantitiesByVariant(
-  db: DbConnection,
+async function inventoryStateForAvailability(
+  input: AvailabilityCheckInput,
   variantIds: string[],
   now: Date
-): Promise<Map<string, number>> {
-  const out = new Map<string, number>()
-  if (!variantIds.length) return out
-
-  const rows = (await db("gp_inventory_allocation")
-    .select("id", "variant_id", "quantity", "status", "requested_fulfillment_date")
-    .whereNull("deleted_at")
-    .whereIn("variant_id", variantIds)
-    .whereIn("status", ACTIVE_ALLOCATION_STATUSES as unknown as string[])) as AllocationRow[]
-
-  for (const row of rows || []) {
-    if (!shouldCountAllocation(row, now)) continue
-    const quantity = normalizeQuantity(row.quantity, 0)
-    out.set(row.variant_id, (out.get(row.variant_id) || 0) + quantity)
+) {
+  const requested = await fetchVariants(input.query, variantIds)
+  if (!nativeInventoryCheckoutEnabled()) {
+    const variants = new Map(requested)
+    const alternativeIds = variantIds.flatMap(id => {
+      const variant = variants.get(id) || {}
+      return alternativeVariantIds(variant.metadata, variantProduct(variant).metadata)
+    }).filter(id => !variants.has(id))
+    for (const [id, variant] of await fetchVariants(input.query, [...new Set(alternativeIds)])) variants.set(id, variant)
+    const rows = variantIds.length ? (await input.db("gp_inventory_allocation")
+      .select("id", "variant_id", "quantity", "status", "requested_fulfillment_date")
+      .whereNull("deleted_at")
+      .whereIn("variant_id", variantIds)
+      .whereIn("status", ACTIVE_ALLOCATION_STATUSES as unknown as string[])) as AllocationRow[] : []
+    const legacyAllocated = new Map<string, number>()
+    for (const row of rows || []) {
+      if (!shouldCountAllocation(row, now)) continue
+      const quantity = normalizeQuantity(row.quantity, 0)
+      legacyAllocated.set(row.variant_id, (legacyAllocated.get(row.variant_id) || 0) + quantity)
+    }
+    return { variants, reservations: [] as NativeReservation[], unmatched: new Map<string, number>(),
+      mappingUnverified: false, legacyAllocated }
   }
-
-  return out
+  const inventoryItemIds = [...new Set([...requested.values()].flatMap(variant =>
+    variantNativeStock(variant).components.map(component => component.inventoryItemId)))]
+  // Query only variants linked to the cart's inventory components. Another
+  // variant can consume the same item, but unrelated catalog allocations cannot.
+  const { data: links } = inventoryItemIds.length ? await input.query.graph({
+    entity: "product_variant_inventory_items",
+    fields: ["variant_id", "inventory_item_id"],
+    filters: { inventory_item_id: inventoryItemIds },
+  }) : { data: [] }
+  const linkedItems = new Set((links || []).map(link => link.inventory_item_id))
+  const linksUnverified = inventoryItemIds.some(id => !linkedItems.has(id))
+  const relatedVariantIds = [...new Set([...variantIds, ...(links || []).map(link => link.variant_id).filter(Boolean)])]
+  const activeRows = (await input.db("gp_inventory_allocation")
+    .select("id", "variant_id", "line_item_id", "quantity", "status", "requested_fulfillment_date")
+    .whereNull("deleted_at")
+    .whereIn("variant_id", relatedVariantIds)
+    .whereIn("status", ACTIVE_ALLOCATION_STATUSES as unknown as string[])) as AllocationRow[]
+  const commitments = activeRows.filter(row => shouldCountAllocation(row, now))
+  const variants = await fetchVariants(input.query, relatedVariantIds)
+  const alternativeIds = variantIds.flatMap(id => {
+    const variant = variants.get(id) || {}
+    return alternativeVariantIds(variant.metadata, variantProduct(variant).metadata)
+  }).filter(id => !variants.has(id))
+  for (const [id, variant] of await fetchVariants(input.query, [...new Set(alternativeIds)])) variants.set(id, variant)
+  const stocks = new Map([...variants].map(([id, variant]) => [id, variantStockQuantity(variant)]))
+  const lineIds = [...new Set([
+    ...commitments.map(row => row.line_item_id),
+    ...input.lines.map(line => line.reservation_line_id),
+  ].filter(Boolean))] as string[]
+  const reservations: NativeReservation[] = lineIds.length ? await input.db("reservation_item")
+    .select("line_item_id", "inventory_item_id", "location_id", "quantity")
+    .whereNull("deleted_at").whereIn("line_item_id", lineIds) : []
+  // An unmapped commitment can consume shared stock. Do not silently ignore it.
+  const mappingUnverified = linksUnverified || commitments.some(row => !stocks.get(row.variant_id)?.ready)
+  const unmatched = mappingUnverified ? new Map<string, number>() : unmirroredInventoryDemand(commitments, stocks, reservations)
+  return { variants, stocks, reservations, unmatched, mappingUnverified, legacyAllocated: new Map<string, number>() }
 }
 
 async function recordAvailabilitySnapshots(
@@ -569,10 +599,10 @@ export async function checkInventoryAvailability(
       quantity: normalizeQuantity(line.quantity, 1),
     }))
   const variantIds = Array.from(new Set(normalizedLines.map((line) => line.variant_id)))
-  const [variants, allocated] = await Promise.all([
-    fetchVariants(input.query, variantIds),
-    allocatedQuantitiesByVariant(input.db, variantIds, now),
-  ])
+  const state = await inventoryStateForAvailability(input, variantIds, now)
+  const { variants } = state
+  const requestedByVariant = new Map<string, number>()
+  for (const line of normalizedLines) requestedByVariant.set(line.variant_id, (requestedByVariant.get(line.variant_id) || 0) + line.quantity)
 
   const results = normalizedLines.map((line) => {
     const variant = variants.get(line.variant_id) || { id: line.variant_id }
@@ -606,11 +636,12 @@ export async function checkInventoryAvailability(
       Math.floor(metadataNumber(variantMetadata, productMetadata, SAFETY_STOCK_KEYS, 0))
     )
     const stock = variantStockQuantity(variant)
-    const allocatedQuantity = allocated.get(line.variant_id) || 0
-    const atp = Math.max(
-      0,
-      stock.quantity - allocatedQuantity - safetyStockQuantity
-    )
+    const allocatedQuantity = nativeInventoryCheckoutEnabled()
+      ? unmirroredVariantUnits(stock, state.unmatched) : state.legacyAllocated.get(line.variant_id) || 0
+    const ownReserved = nativeInventoryCheckoutEnabled() && line.reservation_line_id
+      ? nativeReservedUnitsForLine(stock, state.reservations, line.reservation_line_id) : 0
+    const atp = Math.max(0, stock.quantity - allocatedQuantity - safetyStockQuantity)
+    const requestedQuantity = requestedByVariant.get(line.variant_id) || line.quantity
     const days = daysUntil(requestedDate, now)
     const title =
       line.title ||
@@ -627,14 +658,21 @@ export async function checkInventoryAvailability(
     if (BLOCKING_LIFECYCLES.has(lifecycle)) {
       decision = "inactive"
       reason = `lifecycle_${lifecycle}`
-    } else if (
-      futureOrderEligible &&
-      days !== null &&
-      days >= replenishmentLeadDays
-    ) {
+    } else if (!stock.ready) {
+      decision = "blocked"
+      reason = stock.reason || "inventory_baseline_required"
+    } else if (futureOrderEligible && days !== null && days >= replenishmentLeadDays) {
       decision = "future_allowed"
       reason = "future_window"
-    } else if (line.quantity <= atp) {
+    } else if (line.reservation_line_id && ownReserved >= line.quantity) {
+      // Placement runs after native reservation. The order's own last unit is
+      // already secured; do not reclassify it as an oversell or promise it twice.
+      decision = "available"
+      reason = "native_reservation"
+    } else if (nativeInventoryCheckoutEnabled() && (state.mappingUnverified || allocatedQuantity > 0)) {
+      decision = "blocked"
+      reason = "inventory_reconciliation_required"
+    } else if (requestedQuantity <= atp) {
       decision = "available"
       reason = "in_stock"
     } else if (atp > 0) {
@@ -648,8 +686,7 @@ export async function checkInventoryAvailability(
     } else {
       decision = "blocked"
       reason = "insufficient_atp"
-      const base = requestedDate || now
-      const date = new Date(base)
+      const date = new Date(requestedDate || now)
       date.setUTCDate(date.getUTCDate() + replenishmentLeadDays)
       earliestAvailableDate = isoDateOnly(date)
     }
@@ -685,54 +722,22 @@ export async function checkInventoryAvailability(
     } as AvailabilityResult & { metadata?: Record<string, unknown> }
   })
 
-  const allAlternativeIds = Array.from(
-    new Set(
-      results.flatMap((result) =>
-        (result.alternatives || []).map((alternative) => alternative.variant_id)
-      )
-    )
-  )
-  if (allAlternativeIds.length) {
-    const [alternativeVariants, alternativeAllocated] = await Promise.all([
-      fetchVariants(input.query, allAlternativeIds),
-      allocatedQuantitiesByVariant(input.db, allAlternativeIds, now),
-    ])
-
-    for (const result of results) {
-      result.alternatives = (result.alternatives || []).map((alternative) => {
-        const variant = alternativeVariants.get(alternative.variant_id)
-        if (!variant) return alternative
-        const product = variantProduct(variant)
-        const stock = variantStockQuantity(variant)
-        const safetyStockQuantity = Math.max(
-          0,
-          Math.floor(
-            metadataNumber(
-              variant.metadata,
-              product.metadata,
-              SAFETY_STOCK_KEYS,
-              0
-            )
-          )
-        )
-        const allocatedQuantity =
-          alternativeAllocated.get(alternative.variant_id) || 0
-        return {
-          ...alternative,
-          product_id:
-            textValue(variant.product_id) || textValue(product.id) || undefined,
-          title:
-            textValue(product.title) ||
-            textValue(variant.title) ||
-            alternative.title,
-          sku: textValue(variant.sku),
-          available_to_promise_quantity: Math.max(
-            0,
-            stock.quantity - allocatedQuantity - safetyStockQuantity
-          ),
-        }
-      })
-    }
+  for (const result of results) {
+    result.alternatives = result.alternatives.flatMap(alternative => {
+      const variant = state.variants.get(alternative.variant_id)
+      if (!variant) return []
+      const product = variantProduct(variant)
+      const stock = variantStockQuantity(variant)
+      if (isInternalCatalogRecord(variant) || isInternalCatalogProduct(product)
+        || BLOCKING_LIFECYCLES.has(lifecycleFromMetadata(variant.metadata, product.metadata))
+        || !stock.ready || state.mappingUnverified || unmirroredVariantUnits(stock, state.unmatched) > 0) return []
+      const safety = Math.max(0, Math.floor(metadataNumber(variant.metadata, product.metadata, SAFETY_STOCK_KEYS, 0)))
+      return [{ ...alternative,
+        product_id: textValue(variant.product_id) || textValue(product.id),
+        title: textValue(product.title) || textValue(variant.title) || alternative.title,
+        sku: textValue(variant.sku), available_to_promise_quantity: Math.max(0, stock.quantity - safety),
+      }]
+    })
   }
 
   await recordAvailabilitySnapshots(input.db, input, results, requestedDate)
@@ -755,6 +760,7 @@ function allocationStatusForDecision(
 
 function allocationReasonForDecision(result: AvailabilityResult): string {
   if (result.decision === "future_allowed") return "future_window"
+  if (result.decision === "available" && result.reason === "native_reservation") return "native_reservation"
   if (result.decision === "available") return "in_stock"
   if (result.decision === "inactive") return "inactive_lifecycle"
   return "insufficient_atp"
@@ -918,7 +924,7 @@ function lineOverrideNote(item: Record<string, unknown>): string | undefined {
   return textValue(metadata.inventory_override_note)
 }
 
-async function activeAllocationForLine(
+async function existingAllocationForLine(
   db: DbConnection,
   orderId: string,
   lineItemId: string
@@ -927,12 +933,30 @@ async function activeAllocationForLine(
     .select("id", "status")
     .whereNull("deleted_at")
     .where({ order_id: orderId, line_item_id: lineItemId })
-    .whereIn("status", ["reserved", "future_committed", "blocked", "fulfilled"])
     .limit(1)
   return rows?.[0] || null
 }
 
-export async function createAllocationsForOrder({
+async function withLockedInventoryOrder<T>(
+  db: DbConnection, orderId: string,
+  work: (trx: DbConnection, order: Record<string, any>) => Promise<T>
+): Promise<T> {
+  if (!db.transaction) throw new Error("Inventory order transaction is unavailable")
+  return db.transaction(async trx => {
+    const order = await trx("order").where({ id: orderId }).whereNull("deleted_at").forUpdate().first("id", "status", "canceled_at")
+    if (!order) throw new Error("Inventory order was not found")
+    return work(trx, order)
+  })
+}
+
+export async function createAllocationsForOrder(input: Parameters<typeof createAllocationsForLockedOrder>[0]) {
+  return withLockedInventoryOrder(input.db, input.orderId, async (db, order) => {
+    if (order.status === "canceled" || order.canceled_at) return { created: 0, skipped: 0, blocked: 0 }
+    return createAllocationsForLockedOrder({ ...input, db })
+  })
+}
+
+async function createAllocationsForLockedOrder({
   db,
   query,
   orderId,
@@ -970,7 +994,7 @@ export async function createAllocationsForOrder({
       continue
     }
 
-    const existing = await activeAllocationForLine(db, orderId, lineItemId)
+    const existing = await existingAllocationForLine(db, orderId, lineItemId)
     if (existing) {
       skipped += 1
       continue
@@ -983,6 +1007,7 @@ export async function createAllocationsForOrder({
       sku: lineSku(item),
       title: lineCustomerTitle(item),
       quantity: lineQuantity(item),
+      reservation_line_id: lineItemId,
       metadata: objectRecord(item.metadata),
     }
 
@@ -1011,6 +1036,10 @@ export async function createAllocationsForOrder({
     const current = new Date()
     const variant = objectRecord(item.variant)
     const inventory = variantStockQuantity(variant)
+    const nativeReservations = await db("reservation_item")
+      .select("id", "inventory_item_id", "location_id", "quantity")
+      .whereNull("deleted_at")
+      .where({ line_item_id: lineItemId })
 
     await db("gp_inventory_allocation").insert({
       id: allocationId,
@@ -1038,6 +1067,15 @@ export async function createAllocationsForOrder({
       staff_actor_email: staffAuthority?.actor_email || null,
       metadata: {
         availability,
+        native_reservation_snapshot: {
+          line_quantity: line.quantity,
+          reservations: nativeReservations.map((reservation: any) => ({
+            id: reservation.id,
+            inventory_item_id: reservation.inventory_item_id,
+            location_id: reservation.location_id,
+            quantity: reservation.quantity,
+          })),
+        },
         display_id: order.display_id,
         substitution_preference: textValue(
           objectRecord(item.metadata).line_substitution_preference
@@ -1071,7 +1109,11 @@ export async function createAllocationsForOrder({
   return { created, skipped, blocked }
 }
 
-export async function releaseAllocationsForOrder({
+export async function releaseAllocationsForOrder(input: Parameters<typeof releaseAllocationsForLockedOrder>[0]) {
+  return withLockedInventoryOrder(input.db, input.orderId, db => releaseAllocationsForLockedOrder({ ...input, db }))
+}
+
+async function releaseAllocationsForLockedOrder({
   db,
   orderId,
   reason,
@@ -1127,35 +1169,136 @@ export async function releaseAllocationsForOrder({
 
 export async function releaseAllocationLineQuantities({
   db,
+  inventory,
+  locking,
   orderId,
   lines,
   reason,
+  releaseKey,
   actorType = "staff",
   actorId,
   actorEmail,
   note,
+  logger,
 }: {
   db: DbConnection
+  inventory: {
+    updateReservationItems: (input: { id: string; quantity: number }[]) => Promise<unknown>
+    deleteReservationItemsByLineItem: (lineItemId: string) => Promise<unknown>
+  }
+  locking: { execute: <T>(keys: string[], work: () => Promise<T>) => Promise<T> }
   orderId: string
   lines: Array<{ line_item_id: string; quantity: number }>
   reason: string
+  releaseKey: string
   actorType?: string
   actorId?: string | null
   actorEmail?: string | null
   note?: string | null
+  logger?: { warn?: (message: string) => void }
+}): Promise<number> {
+  return withLockedInventoryOrder(db, orderId, async trx => releaseAllocationLineQuantitiesLocked({
+    db: trx, inventory, locking, orderId, lines, reason, releaseKey, actorType, actorId, actorEmail, note, logger,
+  }))
+}
+
+async function nativeReleasePlan(db: DbConnection, row: any, lineItemId: string, remaining: number) {
+  const nativeRows = await db("reservation_item")
+    .select("id", "inventory_item_id", "location_id", "quantity")
+    .whereNull("deleted_at")
+    .where({ line_item_id: lineItemId })
+  const metadata = objectRecord(row.metadata)
+  // Rows created before this candidate have no snapshot. Their native release
+  // cannot be reconstructed safely; the advisory quantity can still be reduced.
+  if (metadata.native_reservation_snapshot == null) {
+    return { nativeRows, updates: [] as { id: string; quantity: number }[], legacy: true }
+  }
+  const snapshot = objectRecord(metadata.native_reservation_snapshot)
+  const originalLineQuantity = normalizeQuantity(snapshot.line_quantity, 0)
+  const originalRows = Array.isArray(snapshot.reservations) ? snapshot.reservations : null
+  if (!originalLineQuantity || !originalRows) throw new Error("Native reservation baseline is unavailable for refund release")
+  if (!nativeRows.length && originalRows.length && row.status === "reserved") {
+    throw new Error("Native reservation is missing for a refunded line")
+  }
+  if (nativeRows.length && originalRows.length !== nativeRows.length) {
+    throw new Error("Native reservation count differs from the order snapshot")
+  }
+  if (remaining <= 0 || !nativeRows.length) {
+    return { nativeRows, updates: [] as { id: string; quantity: number }[], legacy: false }
+  }
+  const originals = new Map(originalRows.map((original: any) => [original.id, original]))
+  const updates: { id: string; quantity: number }[] = []
+  for (const native of nativeRows) {
+    const original: any = originals.get(native.id)
+    if (!original || original.inventory_item_id !== native.inventory_item_id || original.location_id !== native.location_id) {
+      throw new Error("Native reservation differs from the order snapshot")
+    }
+    const target = MathBN.div(MathBN.mult(original.quantity, remaining), originalLineQuantity).toNumber()
+    if (MathBN.lt(native.quantity, target)) throw new Error("Native reservation is below the refund target")
+    if (MathBN.gt(native.quantity, target)) updates.push({ id: native.id, quantity: target })
+  }
+  return { nativeRows, updates, legacy: false }
+}
+
+/** Read-only provider preflight; release repeats these checks under the order lock. */
+export async function validateAllocationLineReleases({ db, orderId, lines }: {
+  db: DbConnection
+  orderId: string
+  lines: Array<{ line_item_id: string; quantity: number }>
+}): Promise<void> {
+  for (const line of lines) {
+    const rows = await db("gp_inventory_allocation")
+      .select("id", "status", "quantity", "metadata")
+      .whereNull("deleted_at")
+      .where({ order_id: orderId, line_item_id: line.line_item_id })
+      .whereIn("status", ACTIVE_ALLOCATION_STATUSES as unknown as string[])
+      .limit(1)
+    const row = rows?.[0]
+    if (!row) continue
+    const remaining = normalizeQuantity(row.quantity, 0) - Math.min(
+      normalizeQuantity(row.quantity, 0), normalizeQuantity(line.quantity, 0))
+    await nativeReleasePlan(db, row, line.line_item_id, remaining)
+  }
+}
+
+async function releaseAllocationLineQuantitiesLocked({
+  db, inventory, locking, orderId, lines, reason, releaseKey, actorType, actorId, actorEmail, note, logger,
+}: {
+  db: DbConnection
+  inventory: {
+    updateReservationItems: (input: { id: string; quantity: number }[]) => Promise<unknown>
+    deleteReservationItemsByLineItem: (lineItemId: string) => Promise<unknown>
+  }
+  locking: { execute: <T>(keys: string[], work: () => Promise<T>) => Promise<T> }
+  orderId: string
+  lines: Array<{ line_item_id: string; quantity: number }>
+  reason: string
+  releaseKey: string
+  actorType: string
+  actorId?: string | null
+  actorEmail?: string | null
+  note?: string | null
+  logger?: { warn?: (message: string) => void }
 }): Promise<number> {
   let changed = 0
   const now = new Date()
 
   for (const releaseLine of lines) {
     const rows = await db("gp_inventory_allocation")
-      .select("id", "status", "quantity")
+      .select("id", "status", "quantity", "metadata")
       .whereNull("deleted_at")
       .where({ order_id: orderId, line_item_id: releaseLine.line_item_id })
       .whereIn("status", ACTIVE_ALLOCATION_STATUSES as unknown as string[])
       .limit(1)
     const row = rows?.[0]
     if (!row) continue
+    const prior = await db("gp_inventory_allocation_audit")
+      .select("id")
+      .whereNull("deleted_at")
+      .where({ allocation_id: row.id, reason })
+      .whereRaw("metadata ->> 'release_key' = ?", [releaseKey])
+      .limit(1)
+    if (prior?.length) continue
 
     const currentQuantity = normalizeQuantity(row.quantity, 0)
     const releaseQuantity = Math.min(
@@ -1165,6 +1308,18 @@ export async function releaseAllocationLineQuantities({
     if (releaseQuantity <= 0) continue
 
     const remaining = currentQuantity - releaseQuantity
+    const { nativeRows, updates, legacy } = await nativeReleasePlan(db, row, releaseLine.line_item_id, remaining)
+    if (legacy) {
+      const message = `[inventory-allocation] legacy allocation ${row.id} has no native reservation snapshot; native release skipped`
+      if (logger?.warn) logger.warn(message)
+      else console.warn(message)
+    } else if (remaining <= 0) {
+      if (nativeRows.length) await locking.execute([...new Set<string>(nativeRows.map((native: any) => native.inventory_item_id))],
+        () => inventory.deleteReservationItemsByLineItem(releaseLine.line_item_id))
+    } else if (nativeRows.length) {
+      if (updates.length) await locking.execute([...new Set<string>(nativeRows.map((native: any) => native.inventory_item_id))],
+        () => inventory.updateReservationItems(updates))
+    }
     if (remaining <= 0) {
       await db("gp_inventory_allocation")
         .where({ id: row.id })
@@ -1198,6 +1353,7 @@ export async function releaseAllocationLineQuantities({
       note,
       metadata: {
         released_quantity: releaseQuantity,
+        release_key: releaseKey,
       },
     })
     changed += 1

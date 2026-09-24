@@ -4,12 +4,21 @@ import {
   releaseAllocationsForOrder,
 } from "../inventory-allocation"
 
+const originalNativeFlag = process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED
+beforeEach(() => { process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED = "true" })
+afterAll(() => {
+  if (originalNativeFlag === undefined) delete process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED
+  else process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED = originalNativeFlag
+})
+
 function chainForRows(rows: any[], onUpdate?: jest.Mock) {
   const chain: any = {
     select: jest.fn(() => chain),
     whereNull: jest.fn(() => chain),
     where: jest.fn(() => chain),
     whereIn: jest.fn(() => chain),
+    forUpdate: jest.fn(() => chain),
+    first: jest.fn(async () => rows[0]),
     limit: jest.fn(() => chain),
     orderBy: jest.fn(() => chain),
     offset: jest.fn(() => chain),
@@ -33,6 +42,7 @@ function makeDb({
   const updates: Array<{ table: string; data: any }> = []
 
   const db: any = jest.fn((table: string) => {
+    if (table === "order") return chainForRows([{ id: "order_1", status: "pending" }])
     if (table === "gp_inventory_allocation") {
       const rows = activeLineRows.length ? activeLineRows : allocationRows
       const chain = chainForRows(rows, jest.fn((data) => updates.push({ table, data })))
@@ -55,13 +65,22 @@ function makeDb({
     return chain
   })
 
+  db.transaction = async (work: any) => work(db)
   return { db, inserts, updates }
+}
+
+function stock(available: number) {
+  return { allow_backorder: false, inventory_items: [{ inventory_item_id: "item_1", required_quantity: 1,
+    inventory: { id: "item_1", location_levels: [{ location_id: "location_1", stocked_quantity: available, reserved_quantity: 0 }] } }] }
 }
 
 function makeQuery(variants: any[], order?: any) {
   return {
-    graph: jest.fn(async ({ entity }: any) => {
+    graph: jest.fn(async ({ entity, filters }: any) => {
       if (entity === "product_variant") return { data: variants }
+      if (entity === "product_variant_inventory_items") return { data: variants.flatMap(variant =>
+        (variant.inventory_items || []).filter((item: any) => filters.inventory_item_id.includes(item.inventory_item_id))
+          .map((item: any) => ({ variant_id: variant.id, inventory_item_id: item.inventory_item_id }))) }
       if (entity === "order") return { data: order ? [order] : [] }
       return { data: [] }
     }),
@@ -74,7 +93,7 @@ describe("inventory allocation availability", () => {
     const query = makeQuery([
       {
         id: "variant_1",
-        inventory_quantity: 10,
+        ...stock(10),
         manage_inventory: true,
         metadata: { availability_lifecycle: "seasonal_inactive" },
       },
@@ -94,12 +113,12 @@ describe("inventory allocation availability", () => {
     })
   })
 
-  it("allows future commitments outside the replenishment window", async () => {
+  it("preserves the existing future-dated ordering window", async () => {
     const { db } = makeDb()
     const query = makeQuery([
       {
         id: "variant_1",
-        inventory_quantity: 0,
+        ...stock(0),
         manage_inventory: true,
         metadata: { future_order_eligible: true, replenishment_lead_days: 14 },
       },
@@ -120,7 +139,7 @@ describe("inventory allocation availability", () => {
     })
   })
 
-  it("subtracts active allocations and safety stock from ATP", async () => {
+  it("blocks unmatched advisory commitments pending native reconciliation", async () => {
     const { db } = makeDb({
       allocationRows: [
         {
@@ -134,7 +153,7 @@ describe("inventory allocation availability", () => {
     const query = makeQuery([
       {
         id: "variant_1",
-        inventory_quantity: 5,
+        ...stock(5),
         manage_inventory: true,
         metadata: { safety_stock_quantity: 1 },
       },
@@ -149,21 +168,22 @@ describe("inventory allocation availability", () => {
     })
 
     expect(result).toMatchObject({
-      decision: "partial",
+      decision: "blocked",
+      reason: "inventory_reconciliation_required",
       allocated_quantity: 3,
       safety_stock_quantity: 1,
       available_to_promise_quantity: 1,
     })
   })
 
-  it("creates idempotent order allocations with QBD ListID snapshots", async () => {
+  it("creates order allocations with QBD ListID snapshots", async () => {
     const { db, inserts } = makeDb()
     const query = makeQuery(
       [
         {
           id: "variant_1",
           sku: "1-00-12-1",
-          inventory_quantity: 5,
+          ...stock(5),
           manage_inventory: true,
           metadata: { qbd_list_id: "8000-ABC" },
           product: { id: "prod_1", title: "Ground Beef", metadata: {} },

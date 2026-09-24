@@ -24,6 +24,13 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U gp_launch_test -d gp_launch"
           --health-interval 5s --health-timeout 5s --health-retries 10
+      inventory-redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - name: Mark start
         run: echo "CI_STARTED_AT_MS=$(date +%s000)" >> "$GITHUB_ENV"
@@ -39,6 +46,15 @@ jobs:
         env:
           CATALOG_TEST_DATABASE_URL: postgres://gp_launch_test:isolated_fixture@127.0.0.1:5432/gp_launch
         run: yarn test:catalog
+      - name: Create disposable native-inventory fixture database
+        env:
+          PGPASSWORD: isolated_fixture
+        run: psql -h 127.0.0.1 -U gp_launch_test -d gp_launch -c 'CREATE DATABASE gp_inventory_fixture'
+      - name: Native inventory reservation and release tests
+        env:
+          INVENTORY_TEST_DATABASE_URL: postgres://gp_launch_test:isolated_fixture@127.0.0.1:5432/gp_inventory_fixture
+          INVENTORY_TEST_REDIS_URL: redis://127.0.0.1:6379
+        run: yarn test:inventory
       - name: TypeScript
         run: npx tsc --noEmit
       - name: Accounting transaction and delivery tests

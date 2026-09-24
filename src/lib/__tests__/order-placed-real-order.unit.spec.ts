@@ -256,7 +256,7 @@ describe("real legacy order source boundary", () => {
  * cart_id attribution lands on each row.
  */
 describe("createAllocationsForOrder inserts reservation rows on the real multi-line order", () => {
-  function makeAllocationDb() {
+  function makeAllocationDb(order: Record<string, any>) {
     const inserts: Array<{ table: string; data: any }> = []
     const db: any = jest.fn((table: string) => {
       const chain: any = {
@@ -264,6 +264,8 @@ describe("createAllocationsForOrder inserts reservation rows on the real multi-l
         whereNull: () => chain,
         where: () => chain,
         whereIn: () => chain,
+        forUpdate: () => chain,
+        first: async () => table === "order" ? { id: order.id, status: "pending", canceled_at: null } : undefined,
         limit: () => chain,
         orderBy: () => chain,
         offset: () => chain,
@@ -276,6 +278,7 @@ describe("createAllocationsForOrder inserts reservation rows on the real multi-l
       }
       return chain
     })
+    db.transaction = async (work: any) => work(db)
     return { db, inserts }
   }
 
@@ -289,6 +292,8 @@ describe("createAllocationsForOrder inserts reservation rows on the real multi-l
       manage_inventory: true,
       allow_backorder: false,
       inventory_quantity: 100,
+      inventory_items: [{ inventory_item_id: `inventory_${item.variant_id}`, required_quantity: 1,
+        inventory: { id: `inventory_${item.variant_id}`, location_levels: [{ location_id: "fixture_location", stocked_quantity: 100, reserved_quantity: 0 }] } }],
       metadata: item.variant?.metadata || {},
       product: item.variant?.product || { id: item.product_id, metadata: {} },
     }))
@@ -308,7 +313,7 @@ describe("createAllocationsForOrder inserts reservation rows on the real multi-l
   it("inserts one gp_inventory_allocation row per line, each carrying order cart_id", async () => {
     // Give the real order a cart_id so we can prove the attribution lands on rows.
     const order = { ...(realOrder as any), cart_id: "cart_real_135" }
-    const { db, inserts } = makeAllocationDb()
+    const { db, inserts } = makeAllocationDb(order)
     const query = makeQueryForRealOrder(order)
 
     const result = await createAllocationsForOrder({
@@ -340,7 +345,7 @@ describe("createAllocationsForOrder inserts reservation rows on the real multi-l
       cart_id: null,
       metadata: { cart_id: "cart_from_metadata" },
     }
-    const { db, inserts } = makeAllocationDb()
+    const { db, inserts } = makeAllocationDb(order)
     const query = makeQueryForRealOrder(order)
 
     await createAllocationsForOrder({

@@ -39,6 +39,7 @@ import {
 } from "../lib/stripe-webhook-signature"
 
 import { filterPublicCatalog, guardNewCartItems, guardAddedCartItem, guardUpdatedCartItem, guardCompletedCart, guardCartPaymentSession, guardInventoryVariants, guardInventoryResolution } from "./middlewares/public-catalog"
+import { guardNativeCartInventory, guardNativeCompletionInventory, guardNativePaymentInventory } from "./middlewares/inventory-baseline"
 
 const MIDDLEWARES_PATH = "src/api/middlewares.ts"
 
@@ -674,9 +675,9 @@ export default defineMiddlewares({
     { matcher: "/store/products/:id", method: ["GET"], middlewares: [filterPublicCatalog] },
     { matcher: "/store/carts", method: ["POST"], middlewares: [guardNewCartItems] },
     { matcher: "/store/carts/:id/line-items/:line_id", method: ["POST"], middlewares: [guardUpdatedCartItem] },
-    { matcher: "/store/carts/:id/complete", method: ["POST"], middlewares: [guardCompletedCart] },
-    { matcher: "/store/payment-collections", method: ["POST"], middlewares: [guardCompletedCart] },
-    { matcher: "/store/payment-collections/:id/payment-sessions", method: ["POST"], middlewares: [guardCartPaymentSession] },
+    { matcher: "/store/carts/:id/complete", method: ["POST"], middlewares: [guardCompletedCart, guardNativeCompletionInventory] },
+    { matcher: "/store/payment-collections", method: ["POST"], middlewares: [guardCompletedCart, guardNativeCartInventory] },
+    { matcher: "/store/payment-collections/:id/payment-sessions", method: ["POST"], middlewares: [guardCartPaymentSession, guardNativePaymentInventory] },
     { matcher: "/store/grillers/checkout/place-order", method: ["POST"], middlewares: [guardCompletedCart] },
     { matcher: "/store/gp-inventory/availability", method: ["POST"], middlewares: [guardInventoryVariants] },
     { matcher: "/store/gp-inventory/resolution", method: ["POST"], middlewares: [guardInventoryResolution] },
