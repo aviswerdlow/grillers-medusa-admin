@@ -73,11 +73,13 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   }
 
   const payload = (req.body || {}) as Record<string, any>
+  const traceId = header(req, "x-pm-webhook-trace-id")
 
   try {
     const db = req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION)
-    await updatePostmarkMessageState(db, payload)
-    res.status(202).json({ ok: true })
+    await updatePostmarkMessageState(db, payload, traceId)
+    // Postmark verifies each enabled webhook trigger with an HTTP 200.
+    res.status(200).json({ ok: true })
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error)
     logger?.error?.(`[postmark-webhook] processing failed: ${errorMessage}`)

@@ -820,10 +820,26 @@ export async function recordCommunicationEvent(
     updated_at: now,
   }
 
-  await db("gp_communication_event")
+  const insert = db("gp_communication_event")
     .insert(row)
     .onConflict(db.raw('("event_id") where "deleted_at" is null'))
     .ignore()
+  const inserted =
+    typeof insert.returning === "function"
+      ? await insert.returning("id")
+      : await insert
+  if (Array.isArray(inserted) && inserted.length === 0) {
+    // Another request won the event-id race. Its side effects are the only
+    // ones that should fan out to queues and destinations.
+    const winner = await db("gp_communication_event")
+      .whereNull("deleted_at")
+      .where("event_id", eventId)
+      .first()
+    if (!winner) {
+      throw new Error("Communication event conflict has no visible winner")
+    }
+    return winner
+  }
 
   try {
     const { writeEventDestinations } = await import("./destinations.js")
@@ -1478,15 +1494,55 @@ export async function requestPreferencesLink(
   })
 }
 
+function stableWebhookPayload(value: any): any {
+  if (Array.isArray(value)) return value.map(stableWebhookPayload)
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, stableWebhookPayload(value[key])])
+    )
+  }
+  return value
+}
+
+export function postmarkWebhookEventId(
+  payload: Record<string, any>,
+  traceId?: string
+): string {
+  const trace = typeof traceId === "string" ? traceId.trim() : ""
+  const identity = trace
+    ? `trace:${trace}`
+    : `payload:${JSON.stringify(stableWebhookPayload(payload))}`
+  return `postmark-webhook:${crypto.createHash("sha256").update(identity).digest("hex")}`
+}
+
+export function isHardPostmarkBounce(payload: Record<string, any>): boolean {
+  if (payload.TypeCode !== undefined && payload.TypeCode !== null) {
+    const code = Number(payload.TypeCode)
+    if (Number.isFinite(code)) return code === 1
+  }
+  return String(payload.Type || "").toLowerCase() === "hardbounce"
+}
+
 export async function updatePostmarkMessageState(
   db: KnexLike,
-  payload: Record<string, any>
+  payload: Record<string, any>,
+  traceId?: string
 ): Promise<Record<string, any> | null> {
+  const eventId = postmarkWebhookEventId(payload, traceId)
+  const priorEvent = await db("gp_communication_event")
+    .whereNull("deleted_at")
+    .where("event_id", eventId)
+    .first()
+  if (priorEvent) return null
+
   const messageId = payload.MessageID || payload.MessageId || payload.MessageID__c
   const recordType = String(payload.RecordType || payload.Type || "").toLowerCase()
   const email = payload.Recipient || payload.Email || payload.email
   const now = payload.ReceivedAt ? asDate(payload.ReceivedAt) : new Date()
   const patch: Record<string, any> = { updated_at: new Date() }
+  const hardBounce = recordType.includes("bounce") && isHardPostmarkBounce(payload)
 
   if (recordType.includes("delivery")) {
     patch.status = "delivered"
@@ -1496,7 +1552,9 @@ export async function updatePostmarkMessageState(
   } else if (recordType.includes("click")) {
     patch.clicked_at = now
   } else if (recordType.includes("bounce")) {
-    patch.status = "bounced"
+    // Soft/transient bounces are not permanent delivery failures. Keep the
+    // prior send state so the same business event cannot resend automatically.
+    if (hardBounce) patch.status = "bounced"
     patch.bounced_at = now
   } else if (recordType.includes("spam")) {
     patch.status = "complained"
@@ -1536,7 +1594,7 @@ export async function updatePostmarkMessageState(
     })
   }
 
-  if (recordType.includes("bounce")) {
+  if (hardBounce) {
     await recordSuppression(db, {
       email: email || message?.email,
       scope: "hard_bounce",
@@ -1579,6 +1637,7 @@ export async function updatePostmarkMessageState(
               : `email_${recordType || "webhook"}`
 
   await recordCommunicationEvent(db, {
+    event_id: eventId,
     event_name: canonicalEventName,
     email: email || message?.email,
     profile_id: message?.profile_id || null,
@@ -1586,7 +1645,9 @@ export async function updatePostmarkMessageState(
     flow_id: message?.flow_id || null,
     template_key: message?.template_key || null,
     message_id: message?.id || null,
-    properties: payload,
+    properties: recordType.includes("bounce")
+      ? { ...payload, bounce_classification: hardBounce ? "hard" : "non_hard" }
+      : payload,
   })
 
   return message

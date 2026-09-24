@@ -36,12 +36,13 @@ function makeReq(
     MessageID: "postmark-message-1",
     Recipient: "customer@example.com",
   },
-  opts: { secret?: string; headerSecret?: string } = {}
+  opts: { secret?: string; headerSecret?: string; traceId?: string } = {}
 ) {
   const logger = { error: jest.fn(), warn: jest.fn() }
   const db = jest.fn()
   const headers: Record<string, string> = {}
   if (opts.headerSecret) headers["x-postmark-webhook-secret"] = opts.headerSecret
+  if (opts.traceId) headers["x-pm-webhook-trace-id"] = opts.traceId
   return {
     req: {
       body,
@@ -73,15 +74,22 @@ describe("postmark webhook route alerting", () => {
     process.env = originalEnv
   })
 
-  it("updates message state and returns 202 on a valid webhook", async () => {
-    const { req, db } = makeReq(undefined, { headerSecret: "expected-secret" })
+  it("passes the retry-stable trace ID and returns Postmark's required 200", async () => {
+    const { req, db } = makeReq(undefined, {
+      headerSecret: "expected-secret",
+      traceId: "trace-123",
+    })
     const res = makeRes()
 
     await POST(req, res)
 
-    expect(res.statusCode).toBe(202)
+    expect(res.statusCode).toBe(200)
     expect(res.body).toEqual({ ok: true })
-    expect(updatePostmarkMessageState).toHaveBeenCalledWith(db, req.body)
+    expect(updatePostmarkMessageState).toHaveBeenCalledWith(
+      db,
+      req.body,
+      "trace-123"
+    )
     expect(emitOpsAlert).not.toHaveBeenCalled()
   })
 
