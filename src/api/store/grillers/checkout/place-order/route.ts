@@ -786,6 +786,12 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       return jsonError(res, 401, "You must be signed in to place this order.");
     }
 
+    // #370: reject direct invoice requests before order-review acceptance can
+    // mutate the cart. The legacy Medusa approval bit is not QBD authority.
+    if (wantsInvoice && process.env.GP_INSTITUTIONAL_TERMS_ENABLED !== "true") {
+      return jsonError(res, 403, "Pay by invoice is unavailable online.");
+    }
+
     const ownedCart = await reviewCart(req.scope, cartId);
     const legacyStaff = isLegacyStaffCheckout(req, ownedCart, paymentContext, body);
     const reviewOwner = legacyStaff
