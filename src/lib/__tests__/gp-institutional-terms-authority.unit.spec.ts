@@ -99,6 +99,9 @@ describe("institutional terms source authority (#370 synthetic fixtures)", () =>
     expect(authorizeInstitutionalTerms({
       ...baseline, sourceStatus: "unavailable", snapshot: null,
     })).toEqual({ status: "hold", reason: "qbd_source_unavailable" })
+    expect(authorizeInstitutionalTerms({
+      ...baseline, sourceStatus: "unavailable", link: null, snapshot: null,
+    })).toEqual({ status: "hold", reason: "qbd_source_unavailable" })
   })
 
   it("holds an explicitly held QBD account", () => {
