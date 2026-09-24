@@ -1,10 +1,14 @@
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { reconcileInstitutionalReleaseIntent } from "../gp-institutional-release-intent"
+import { reconcileInstitutionalPostingHandoff } from "../gp-institutional-posting-handoff"
 import { emitOpsAlert } from "../ops-alert"
 import run from "../../jobs/gp-institutional-release-reconcile"
 
 jest.mock("../gp-institutional-release-intent", () => ({
   reconcileInstitutionalReleaseIntent: jest.fn(),
+}))
+jest.mock("../gp-institutional-posting-handoff", () => ({
+  reconcileInstitutionalPostingHandoff: jest.fn(),
 }))
 jest.mock("../ops-alert", () => ({
   emitOpsAlert: jest.fn(async () => ({ ok: true })),
@@ -17,16 +21,20 @@ afterAll(() => {
 })
 beforeEach(() => { jest.clearAllMocks() })
 
-function container(rows = [{ order_id: "order_fixture" }]) {
+function container(rows = [{ order_id: "order_fixture" }], dueRows: Array<Record<string, string>> = []) {
   const scan: any = {
     select: () => scan,
+    where: () => scan,
     whereNull: () => scan,
     whereRaw: () => scan,
     orderBy: () => scan,
     limit: async () => rows,
+    update: jest.fn(async () => 1),
   }
-  const db = jest.fn(() => scan)
-  const orderModule = {}
+  const db = Object.assign(jest.fn(() => scan), {
+    raw: jest.fn(async () => ({ rows: dueRows })),
+  })
+  const orderModule = { retrieveOrder: jest.fn(async (id: string) => ({ id })) }
   const logger = { error: jest.fn(), warn: jest.fn() }
   const resolve = jest.fn((key: string) => {
     if (key === ContainerRegistrationKeys.PG_CONNECTION) return db
@@ -34,7 +42,7 @@ function container(rows = [{ order_id: "order_fixture" }]) {
     if (key === ContainerRegistrationKeys.LOGGER) return logger
     throw new Error(`Unexpected service ${key}`)
   })
-  return { db, resolve, orderModule, logger }
+  return { db, resolve, orderModule, logger, scan }
 }
 
 it("does no reconciliation or database read while the feature is off", async () => {
@@ -43,6 +51,22 @@ it("does no reconciliation or database read while the feature is off", async () 
   await run({ resolve: fixture.resolve } as any)
   expect(fixture.resolve).not.toHaveBeenCalled()
   expect(reconcileInstitutionalReleaseIntent).not.toHaveBeenCalled()
+})
+
+it("polls posted institutional orders and binds exact QBD invoice evidence", async () => {
+  process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+  const fixture = container([], [{ order_id: "TEST_ORDER_C", commitment_id: "gpic_test_c" }])
+  ;(reconcileInstitutionalPostingHandoff as jest.Mock).mockResolvedValue({
+    status: "posted", invoiceTxnId: "TEST_INVOICE_C",
+  })
+  await run({ resolve: fixture.resolve } as any)
+  expect(fixture.orderModule.retrieveOrder).toHaveBeenCalledWith("TEST_ORDER_C", {
+    select: ["id", "cart_id", "customer_id", "metadata"],
+  })
+  expect(reconcileInstitutionalPostingHandoff).toHaveBeenCalledWith({
+    db: fixture.db, order: { id: "TEST_ORDER_C" },
+  })
+  expect(fixture.scan.update).toHaveBeenCalledWith({ updated_at: expect.any(Date) })
 })
 
 it("reconciles prepared intents and pages on an unresolved outcome", async () => {

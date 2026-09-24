@@ -18,7 +18,7 @@ afterAll(() => {
   else process.env.GP_INSTITUTIONAL_TEST_COMPANY_FILE_SHA256 = previous.company
 })
 
-function request(invoiceTxnId = "TEST_INVOICE_E") {
+function request(invoiceTxnId = "TEST_INVOICE_E", commitmentState = "posted") {
   const order = {
     id: "TEST_ORDER_E", customer_id: "medusa_institution_01",
     metadata: {
@@ -28,7 +28,7 @@ function request(invoiceTxnId = "TEST_INVOICE_E") {
   }
   const query = {
     where: jest.fn().mockReturnThis(),
-    whereNull: jest.fn().mockResolvedValue([{ amount_cents: "45000", state: "posted" }]),
+    whereNull: jest.fn().mockResolvedValue([{ amount_cents: "45000", state: commitmentState }]),
   }
   const db = jest.fn(() => query)
   const orderModule = { retrieveOrder: jest.fn(async () => order) }
@@ -95,4 +95,13 @@ it("does not join a posting receipt to another invoice or default its collection
   await GET(req, res)
   expect(res.status).toHaveBeenCalledWith(503)
   expect(res.json).toHaveBeenCalledWith({ status: "collection_unavailable" })
+})
+
+it("does not show a quarantined commitment as reconciled", async () => {
+  const { req, res } = request("TEST_INVOICE_E", "quarantined")
+  await GET(req, res)
+  expect(res.status).toHaveBeenCalledWith(200)
+  expect(res.json).toHaveBeenCalledWith({
+    status: "quarantined", reason: "commitment_quarantined",
+  })
 })

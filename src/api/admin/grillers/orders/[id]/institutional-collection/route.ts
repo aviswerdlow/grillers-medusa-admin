@@ -60,6 +60,9 @@ export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
     if (!Array.isArray(commitments) || commitments.length !== 1) {
       return res.status(503).json({ status: "commitment_unavailable" })
     }
+    if (commitments[0].state === "quarantined") {
+      return res.status(200).json({ status: "quarantined", reason: "commitment_quarantined" })
+    }
     const acceptedCents = cents(commitments[0].amount_cents)
     if (acceptedCents === null) {
       return res.status(503).json({ status: "commitment_unavailable" })
