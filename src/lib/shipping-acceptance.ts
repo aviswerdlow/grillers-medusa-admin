@@ -12,6 +12,9 @@ import {
   shippingWeightSnapshots,
 } from "./shipping-weights";
 import { loadShippingCatalogLines } from "./shipping-catalog-inputs";
+import { currentCalendarSelection } from "./fulfillment-calendar-runtime";
+import { requiresFulfillmentCalendar } from "./fulfillment-calendar-rollout";
+import { packingContextFromCalendar } from "./fulfillment-calendar-selection";
 import { weightImportHash } from "./sam-shipping-weight-import";
 import {
   isUpsServiceCode,
@@ -52,8 +55,8 @@ async function shippingAcceptanceContext(container: any, cartId: string) {
       method,
       service: normalizeGrillersUpsServiceCode(
         shippingMetadata(
-          options.find((o) => o.id === method.shipping_option_id)?.data,
-        ).service_code,
+          options.find((o) => o.id === method.shipping_option_id)?.data
+        ).service_code
       ),
     }))
     .filter((m) => isUpsServiceCode(m.service));
@@ -62,10 +65,15 @@ async function shippingAcceptanceContext(container: any, cartId: string) {
     throw new ShippingInputError("ambiguous_shipping_selection");
   const { method, service } = carriers[0],
     lines = await loadShippingCatalogLines(query, cart.items ?? []);
+  const calendar = await currentCalendarSelection(container, cartId);
+  if (!calendar && requiresFulfillmentCalendar(cart))
+    throw new ShippingInputError("shipping_calendar_required");
   const expected = createShippingPackingPlan(
     lines,
-    { service, postalCode: cart.shipping_address?.postal_code ?? "" },
-    await getPackagingConfig(process.env),
+    calendar
+      ? packingContextFromCalendar(calendar.selection)
+      : { service, postalCode: cart.shipping_address?.postal_code ?? "" },
+    await getPackagingConfig(process.env)
   );
   const selected = shippingMetadata(method.data)[
     SHIPPING_PACKING_PLAN_KEY
@@ -79,13 +87,13 @@ async function shippingAcceptanceContext(container: any, cartId: string) {
  * copies these line and cart metadata snapshots to the newly created order. */
 export async function prepareShippingAcceptance(
   container: any,
-  cartId: string,
+  cartId: string
 ) {
   const context = await shippingAcceptanceContext(container, cartId);
   if (!context) return;
   const cartModule = container.resolve(Modules.CART);
   await cartModule.updateLineItems(
-    shippingWeightSnapshots(context.lines, new Date().toISOString()),
+    shippingWeightSnapshots(context.lines, new Date().toISOString())
   );
   await cartModule.updateCarts(cartId, {
     metadata: {
@@ -99,18 +107,18 @@ export async function prepareShippingAcceptance(
  * preparation or concurrent cart mutation rejects completion before an order. */
 export async function validateShippingAcceptance(
   container: any,
-  loadedCart: any,
+  loadedCart: any
 ) {
   const context = await shippingAcceptanceContext(container, loadedCart.id);
   if (!context) return;
   const expectedLines = shippingWeightSnapshots(
     context.lines,
-    new Date().toISOString(),
+    new Date().toISOString()
   );
   if (
     (loadedCart.items ?? []).length !== expectedLines.length ||
     weightImportHash(
-      shippingMetadata(loadedCart.metadata)[SHIPPING_PACKING_PLAN_KEY] ?? null,
+      shippingMetadata(loadedCart.metadata)[SHIPPING_PACKING_PLAN_KEY] ?? null
     ) !== weightImportHash(context.plan)
   )
     throw new ShippingInputError("shipping_acceptance_changed");

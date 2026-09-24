@@ -13,6 +13,8 @@ import {
 } from "../shipping-weights";
 import { shippingLine, packingConfig } from "./__fixtures__/shipping-inputs";
 import path from "node:path";
+jest.mock("../fulfillment-calendar-runtime", () => ({ currentCalendarSelection: jest.fn(async () => ({selection:{}})) }));
+jest.mock("../fulfillment-calendar-selection", () => ({ packingContextFromCalendar: jest.fn(() => ({service:"GROUND",postalCode:"30340"})) }));
 jest.mock("../packaging-cost-strapi", () => ({
   getPackagingConfig: jest.fn(),
 }));

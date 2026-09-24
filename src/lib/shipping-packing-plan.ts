@@ -18,7 +18,12 @@ export type ShippingPackingContext = {
   dispatchDate?: string | null;
   arrivalDate?: string | null;
   /** Supplied only by a server calendar adapter, not directly from Store input. */
-  validatedTransit?: { days: number; revision: string };
+  validatedTransit?: {
+    days: number;
+    revision: string;
+    packingDays?: number;
+    elapsedHours?: number;
+  };
 };
 export type PlannedShippingPackage = {
   boxTier: string;
@@ -44,6 +49,8 @@ export type ShippingPackingPlan = {
   arrivalDate: string | null;
   transitDays: number;
   transitSource: string;
+  packingDays?: number;
+  elapsedPackingHours?: number;
   weights: ResolvedShippingWeights;
   packages: PlannedShippingPackage[];
   boxes: number;
@@ -85,8 +92,23 @@ export function createShippingPackingPlan(
     (context.validatedTransit && !context.validatedTransit.revision)
   )
     throw new ShippingInputError("invalid_transit_context");
+  const packingDays = context.validatedTransit?.packingDays;
+  const elapsedHours = context.validatedTransit?.elapsedHours;
+  if (packingDays !== undefined || elapsedHours !== undefined) {
+    if (
+      !Number.isSafeInteger(packingDays) ||
+      packingDays! < 1 ||
+      !Number.isFinite(elapsedHours) ||
+      elapsedHours! <= 0 ||
+      packingDays !== Math.ceil(elapsedHours! / 24)
+    )
+      throw new ShippingInputError("invalid_elapsed_packing_context");
+  }
   const threshold = [...config.continuous.dryIceByTransitDays]
-    .filter((r) => r.transitDays <= transitDays)
+    .filter(
+      (r) =>
+        r.transitDays <= (context.validatedTransit?.packingDays ?? transitDays),
+    )
     .sort((a, b) => b.transitDays - a.transitDays)[0];
   if (!threshold || !positive(threshold.dryIceLbPerBox))
     throw new ShippingInputError("missing_transit_packing_rule");
@@ -98,7 +120,11 @@ export function createShippingPackingPlan(
   const pack = (
     box: ContinuousPackagingBoxRule,
   ): PlannedShippingPackage[] | null => {
-    if (box.maxTransitDays !== null && transitDays > box.maxTransitDays)
+    if (
+      box.maxTransitDays !== null &&
+      (context.validatedTransit?.packingDays ?? transitDays) >
+        box.maxTransitDays
+    )
       return null;
     if (
       !positive(box.lengthIn) ||
@@ -199,6 +225,12 @@ export function createShippingPackingPlan(
     service: context.service,
     dispatchDate: context.dispatchDate ?? null,
     arrivalDate: context.arrivalDate ?? null,
+    ...(context.validatedTransit?.packingDays !== undefined
+      ? {
+          packingDays: context.validatedTransit.packingDays,
+          elapsedPackingHours: context.validatedTransit.elapsedHours,
+        }
+      : {}),
     transitDays,
     transitSource: context.validatedTransit?.revision ?? "legacy_zip3_v1",
     weights,

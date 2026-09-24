@@ -7,6 +7,14 @@ import { emitOpsAlert } from "../../../lib/ops-alert"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { calendarPackingContextForRate } from "../../../lib/fulfillment-calendar-runtime"
+import { FulfillmentCalendarError } from "../../../lib/fulfillment-calendar"
+const originalCalendarEnforcement = process.env.GP_CALENDAR_ENFORCEMENT
+jest.mock("../../../lib/fulfillment-calendar-runtime", () => ({
+  // This suite owns price/weight behavior. Calendar and acceptance contracts
+  // are exercised with their real implementation in calendar-runtime tests.
+  calendarPackingContextForRate: jest.fn(async (_query, _cart, service) => ({service, postalCode:"30340"})),
+}))
 
 jest.mock("../../../lib/ops-alert", () => ({
   emitOpsAlert: jest.fn(async () => ({ ok: true, skipped: false })),
@@ -118,7 +126,41 @@ describe("GrillersFulfillmentProviderService", () => {
     jest.clearAllMocks()
     clearWwexEnv()
     clearForecastEnv()
+    delete process.env.GP_CALENDAR_ENFORCEMENT
     ;(getPackagingConfig as jest.Mock).mockResolvedValue(packingConfig())
+  })
+
+  afterEach(() => {
+    if (originalCalendarEnforcement === undefined) delete process.env.GP_CALENDAR_ENFORCEMENT
+    else process.env.GP_CALENDAR_ENFORCEMENT = originalCalendarEnforcement
+  })
+
+  it("quotes and selects legacy UPS shipping before calendar infrastructure is activated", async () => {
+    mockShippingZones([{ ZoneCode: "Fedex3Day", ShippingZoneBreakpoints: [{ BreakpointPrice: 0, ShippingRate: 75 }] }])
+    const svc = service()
+    const context = { id: "cart_fixture", items: [shippingLine()], shipping_address: { postal_code: "90048" } }
+    const rate = await svc.calculatePrice({ service_code: "3_DAY_SELECT" } as any, {} as any, context as any)
+    const selected = await svc.validateFulfillmentData({ service_code: "3_DAY_SELECT" }, {}, context)
+    expect(rate.calculated_amount).toBe(75)
+    expect(selected.shipping_packing_plan_v1.arrivalDate).toBeNull()
+    expect(selected.shipping_packing_plan_v1.weights.physicalWeightLb).toBe(1.5)
+    expect(calendarPackingContextForRate).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ["required", {}],
+    ["off", { fulfillment_calendar_selection_v1: "existing-signed-choice" }],
+  ])("%s cannot turn an unavailable calendar into a normal quote for a dated cart", async (mode, metadata) => {
+    process.env.GP_CALENDAR_ENFORCEMENT = mode as string
+    ;(calendarPackingContextForRate as jest.Mock)
+      .mockRejectedValueOnce(new FulfillmentCalendarError("calendar_source_unavailable", 503))
+      .mockRejectedValueOnce(new FulfillmentCalendarError("calendar_source_unavailable", 503))
+    const svc = service()
+    const context = { id: "cart_fixture", metadata, items: [shippingLine()], shipping_address: { postal_code: "90048" } }
+    global.fetch = jest.fn()
+    await expect(svc.calculatePrice({ service_code: "3_DAY_SELECT" } as any, {} as any, context as any)).rejects.toThrow()
+    await expect(svc.validateFulfillmentData({ service_code: "3_DAY_SELECT" }, {}, context)).rejects.toThrow()
+    expect(global.fetch).not.toHaveBeenCalled()
   })
 
   it("blocks unavailable physical inputs before forecast, carrier or price-table fallback",async()=>{

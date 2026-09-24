@@ -21,28 +21,36 @@ export const buildOrderPlacedEmail = (order: OrderForEmail) => {
   const orderUrl = `${STOREFRONT_URL}/us/order/${order.id}/confirmed`
   const {
     isPickup,
+    isLocalDelivery,
     scheduledDate,
+    scheduledWindow,
     shippingMethodName,
   } = getFulfillmentInfo(order)
   const paymentLabel = getPaymentLabel(order)
   const orderTotal = formatMoney(order.total, currency)
 
+  const arrivalSummary = [scheduledDate, scheduledWindow].filter(Boolean).join(" · ")
+  const fulfillmentNote = isPickup
+    ? "Please bring a photo ID and your order number when you arrive."
+    : isLocalDelivery
+      ? "Please make sure someone can receive your local delivery."
+      : "You'll receive a tracking number by email once your order ships."
   const fulfillmentCard = isPickup
     ? renderHighlightCard({
         label: "Pickup details",
         title: shippingMethodName,
-        subtitle: scheduledDate
-          ? `Scheduled for ${scheduledDate}`
+        subtitle: arrivalSummary
+          ? `Scheduled for ${arrivalSummary}`
           : "We'll email you when your order is ready.",
-        note: "Please bring a photo ID and your order number when you arrive.",
+        note: fulfillmentNote,
       })
     : renderHighlightCard({
         label: "Delivery details",
         title: shippingMethodName,
-        subtitle: scheduledDate
-          ? `Expected delivery ${scheduledDate}`
+        subtitle: arrivalSummary
+          ? `Expected delivery ${arrivalSummary}`
           : undefined,
-        note: "You'll receive a tracking number by email once your order ships.",
+        note: fulfillmentNote,
       })
 
   const totalsRows: Array<{ label: string; value: string; emphasize?: boolean }> = [
@@ -66,7 +74,7 @@ export const buildOrderPlacedEmail = (order: OrderForEmail) => {
   })
 
   const addressBlock = renderAddressBlock(order.shipping_address || undefined)
-  const stepThree = isPickup ? "Ready for pickup" : "Ships from Griller's Pride"
+  const stepThree = isPickup ? "Ready for pickup" : isLocalDelivery ? "Out for local delivery" : "Ships from Griller's Pride"
 
   const bodyHtml = `
     <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#FBFAF6;border:1px solid #E4DED2;border-radius:6px;margin-bottom:22px;">
@@ -140,7 +148,8 @@ export const buildOrderPlacedEmail = (order: OrderForEmail) => {
     "",
     "Thanks for your order. We've received it and our butchers are on it.",
     "",
-    `${shippingMethodName}${scheduledDate ? ": " + scheduledDate : ""}`,
+    `${shippingMethodName}${arrivalSummary ? ": " + arrivalSummary : ""}`,
+    fulfillmentNote,
     "",
     "Items:",
     ...renderTextItemRows(order.items, currency),

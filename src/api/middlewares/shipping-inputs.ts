@@ -10,11 +10,17 @@ import {
   ShippingInputError,
 } from "../../lib/shipping-weights";
 import { SHIPPING_PACKING_PLAN_KEY } from "../../lib/shipping-packing-plan";
+import {
+  CALENDAR_ACCEPTED_KEY,
+  FulfillmentCalendarError,
+} from "../../lib/fulfillment-calendar";
+import { prepareCalendarAcceptance } from "../../lib/fulfillment-calendar-runtime";
 
 const privateKeys = new Set([
   SHIPPING_WEIGHT_KEY,
   SHIPPING_WEIGHT_SNAPSHOT_KEY,
   SHIPPING_PACKING_PLAN_KEY,
+  CALENDAR_ACCEPTED_KEY,
 ]);
 export function publicShippingProjection(value: any): any {
   if (Array.isArray(value)) return value.map(publicShippingProjection);
@@ -42,9 +48,17 @@ export async function prepareNativeShippingAcceptance(
   next: MedusaNextFunction,
 ) {
   try {
+    await prepareCalendarAcceptance(req.scope, req.params.id);
     await prepareShippingAcceptance(req.scope, req.params.id);
     return next();
   } catch (error) {
+    if (error instanceof FulfillmentCalendarError)
+      return res
+        .status(error.status)
+        .json({
+          type: "fulfillment_date_review_required",
+          message: error.message,
+        });
     if (error instanceof ShippingInputError)
       return res
         .status(409)
