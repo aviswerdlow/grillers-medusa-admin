@@ -7,6 +7,7 @@ import {
   previewFinalization,
   updateFinalizationPackages,
 } from "../../../../../../../lib/catch-weight-finalization"
+import { withInstitutionalFinalizationWrite } from "../../../../../../../lib/gp-institutional-finalization-lock"
 import {
   emitFinalizationRouteFailureAlert,
   jsonError,
@@ -41,24 +42,26 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   const actor = staffAuditActorId(staffAudit)
 
   try {
-    await updateFinalizationPackages(db, order, packages, actor)
-    const detail = await previewFinalization(db, order, { persist: false })
-
-    const metadata = appendStaffAudit(
-      {
-        ...metadataObject(order.metadata),
-        finalization_id: detail.finalization.id,
-        finalization_status: FINALIZATION_PACKED_PENDING_REVIEW,
-        catch_weight_status: FINALIZATION_PACKED_PENDING_REVIEW,
-      },
-      {
-        action: "catch_weight_packages_updated",
-        status: FINALIZATION_PACKED_PENDING_REVIEW,
-        package_count: detail.packages?.length || 0,
-        ...staffAudit,
-      }
-    )
-    await orderModule.updateOrders(order.id, { metadata })
+    const detail = await withInstitutionalFinalizationWrite(db, order, async (workDb) => {
+      await updateFinalizationPackages(workDb, order, packages, actor)
+      const detail = await previewFinalization(workDb, order, { persist: false })
+      const metadata = appendStaffAudit(
+        {
+          ...metadataObject(order.metadata),
+          finalization_id: detail.finalization.id,
+          finalization_status: FINALIZATION_PACKED_PENDING_REVIEW,
+          catch_weight_status: FINALIZATION_PACKED_PENDING_REVIEW,
+        },
+        {
+          action: "catch_weight_packages_updated",
+          status: FINALIZATION_PACKED_PENDING_REVIEW,
+          package_count: detail.packages?.length || 0,
+          ...staffAudit,
+        }
+      )
+      await orderModule.updateOrders(order.id, { metadata })
+      return detail
+    })
 
     res.status(200).json({
       order,
