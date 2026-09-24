@@ -192,6 +192,26 @@ describe("atomic institutional credit reservations", () => {
     expect(rows).toHaveLength(0)
   })
 
+  it("reserves the verified test account fixture at 55,000 cents projected exposure", async () => {
+    process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+    const { rows, base } = harness()
+    rows.push(commitment("TEST_ORDER_EXISTING", 10000))
+
+    const decision = await reserveInstitutionalCredit({
+      ...base,
+      invoices: [invoice("TEST_INVOICE_EXISTING", 20000)],
+      commitment: commitment("TEST_ORDER_NEW", 25000),
+    })
+
+    expect(decision).toMatchObject({
+      status: "reserved",
+      projectedCents: 55000,
+      exposure: { invoiceCents: 20000, commitmentCents: 10000, totalCents: 30000 },
+    })
+    expect(rows).toHaveLength(2)
+    expect(rows[1]).toMatchObject({ orderId: "TEST_ORDER_NEW", amountCents: 25000 })
+  })
+
   it("allows only one of two concurrent orders against the same remaining limit", async () => {
     process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
     const { rows, lockCalls, base } = harness()
