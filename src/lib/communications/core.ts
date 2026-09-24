@@ -826,21 +826,24 @@ export async function recordCommunicationEvent(
     .insert(row)
     .onConflict(db.raw('("event_id") where "deleted_at" is null'))
     .ignore()
-  const inserted =
-    typeof insert.returning === "function"
-      ? await insert.returning("id")
-      : await insert
-  if (Array.isArray(inserted) && inserted.length === 0) {
-    // Another request won the event-id race. Its side effects are the only
-    // ones that should fan out to queues and destinations.
-    const winner = await db("gp_communication_event")
-      .whereNull("deleted_at")
-      .where("event_id", eventId)
-      .first()
-    if (!winner) {
-      throw new Error("Communication event conflict has no visible winner")
+  if (eventId.startsWith("postmark-webhook:")) {
+    const inserted =
+      typeof insert.returning === "function"
+        ? await insert.returning("id")
+        : await insert
+    if (Array.isArray(inserted) && inserted.length === 0) {
+      // Another callback won the event-id race. Only that callback fans out.
+      const winner = await db("gp_communication_event")
+        .whereNull("deleted_at")
+        .where("event_id", eventId)
+        .first()
+      if (!winner) {
+        throw new Error("Postmark event conflict has no visible winner")
+      }
+      return winner
     }
-    return winner
+  } else {
+    await insert
   }
 
   try {
