@@ -16,6 +16,7 @@ export type InstitutionalCheckoutAuthority = {
   sourceRevision: string
   lastSuccess: string
   invoices: InstitutionalInvoice[]
+  pendingCreditTxnIds: string[]
 }
 
 export type InstitutionalCheckoutCheck =
@@ -57,6 +58,7 @@ export async function institutionalCheckoutAuthority(customerId: string): Promis
       sourceRevision: decision.sourceRevision,
       lastSuccess: decision.lastSuccess,
       invoices: source.invoices,
+      pendingCreditTxnIds: [...new Set(source.readbacks?.invoices.flatMap((invoice) => invoice.creditTxnIds) ?? [])],
     },
   }
 }
@@ -89,6 +91,7 @@ export async function reserveInstitutionalCheckout(input: {
     sourceFresh: true,
     limitCents: input.account.creditLimitCents,
     invoices: input.account.invoices,
+    pendingCreditTxnIds: input.account.pendingCreditTxnIds ?? [],
     commitment: {
       orderId: input.reservationId,
       amountCents: input.amountCents,

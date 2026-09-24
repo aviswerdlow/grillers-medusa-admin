@@ -8,12 +8,12 @@ export type CreditStoreTransaction = {
 export type StoredInstitutionalCommitment = {
   orderId: string
   amountCents: number
-  state: "accepted" | "posting" | "posted" | "cancelled" | "reconciled"
+  state: "accepted" | "posting" | "posted" | "cancelled" | "reconciled" | "quarantined"
   invoiceTxnId: string | null
 }
 
 const allowedStates = new Set<StoredInstitutionalCommitment["state"]>([
-  "accepted", "posting", "posted", "cancelled", "reconciled",
+  "accepted", "posting", "posted", "cancelled", "reconciled", "quarantined",
 ])
 
 function stableId(value: string): string {

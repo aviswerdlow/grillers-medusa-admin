@@ -71,4 +71,18 @@ describe("institutional durable credit store", () => {
     await expect(store.list(invalidTrx, "TEST_COMPANY_A", "TEST_LIST_001"))
       .rejects.toThrow("Unknown institutional commitment state")
   })
+
+  it("reads a quarantined commitment so credit reservations can hold the account", async () => {
+    const trx: CreditStoreTransaction = {
+      raw: jest.fn(async () => ({ rows: [{
+        order_id: "TEST_ORDER_Q", amount_cents: "40000", state: "quarantined",
+        invoice_txn_id: "TEST_INVOICE_Q",
+      }] })),
+    }
+    await expect(store.list(trx, "TEST_COMPANY_A", "TEST_LIST_001"))
+      .resolves.toEqual([{
+        orderId: "TEST_ORDER_Q", amountCents: 40000, state: "quarantined",
+        invoiceTxnId: "TEST_INVOICE_Q",
+      }])
+  })
 })

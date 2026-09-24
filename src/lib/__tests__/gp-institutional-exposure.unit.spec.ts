@@ -94,6 +94,21 @@ describe("institutional document exposure (#370 fixtures)", () => {
     expect(result.reasons).toContain("credit_waiting_for_qbd_readback")
   })
 
+  it("holds a quarantined commitment even when its exact invoice appears", () => {
+    const mapped = calculateInstitutionalExposure({
+      invoices: [invoice("TEST_INVOICE_Q", 20000)],
+      commitments: [commitment("TEST_ORDER_Q", 40000, "quarantined", "TEST_INVOICE_Q")],
+    })
+    expect(mapped).toMatchObject({ totalCents: 20000, quarantined: true })
+    expect(mapped.reasons).toContain("quarantined_commitment:TEST_ORDER_Q")
+
+    const missing = calculateInstitutionalExposure({
+      invoices: [],
+      commitments: [commitment("TEST_ORDER_Q", 40000, "quarantined", "TEST_INVOICE_Q")],
+    })
+    expect(missing).toMatchObject({ totalCents: 40000, quarantined: true })
+  })
+
   it("waits for QBD reconciliation before releasing a fully collected posted invoice", () => {
     const uncertain = calculateInstitutionalExposure({
       invoices: [],

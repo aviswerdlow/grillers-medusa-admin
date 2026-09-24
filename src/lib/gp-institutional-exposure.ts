@@ -11,7 +11,7 @@ export type InstitutionalInvoice = {
 export type InstitutionalCommitment = {
   orderId: string
   amountCents: number
-  state: "accepted" | "posting" | "posted" | "cancelled" | "reconciled"
+  state: "accepted" | "posting" | "posted" | "cancelled" | "reconciled" | "quarantined"
   invoiceTxnId?: string | null
 }
 
@@ -84,6 +84,9 @@ export function calculateInstitutionalExposure(
       if (commitment.state === "cancelled") {
         reasons.push(`posted_cancellation_waiting_for_qbd:${orderId}`)
       }
+      if (commitment.state === "quarantined") {
+        reasons.push(`quarantined_commitment:${orderId}`)
+      }
       continue
     }
 
@@ -102,6 +105,9 @@ export function calculateInstitutionalExposure(
     }
     if (commitment.state === "cancelled" && invoiceTxnId) {
       reasons.push(`posted_cancellation_waiting_for_qbd:${orderId}`)
+    }
+    if (commitment.state === "quarantined") {
+      reasons.push(`quarantined_commitment:${orderId}`)
     }
   }
 
