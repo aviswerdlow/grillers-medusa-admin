@@ -105,7 +105,8 @@ export function parseMilestoneCommand(value: unknown, kind: MilestoneEventKind) 
   const milestone = body.milestone, expectedVersion = body.expected_version
   const correctionOfEventId = body.correction_of_event_id
   const token = (item: unknown) => typeof item === "string" && /^[a-zA-Z0-9_:-]{8,128}$/.test(item)
-  if (!token(eventId) || !token(fulfillmentId) || !Number.isSafeInteger(expectedVersion) || Number(expectedVersion) < 0 ||
+  const canOmitFulfillment = kind === "record" && milestone === "pickup_ready" && fulfillmentId === undefined
+  if (!token(eventId) || (!token(fulfillmentId) && !canOmitFulfillment) || !Number.isSafeInteger(expectedVersion) || Number(expectedVersion) < 0 ||
     !["pickup_ready", "pickup_collected", "local_dispatched", "local_delivered", "local_failed", "local_returned"].includes(String(milestone)) ||
     (kind === "correction" ? !token(correctionOfEventId) : correctionOfEventId !== undefined))
     throw new LocalMilestoneError("invalid_milestone_command", 400)
@@ -114,7 +115,7 @@ export function parseMilestoneCommand(value: unknown, kind: MilestoneEventKind) 
   if ((note !== null && (typeof note !== "string" || note.length > 500)) ||
     (reason !== null && (typeof reason !== "string" || reason.length > 500)))
     throw new LocalMilestoneError("invalid_milestone_command", 400)
-  return { eventId: eventId as string, fulfillmentId: fulfillmentId as string,
+  return { eventId: eventId as string, fulfillmentId: canOmitFulfillment ? null : fulfillmentId as string,
     milestone: milestone as LocalMilestone, expectedVersion: expectedVersion as number,
     correctionOfEventId: kind === "correction" ? correctionOfEventId as string : null,
     note: note as string | null, reason: reason as string | null }

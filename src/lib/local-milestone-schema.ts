@@ -2,7 +2,7 @@
 export const LOCAL_MILESTONE_SQL = `
 create table if not exists gp_local_milestone_state (
   order_id text primary key,
-  fulfillment_id text not null,
+  fulfillment_id text,
   attempt_id text not null,
   mode text not null check (mode in ('pickup', 'local_delivery')),
   milestone text not null default 'packed',
@@ -14,7 +14,7 @@ create table if not exists gp_local_milestone_state (
 create table if not exists gp_local_milestone_event (
   event_id text primary key,
   order_id text not null references gp_local_milestone_state(order_id),
-  fulfillment_id text not null,
+  fulfillment_id text,
   attempt_id text not null,
   version integer not null check (version > 0),
   kind text not null check (kind in ('record', 'correction')),

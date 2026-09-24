@@ -15,8 +15,10 @@ status. Those are separate #367 slices and activation gates.
   `milestones.correct`. A driver sees and changes only orders currently assigned
   to their customer ID. A dedicated office action assigns or replaces the
   driver, retaining every assignment row.
-- Every write locks the native order and verifies the supplied fulfillment is
-  linked to it and active. It requires `fulfillment_gate_status=released`, an
+- Every write locks the native order. Pickup readiness may precede native
+  fulfillment; collection and every local-delivery step require a supplied
+  fulfillment linked to the order and still active. All writes require
+  `fulfillment_gate_status=released`, an
   allowed finalization status, and the actual successful card charge or released
   invoice status. Canceled, draft, held, and unknown-payment orders fail closed.
 - These routes accept only `plant_pickup`, `southeast_pickup`, `local_delivery`,
@@ -36,8 +38,9 @@ The storefront uses the existing authenticated staff gateway. The route base is
 | POST | `/orders/:id/corrections` | Office correction of the current event |
 | GET | `/exceptions` | Office rows currently failed or returned |
 
-Event commands include `event_id`, `fulfillment_id`, `milestone`, and
-`expected_version`; optional `note` and `reason` are limited to 500 characters.
+Event commands include `event_id`, `milestone`, and `expected_version`.
+`fulfillment_id` is required except for initial pickup readiness before the
+native fulfillment exists. Optional `note` and `reason` are limited to 500 characters.
 Corrections also require `correction_of_event_id` and a reason. Failure and
 return outcomes require a reason. Clients retain the same event ID and body
 when retrying. A replay returns the original event with `duplicate=true`;

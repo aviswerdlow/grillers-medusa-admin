@@ -21,7 +21,7 @@ function requireCurrentAssignment(actor: StaffPrincipal, state: any, mode: Local
     throw new LocalMilestoneError("local_milestone_order_not_assigned", 403)
 }
 
-async function currentState(trx: any, orderId: string, fulfillmentId: string, mode: LocalMilestoneMode) {
+async function currentState(trx: any, orderId: string, fulfillmentId: string | null, mode: LocalMilestoneMode) {
   let state = await trx("gp_local_milestone_state").where({ order_id: orderId }).first()
   if (!state) {
     state = { order_id: orderId, fulfillment_id: fulfillmentId,
@@ -29,8 +29,13 @@ async function currentState(trx: any, orderId: string, fulfillmentId: string, mo
       current_event_id: null, driver_customer_id: null, updated_at: new Date() }
     await trx("gp_local_milestone_state").insert(state)
   }
-  if (state.fulfillment_id !== fulfillmentId || state.mode !== mode)
+  if (state.mode !== mode || (state.fulfillment_id && fulfillmentId && state.fulfillment_id !== fulfillmentId) ||
+    (state.fulfillment_id && !fulfillmentId))
     throw new LocalMilestoneError("local_milestone_order_changed")
+  if (!state.fulfillment_id && fulfillmentId) {
+    await trx("gp_local_milestone_state").where({ order_id: orderId }).update({ fulfillment_id: fulfillmentId })
+    state.fulfillment_id = fulfillmentId
+  }
   return state
 }
 
@@ -58,12 +63,16 @@ export async function recordLocalMilestone(db: any, input: {
     }
     const order = await trx("order").where({ id: input.orderId }).forUpdate().first()
     if (!order) throw new LocalMilestoneError("local_milestone_order_not_found", 404)
-    const relation = await trx("order_fulfillment").where({ order_id: input.orderId, fulfillment_id: command.fulfillmentId }).first()
-    if (!relation) throw new LocalMilestoneError("fulfillment_not_on_order", 422)
-    const fulfillment = await trx("fulfillment").where({ id: command.fulfillmentId }).whereNull("canceled_at").whereNull("deleted_at").first()
-    if (!fulfillment) throw new LocalMilestoneError("fulfillment_not_active", 422)
     const mode = localMilestoneMode(order)
     requireLocalRelease(order)
+    if (!command.fulfillmentId && !(mode === "pickup" && input.kind === "record" && command.milestone === "pickup_ready"))
+      throw new LocalMilestoneError("fulfillment_required_for_handoff", 422)
+    if (command.fulfillmentId) {
+      const relation = await trx("order_fulfillment").where({ order_id: input.orderId, fulfillment_id: command.fulfillmentId }).first()
+      if (!relation) throw new LocalMilestoneError("fulfillment_not_on_order", 422)
+      const fulfillment = await trx("fulfillment").where({ id: command.fulfillmentId }).whereNull("canceled_at").whereNull("deleted_at").first()
+      if (!fulfillment) throw new LocalMilestoneError("fulfillment_not_active", 422)
+    }
     const state = await currentState(trx, input.orderId, command.fulfillmentId, mode)
     requireCurrentAssignment(input.actor, state, mode, command.milestone)
     if (state.version !== command.expectedVersion)

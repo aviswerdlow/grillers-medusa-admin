@@ -55,6 +55,25 @@ test("pickup completion, concurrent retry and correction preserve one immutable 
   })
 })
 
+test("pickup readiness precedes native fulfillment but collection requires that handoff", async () => {
+  await fixture(async db => {
+    await nativeFixture(db, "plant_pickup")
+    await db("order_fulfillment").delete()
+    await db("fulfillment").delete()
+    await recordLocalMilestone(db, { orderId: "order_fixture", actor: office, kind: "record",
+      body: { event_id: "evt_ready_before_handoff", milestone: "pickup_ready", expected_version: 0 } })
+    const state = await db("gp_local_milestone_state").first()
+    expect(state.fulfillment_id).toBeNull()
+    await expect(recordLocalMilestone(db, { orderId: "order_fixture", actor: office, kind: "record",
+      body: body("evt_collected_before_handoff", "pickup_collected", 1) })).rejects.toThrow("fulfillment_not_on_order")
+    await db("fulfillment").insert({ id: "ful_fixture" })
+    await db("order_fulfillment").insert({ order_id: "order_fixture", fulfillment_id: "ful_fixture" })
+    await recordLocalMilestone(db, { orderId: "order_fixture", actor: office, kind: "record",
+      body: body("evt_collected_after_handoff", "pickup_collected", 1) })
+    expect((await db("gp_local_milestone_state").first()).fulfillment_id).toBe("ful_fixture")
+  })
+})
+
 test("local driver cannot bypass release, assignment or failed-delivery office handoff", async () => {
   await fixture(async db => {
     await nativeFixture(db, "atlanta_delivery")

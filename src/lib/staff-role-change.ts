@@ -20,6 +20,9 @@ export async function changeStaffRole(db: any, principal: StaffPrincipal, target
     || (input.final_charge_enabled !== undefined && typeof input.final_charge_enabled !== "boolean")) {
     throw new InvalidStaffRoleChange("Choose a role, provide the current version, an audit reason and the required confirmation.")
   }
+  if (role === "driver" && process.env.GP_LOCAL_MILESTONES_ENABLED !== "true") {
+    throw new InvalidStaffRoleChange("The local delivery driver role is not enabled.")
+  }
   if (principal.kind !== "operator" && !principal.capabilities.has("team.manage")) throw new StaffAccessDenied("Team administrator access is required.")
   if (!configuredIds("GP_PRIVILEGED_ADMIN_USER_IDS").size) throw new StaffAccessDenied("Configure and rehearse the separate recovery operator before changing staff access.")
   if (principal.kind === "customer" && principal.id === targetId && role !== "super_admin") throw new StaffAccessDenied("You cannot remove your own super admin access.")
