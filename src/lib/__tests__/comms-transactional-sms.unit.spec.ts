@@ -8,6 +8,7 @@ import {
   ORDER_SMS_CONSENT_VERSION,
   ORDER_SMS_PROGRAM,
   ORDER_SMS_TEMPLATE_ENROLLMENT_CONFIRMATION,
+  ORDER_SMS_TEMPLATE_SHIPPED,
   applyTransactionalSmsKeyword,
   applyTransactionalSmsStatus,
   buildOrderSmsEnrollmentConfirmation,
