@@ -46,6 +46,11 @@ jobs:
         run: yarn jest --runInBand
       - name: TypeScript
         run: npx tsc --noEmit
+      - name: Local milestone notice transaction and policy tests
+        env:
+          LOCAL_NOTICE_TEST_DATABASE_URL: postgres://gp_launch_test:isolated_fixture@127.0.0.1:5432/gp_launch
+          TEST_TYPE: integration:local-notices
+        run: yarn jest --runInBand --silent
       - name: Accounting transaction and delivery tests
         run: yarn test:accounting
         env:
