@@ -44,8 +44,13 @@ jest.mock("../emails/order-fetch", () => ({
   fetchOrderForEmail: jest.fn(),
 }))
 
+jest.mock("../ops-alert", () => ({
+  emitOpsAlert: jest.fn(async () => ({ ok: true, skipped: false })),
+}))
+
 const { isInSendBlackout } = jest.requireMock("../communications/hebrew-calendar")
 const { fetchOrderForEmail } = jest.requireMock("../emails/order-fetch")
+const { emitOpsAlert } = jest.requireMock("../ops-alert")
 
 function orderSmsConsent(overrides: Record<string, any> = {}) {
   return {
@@ -74,16 +79,18 @@ function fakeDb(options: {
   let customerProfile: Record<string, any> | null = null
   const writes: Array<{ table: string; op: string; data: any }> = []
   const raws: string[] = []
+  const exclusions: Array<[string, any]> = []
 
   const db: any = (table: string) => {
     const chain: any = {
       _count: false,
       _select: false,
       _filters: [] as Array<[string, any]>,
+      _exclusions: [] as Array<[string, any]>,
+      _updatedRows: [] as Array<{ id: string }>,
     }
     for (const method of [
       "whereNull",
-      "whereNot",
       "whereIn",
       "orderBy",
       "limit",
@@ -96,13 +103,24 @@ function fakeDb(options: {
       chain._filters.push([key, rest.at(-1)])
       return chain
     }
+    chain.whereNot = (key: string, value: any) => {
+      chain._exclusions.push([key, value])
+      exclusions.push([key, value])
+      return chain
+    }
     chain.whereRaw = (sql: string) => {
       raws.push(sql)
       return chain
     }
     chain.first = async () => {
       if (table === "gp_sms_program_suppression") return suppressionRow
-      if (table === "gp_message_log") return messageRow
+      if (table === "gp_message_log") {
+        return chain._filters.every(
+          ([key, value]: [string, any]) => messageRow?.[key] === value
+        )
+          ? messageRow
+          : null
+      }
       if (table === "gp_customer_profile") return customerProfile
       return undefined
     }
@@ -125,8 +143,20 @@ function fakeDb(options: {
     }
     chain.update = (data: any) => {
       writes.push({ table, op: "update", data })
-      if (table === "gp_message_log" && messageRow) {
-        messageRow = { ...messageRow, ...data }
+      if (
+        table === "gp_message_log" &&
+        messageRow &&
+        chain._filters.every(
+          ([key, value]: [string, any]) => messageRow?.[key] === value
+        )
+      ) {
+        chain._updatedRows = [{ id: messageRow.id }]
+        messageRow = {
+          ...messageRow,
+          ...Object.fromEntries(
+            Object.entries(data).filter(([, value]) => value !== undefined)
+          ),
+        }
       }
       if (table === "gp_sms_program_suppression" && suppressionRow) {
         suppressionRow = { ...suppressionRow, ...data }
@@ -136,10 +166,24 @@ function fakeDb(options: {
       }
       return chain
     }
+    chain.returning = () => chain
     chain.then = (resolve: (value: any) => void) =>
       Promise.resolve(
         chain._count
-          ? [{ count: options.count || 0 }]
+          ? [{
+              count: Math.max(
+                0,
+                (options.count || 0) -
+                  Number(
+                    chain._exclusions.some(
+                      ([key, value]: [string, any]) =>
+                        key === "id" && value === messageRow?.id
+                    )
+                  )
+              ),
+            }]
+          : chain._updatedRows.length
+            ? chain._updatedRows
           : chain._select && table === "order"
             ? options.orderRows || []
             : table === "gp_message_log" &&
@@ -162,6 +206,7 @@ function fakeDb(options: {
     db,
     raws,
     writes,
+    exclusions,
     get messageRow() {
       return messageRow
     },
@@ -396,6 +441,55 @@ describe("transactional Twilio transport", () => {
     expect(global.fetch).not.toHaveBeenCalled()
   })
 
+  it("alerts once and retires a deferred SMS when replay reaches the attempt cap", async () => {
+    jest.clearAllMocks()
+    process.env.GP_OBSERVANCE_SEND_POLICY_ENABLED = "true"
+    ;(fetchOrderForEmail as jest.Mock).mockRejectedValue(
+      new Error("order_revalidation_unavailable")
+    )
+    const state = fakeDb({
+      messageRow: {
+        id: "gpmsg_deferred123",
+        status: "deferred",
+        channel: "sms",
+        order_id: "order_123",
+        template_key: ORDER_SMS_TEMPLATE_SHIPPED,
+        metadata: {
+          program: ORDER_SMS_PROGRAM,
+          defer_attempts: 2,
+          defer_until: "2026-07-11T02:00:00.000Z",
+        },
+      },
+    })
+    const logger = { warn: jest.fn(), error: jest.fn() }
+    const container = {
+      resolve: (key: string) => (key === "logger" ? logger : state.db),
+    } as any
+
+    expect(await resumeBlackoutDeferredOrderSms(container)).toMatchObject({
+      processed: 1,
+      errors: 1,
+    })
+    expect(state.messageRow?.status).toBe("failed")
+    expect(state.messageRow?.metadata.defer_attempts).toBe(3)
+    expect(emitOpsAlert).toHaveBeenCalledTimes(1)
+    expect(emitOpsAlert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        alertKind: "communications_transactional_sms_replay_exhausted",
+        meta: expect.objectContaining({
+          message_log_id: "gpmsg_deferred123",
+          attempts: 3,
+        }),
+      })
+    )
+
+    expect(await resumeBlackoutDeferredOrderSms(container)).toMatchObject({
+      processed: 0,
+      errors: 0,
+    })
+    expect(emitOpsAlert).toHaveBeenCalledTimes(1)
+  })
+
   function order() {
     return {
       id: "order_123",
@@ -445,6 +539,59 @@ describe("transactional Twilio transport", () => {
     )
     expect(state.messageRow?.metadata.trigger_event).toBe("order.placed")
     expect(state.messageRow?.metadata.fulfillment_id).toBeNull()
+  })
+
+  it("excludes only its own deferred row from the six-per-order SMS cap", async () => {
+    process.env.TWILIO_TRANSACTIONAL_SMS_ENABLED = "true"
+    process.env.TWILIO_ACCOUNT_SID = `AC${"a".repeat(32)}`
+    process.env.TWILIO_AUTH_TOKEN = "auth_test"
+    process.env.TWILIO_TRANSACTIONAL_MESSAGING_SERVICE_SID = `MG${"b".repeat(32)}`
+    process.env.TWILIO_TRANSACTIONAL_STATUS_WEBHOOK_URL =
+      "https://backend.example.com/webhooks/twilio/sms/transactional/status"
+    process.env.TWILIO_TRANSACTIONAL_FROM = "+18335747455"
+    process.env.TWILIO_MESSAGING_FROM = "+18447485332"
+    ;(isInSendBlackout as jest.Mock).mockReturnValue({ blocked: false })
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      json: async () => ({ sid: `SM${"e".repeat(32)}`, status: "queued" }),
+    })) as any
+
+    const ownRow = fakeDb({
+      count: 6,
+      messageRow: {
+        id: "gpmsg_own12345",
+        idempotency_key: "transactional-sms:order-shipped:order_123:TRACK123",
+        status: "deferred",
+        channel: "sms",
+        order_id: "order_123",
+      },
+    })
+    const ownResult = await sendOrderShippedSms(
+      { resolve: () => ownRow.db } as any,
+      { order: order(), fulfillmentId: "ful_123", trackingNumber: "TRACK123" }
+    )
+    expect(ownResult).toEqual({ ok: true, messageSid: `SM${"e".repeat(32)}` })
+    expect(ownRow.exclusions).toEqual([["id", "gpmsg_own12345"]])
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+
+    const otherRow = fakeDb({
+      count: 6,
+      messageRow: {
+        id: "gpmsg_other12345",
+        idempotency_key: "transactional-sms:order-shipped:order_123:OTHER",
+        status: "deferred",
+        channel: "sms",
+        order_id: "order_123",
+      },
+    })
+    expect(
+      await sendOrderShippedSms(
+        { resolve: () => otherRow.db } as any,
+        { order: order(), fulfillmentId: "ful_123", trackingNumber: "TRACK123" }
+      )
+    ).toMatchObject({ ok: true, skipped: true })
+    expect(otherRow.exclusions).toEqual([])
+    expect(global.fetch).toHaveBeenCalledTimes(1)
   })
 
   it("fails closed when consent no longer matches the order phone", async () => {

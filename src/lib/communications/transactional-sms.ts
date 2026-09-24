@@ -1059,20 +1059,40 @@ export async function resumeBlackoutDeferredOrderSms(
     } catch (error) {
       summary.errors += 1
       const attempts = Number(metadata.defer_attempts || 0) + 1
-      await db("gp_message_log").where("id", row.id).update({
-        status: attempts >= 3 ? "failed" : "deferred",
-        metadata: {
-          ...metadata,
-          defer_attempts: attempts,
-          defer_until: new Date(Date.now() + 5 * 60_000).toISOString(),
-        },
-        error_message: String(error instanceof Error ? error.message : error)
-          .slice(0, 200),
-        updated_at: new Date(),
-      })
+      const exhausted = attempts >= 3
+      const updated = await db("gp_message_log")
+        .where("id", row.id)
+        .where("status", "deferred")
+        .update({
+          status: exhausted ? "failed" : "deferred",
+          metadata: {
+            ...metadata,
+            defer_attempts: attempts,
+            defer_until: new Date(Date.now() + 5 * 60_000).toISOString(),
+          },
+          error_message: String(error instanceof Error ? error.message : error)
+            .slice(0, 200),
+          updated_at: new Date(),
+        })
+        .returning("id")
       logger.warn(
         `[transactional-sms] deferred replay failed id=${row.id} attempt=${attempts}`
       )
+      if (exhausted && updated.length > 0) {
+        await emitOpsAlert({
+          alertKind: "communications_transactional_sms_replay_exhausted",
+          title: "Deferred order SMS replay exhausted",
+          path: "src/lib/communications/transactional-sms.ts:resumeBlackoutDeferredOrderSms",
+          severity: "warn",
+          fingerprint: "transactional_sms_replay_exhausted",
+          meta: {
+            message_log_id: row.id,
+            template_key: row.template_key,
+            attempts,
+          },
+          logger,
+        })
+      }
     }
   }
   return summary
