@@ -132,6 +132,16 @@ describe("approve finalization route", () => {
     expect(res.status).toHaveBeenCalledWith(200)
   })
 
+  it.each([false, true])("only triggers the optional auto-charge for a verified charge grant: %s", async charge => {
+    mockApproveFinalization.mockResolvedValueOnce({ finalization: { id: "fin_123", status: "packed_pending_charge" }, totals: {}, lines: [], packages: [] })
+    const { eventBus, scope } = makeScope()
+    const res = makeRes()
+    await POST({ params: { id: "order_123" }, body: {}, scope,
+      gp_staff_principal: { id: "cus_packer", kind: "customer", capabilities: new Set(charge ? ["charge"] : []) } } as any, res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(eventBus.emit).toHaveBeenCalledTimes(charge ? 1 : 0)
+  })
+
   it("alerts when approval fails after the order is loaded", async () => {
     mockApproveFinalization.mockRejectedValueOnce(
       new Error("finalization preview is stale")

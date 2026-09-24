@@ -1,3 +1,4 @@
+import { verifiedStaffAuditFields } from "../../../../../lib/staff-principal"
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { sendStaffMessage } from "../../../../../lib/communications/admin"
 import { emitAdminCommunicationsRouteFailureAlert } from "../_shared/alerts"
@@ -18,7 +19,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       topic: body.topic,
       order_id: body.order_id,
       profile_id: body.profile_id,
-      staff_actor_email: (req as any).auth_context?.actor_id || null,
+      staff_actor_email: verifiedStaffAuditFields(req).staff_actor_email,
     })
     if (!result.ok) {
       await emitAdminCommunicationsRouteFailureAlert({

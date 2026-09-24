@@ -1,6 +1,7 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { CATCH_WEIGHT_ORDER_FIELDS } from "../../../../../../lib/catch-weight-finalization"
+import { verifiedStaffActorId, verifiedStaffAuditFields } from "../../../../../../lib/staff-principal"
 import { emitOpsAlert } from "../../../../../../lib/ops-alert"
 
 export function jsonError(
@@ -62,28 +63,11 @@ export async function loadFinalizationOrderForRoute(
 }
 
 export function actorId(req: MedusaRequest) {
-  return (req as any).auth_context?.actor_id || null
+  return verifiedStaffActorId(req)
 }
 
-export function staffAuditFields(
-  req: MedusaRequest,
-  body?: Record<string, any> | null
-) {
-  return {
-    staff_actor_id: actorId(req),
-    staff_actor_customer_id:
-      typeof body?.staff_actor_customer_id === "string"
-        ? body.staff_actor_customer_id
-        : null,
-    staff_actor_email:
-      typeof body?.staff_actor_email === "string"
-        ? body.staff_actor_email
-        : null,
-    staff_actor_name:
-      typeof body?.staff_actor_name === "string"
-        ? body.staff_actor_name
-        : null,
-  }
+export function staffAuditFields(req: MedusaRequest, _body?: Record<string, any> | null) {
+  return verifiedStaffAuditFields(req)
 }
 
 export function staffAuditActorId(fields: Record<string, any>) {

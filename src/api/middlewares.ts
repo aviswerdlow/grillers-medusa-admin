@@ -18,6 +18,9 @@ import {
 } from "../modules/fulfillment/serviceability"
 import { emitOpsAlert, type OpsAlertSeverity } from "../lib/ops-alert"
 import { opsErrorHandler } from "./middlewares/ops-error-handler"
+import { protectCustomerStaffAuthority } from "./middlewares/customer-staff-authority"
+import { enforceStaffCartAuthority } from "./middlewares/staff-cart-authority"
+import { bindFulfillmentAudit, enforceStaffCapabilities, enforceStaffSessionEpoch, protectAdminCustomerAuthority, publishAdminStaffAccess, publishCurrentStaffAccess } from "./middlewares/staff-capabilities"
 import {
   rawStripeWebhookBody,
   stripeSignatureHeader,
@@ -620,6 +623,10 @@ export default defineMiddlewares({
   // See ./middlewares/ops-error-handler.ts.
   errorHandler: opsErrorHandler,
   routes: [
+    { matcher: "/store/carts*", middlewares: [enforceStaffCartAuthority] },
+    { matcher: "/store/payment-collections*", middlewares: [enforceStaffCartAuthority] },
+    { matcher: "/store/grillers/checkout/*", method: "POST", middlewares: [enforceStaffCartAuthority] },
+    { matcher: "/store/gp-inventory/resolution", method: "POST", middlewares: [enforceStaffCartAuthority] },
     { matcher: "/store/products", method: ["GET"], middlewares: [filterPublicCatalog] },
     { matcher: "/store/products/:id", method: ["GET"], middlewares: [filterPublicCatalog] },
     { matcher: "/store/carts", method: ["POST"], middlewares: [guardNewCartItems] },
@@ -630,6 +637,55 @@ export default defineMiddlewares({
     { matcher: "/store/grillers/checkout/place-order", method: ["POST"], middlewares: [guardCompletedCart] },
     { matcher: "/store/gp-inventory/availability", method: ["POST"], middlewares: [guardInventoryVariants] },
     { matcher: "/store/gp-inventory/resolution", method: ["POST"], middlewares: [guardInventoryResolution] },
+    {
+      matcher: "/admin/*",
+      middlewares: [authenticate("user", ["session", "bearer", "api-key"]), enforceStaffCapabilities],
+    },
+    {
+      matcher: "/auth/token/refresh",
+      method: "POST",
+      middlewares: [authenticate("*", ["bearer"], { allowUnregistered: true }), enforceStaffSessionEpoch],
+    },
+    {
+      matcher: "/auth/session",
+      method: "POST",
+      middlewares: [authenticate("*", ["bearer"]), enforceStaffSessionEpoch],
+    },
+    {
+      matcher: "/store/customers/me",
+      method: "GET",
+      middlewares: [authenticate("customer", ["session", "bearer"]), publishCurrentStaffAccess],
+    },
+    {
+      matcher: "/admin/customers",
+      method: "POST",
+      middlewares: [protectAdminCustomerAuthority],
+    },
+    {
+      matcher: "/admin/customers/:id",
+      method: "POST",
+      middlewares: [protectAdminCustomerAuthority],
+    },
+    {
+      matcher: "/admin/customers/:id/addresses*",
+      method: ["POST", "DELETE"],
+      middlewares: [protectAdminCustomerAuthority],
+    },
+    {
+      matcher: "/admin/customers*",
+      method: "GET",
+      middlewares: [publishAdminStaffAccess],
+    },
+    {
+      matcher: "/store/customers",
+      method: ["POST"],
+      middlewares: [protectCustomerStaffAuthority],
+    },
+    {
+      matcher: "/store/customers/me",
+      method: ["POST"],
+      middlewares: [authenticate("customer", ["session", "bearer"]), protectCustomerStaffAuthority],
+    },
     {
       matcher: "/store/shipping-options",
       method: ["GET"],
@@ -744,6 +800,7 @@ export default defineMiddlewares({
       matcher: "/admin/orders/:id/fulfillments",
       method: ["POST"],
       middlewares: [
+        bindFulfillmentAudit,
         blockFulfillmentBeforeFinalCharge,
         blockFulfillmentOnSlackHold,
       ],
@@ -752,6 +809,7 @@ export default defineMiddlewares({
       matcher: "/admin/orders/:id/fulfillments/*/shipments",
       method: ["POST"],
       middlewares: [
+        bindFulfillmentAudit,
         blockFulfillmentBeforeFinalCharge,
         blockFulfillmentOnSlackHold,
       ],
@@ -760,6 +818,7 @@ export default defineMiddlewares({
       matcher: "/admin/fulfillments",
       method: ["POST"],
       middlewares: [
+        bindFulfillmentAudit,
         blockFulfillmentBeforeFinalCharge,
         blockFulfillmentOnSlackHold,
       ],

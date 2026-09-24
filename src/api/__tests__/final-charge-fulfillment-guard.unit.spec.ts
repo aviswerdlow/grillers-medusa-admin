@@ -1,5 +1,6 @@
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
-import middlewares, { blockFulfillmentBeforeFinalCharge } from "../middlewares"
+import middlewares, { blockFulfillmentBeforeFinalCharge, blockFulfillmentOnSlackHold } from "../middlewares"
+import { bindFulfillmentAudit } from "../middlewares/staff-capabilities"
 import {
   PAYMENT_WORKFLOW_INVOICE_AR,
   PAYMENT_WORKFLOW_SETUP_THEN_FINAL_CHARGE,
@@ -33,7 +34,8 @@ function harness(route: (typeof routes)[number], rows: unknown[] = [paidOrder]) 
   const logger = { warn: jest.fn(), error: jest.fn() }
   const req = {
     params: route.params,
-    body: route.body,
+    body: { ...route.body },
+    gp_staff_principal: { id: "cus_fulfillment_fixture", kind: "customer", email: "staff@example.invalid", name: "Synthetic staff" },
     scope: {
       resolve: (key: string) => {
         if (key === ContainerRegistrationKeys.QUERY) return { graph }
@@ -52,7 +54,13 @@ function harness(route: (typeof routes)[number], rows: unknown[] = [paidOrder]) 
   expect(registered).toBeDefined()
   if (!handlers) throw new Error(`Missing fulfillment middleware for ${route.matcher}`)
   expect(registered!.methods).toContain("POST")
-  expect(handlers[0]).toBe(blockFulfillmentBeforeFinalCharge)
+  // Staff attribution only decorates the request. Both fulfillment guards
+  // must still execute in order before the side-effecting native handler.
+  expect(handlers).toEqual([
+    bindFulfillmentAudit,
+    blockFulfillmentBeforeFinalCharge,
+    blockFulfillmentOnSlackHold,
+  ])
 
   const run = async () => {
     const chain = [...handlers, createFulfillmentOrShipment]
@@ -127,6 +135,7 @@ describe.each(routes)("final-charge gate on $matcher", (route) => {
     await h.run()
     expect(h.res.status).not.toHaveBeenCalled()
     expect(h.createFulfillmentOrShipment).toHaveBeenCalledTimes(1)
+    expect(h.req.body.metadata).toMatchObject({ staff_actor_customer_id: "cus_fulfillment_fixture" })
     expect(h.graph).toHaveBeenCalledWith({
       entity: "order", fields: ["id", "metadata"], filters: { id: orderId },
     })

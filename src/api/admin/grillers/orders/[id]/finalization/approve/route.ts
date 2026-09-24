@@ -9,6 +9,7 @@ import {
   metadataObject,
 } from "../../../../../../../lib/catch-weight-finalization"
 import { FINALIZATION_PACKED_PENDING_CHARGE_EVENT } from "../../../../../../../lib/auto-finalize-charge"
+import { requestStaffPrincipal } from "../../../../../../../lib/staff-principal"
 import {
   emitFinalizationRouteFailureAlert,
   jsonError,
@@ -71,7 +72,9 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     // straight to fulfillment. Best-effort: a failed emit must NOT fail the human approve — the
     // order simply waits for a manual charge. The subscriber is flag-gated (default OFF) and
     // fails safe, so emitting is a harmless no-op when auto-charge is disabled.
-    if (approvedStatus === FINALIZATION_PACKED_PENDING_CHARGE) {
+    const principal = requestStaffPrincipal(req)
+    const canTriggerCharge = principal?.kind === "operator" || principal?.capabilities.has("charge") === true
+    if (approvedStatus === FINALIZATION_PACKED_PENDING_CHARGE && canTriggerCharge) {
       try {
         const eventBus = req.scope.resolve(Modules.EVENT_BUS)
         await eventBus.emit({

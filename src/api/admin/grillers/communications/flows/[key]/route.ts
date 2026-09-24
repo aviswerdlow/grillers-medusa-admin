@@ -1,3 +1,4 @@
+import { verifiedStaffActorId } from "../../../../../../lib/staff-principal"
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { updateCommunicationFlow } from "../../../../../../lib/communications/flows"
 import { emitAdminCommunicationsRouteFailureAlert } from "../../_shared/alerts"
@@ -13,7 +14,7 @@ export async function PATCH(req: MedusaRequest, res: MedusaResponse) {
       status: body.status,
       steps: body.steps,
       trigger_conditions: body.trigger_conditions,
-      edited_by: (req as any).auth_context?.actor_id || null,
+      edited_by: verifiedStaffActorId(req) || null,
     })
     res.status(200).json({ flow })
   } catch (error) {

@@ -1,3 +1,4 @@
+import { verifiedStaffActorId } from "../../../../lib/staff-principal"
 import { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 
@@ -29,7 +30,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return
   }
 
-  const actorId = normalizeText((req as any).auth_context?.actor_id)
+  const actorId = normalizeText(verifiedStaffActorId(req))
   const now = new Date()
   const existing = await db("legacy_reorder_request")
     .select("id")

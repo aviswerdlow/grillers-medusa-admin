@@ -1,5 +1,6 @@
 import { isInternalCatalogRecord, isInternalCatalogProduct } from "./public-catalog"
 import { randomUUID } from "crypto"
+import { verifiedStaffCartAuthority, verifiedStaffLineOverride } from "./staff-cart-authority"
 
 export type AvailabilityLifecycle =
   | "active"
@@ -817,13 +818,6 @@ function fulfillmentTypeFromMetadata(metadata: unknown): string | undefined {
   )
 }
 
-function orderSourceFromMetadata(metadata: unknown): AllocationSource {
-  const record = objectRecord(metadata)
-  if (booleanValue(record.staff_phone_order)) return "staff_phone_order"
-  if (textValue(record.source) === "staff_phone_order") return "staff_phone_order"
-  return "customer_web"
-}
-
 const ORDER_ALLOCATION_FIELDS = [
   "id",
   "display_id",
@@ -944,12 +938,14 @@ export async function createAllocationsForOrder({
   orderId,
   source,
   now,
+  staffAuthoritySecret,
 }: {
   db: DbConnection
   query: QueryGraph
   orderId: string
   source?: AllocationSource
   now?: Date
+  staffAuthoritySecret?: string
 }): Promise<{ created: number; skipped: number; blocked: number }> {
   const order = await fetchOrderForAllocation(query, orderId)
   if (!order) return { created: 0, skipped: 0, blocked: 0 }
@@ -957,7 +953,9 @@ export async function createAllocationsForOrder({
   const metadata = objectRecord(order.metadata)
   const requestedDate = requestedFulfillmentDateFromMetadata(metadata)
   const fulfillmentType = fulfillmentTypeFromMetadata(metadata)
-  const orderSource = source || orderSourceFromMetadata(metadata)
+  const staffAuthority = verifiedStaffCartAuthority(order, staffAuthoritySecret, true)
+  const orderSource = source && source !== "staff_phone_order" ? source
+    : staffAuthority?.source === "staff_phone_order" ? "staff_phone_order" : "customer_web"
   const items = Array.isArray(order.items) ? order.items : []
   let created = 0
   let skipped = 0
@@ -1008,6 +1006,7 @@ export async function createAllocationsForOrder({
     }
 
     const status = allocationStatusForDecision(availability)
+    const trustedOverride = verifiedStaffLineOverride(order, { ...item, variant_id: variantId, quantity: line.quantity }, staffAuthority, staffAuthoritySecret)
     const allocationId = prefixedId("ialloc")
     const current = new Date()
     const variant = objectRecord(item.variant)
@@ -1033,10 +1032,10 @@ export async function createAllocationsForOrder({
       source: orderSource,
       status,
       allocation_reason: allocationReasonForDecision(availability),
-      override_reason: status === "blocked" ? lineOverrideReason(item) || null : null,
-      override_note: status === "blocked" ? lineOverrideNote(item) || null : null,
-      staff_actor_customer_id: textValue(metadata.staff_actor_customer_id) || null,
-      staff_actor_email: textValue(metadata.staff_actor_email) || null,
+      override_reason: status === "blocked" && trustedOverride ? lineOverrideReason(item) || null : null,
+      override_note: status === "blocked" && trustedOverride ? lineOverrideNote(item) || null : null,
+      staff_actor_customer_id: staffAuthority?.actor_id || null,
+      staff_actor_email: staffAuthority?.actor_email || null,
       metadata: {
         availability,
         display_id: order.display_id,
@@ -1053,15 +1052,15 @@ export async function createAllocationsForOrder({
       event_type: "created",
       next_status: status,
       next_quantity: line.quantity,
-      actor_type: orderSource === "staff_phone_order" ? "staff" : "system",
-      actor_id: textValue(metadata.staff_actor_customer_id),
-      actor_email: textValue(metadata.staff_actor_email),
+      actor_type: staffAuthority ? "staff" : "system",
+      actor_id: staffAuthority?.actor_id,
+      actor_email: staffAuthority?.actor_email,
       reason: allocationReasonForDecision(availability),
-      note: status === "blocked" ? lineOverrideNote(item) : undefined,
+      note: status === "blocked" && trustedOverride ? lineOverrideNote(item) : undefined,
       metadata: {
         order_id: orderId,
         line_item_id: lineItemId,
-        override_reason: status === "blocked" ? lineOverrideReason(item) : undefined,
+        override_reason: status === "blocked" && trustedOverride ? lineOverrideReason(item) : undefined,
       },
     })
 

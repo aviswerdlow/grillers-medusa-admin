@@ -1,6 +1,7 @@
 import type { SubscriberArgs, SubscriberConfig } from "@medusajs/framework"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { createAllocationsForOrder } from "../lib/inventory-allocation"
+import { staffCartSigningSecret } from "../lib/staff-cart-authority"
 import { emitOpsAlert } from "../lib/ops-alert"
 import { emitInventoryAllocationSubscriberFailureAlert } from "../lib/inventory-allocation-subscriber-alerts"
 
@@ -19,10 +20,15 @@ export default async function inventoryAllocationOrderPlacedHandler({
   }
 
   try {
+    // Ordinary allocation must continue if staff signing is unconfigured.
+    // Without a verified receipt no staff attribution or override is accepted.
+    let staffAuthoritySecret: string | undefined
+    try { staffAuthoritySecret = staffCartSigningSecret(container) } catch {}
     const result = await createAllocationsForOrder({
       db,
       query,
       orderId: data.id,
+      staffAuthoritySecret,
     })
 
     logger.info(

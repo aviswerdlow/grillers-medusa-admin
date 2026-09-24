@@ -64,6 +64,22 @@ describe("offline-payment approval route (#279/#282)", () => {
     updateCustomers: jest.fn(async () => ({ id: "cus_1" })),
   })
 
+  it("does not accept a customer's matching approver email without an approved immutable ID", async () => {
+    process.env.GP_OFFLINE_PAYMENT_APPROVER_EMAILS = APPROVERS
+    const savedIds = process.env.GP_INVOICE_APPROVER_CUSTOMER_IDS
+    delete process.env.GP_INVOICE_APPROVER_CUSTOMER_IDS
+    const customerModule = okCustomerModule()
+    const req = makeReq({ userModule: userModuleFor("avi@gp.com"), customerModule })
+    req.gp_staff_principal = { id: "cus_unapproved", kind: "customer", email: "avi@gp.com", name: "Fixture" }
+    const res = makeRes()
+    await POST(req, res)
+    expect(res.statusCode).toBe(403)
+    expect(customerModule.retrieveCustomer).not.toHaveBeenCalled()
+    expect(customerModule.updateCustomers).not.toHaveBeenCalled()
+    if (savedIds === undefined) delete process.env.GP_INVOICE_APPROVER_CUSTOMER_IDS
+    else process.env.GP_INVOICE_APPROVER_CUSTOMER_IDS = savedIds
+  })
+
   it("403s when the approver allowlist is not configured", async () => {
     delete process.env.GP_OFFLINE_PAYMENT_APPROVER_EMAILS
     const customerModule = okCustomerModule()

@@ -1,3 +1,4 @@
+import { verifiedStaffActorId } from "../../../../lib/staff-principal"
 import { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { upsertLegacyItemMapping } from "../../../../lib/legacy-item-mapping"
@@ -65,7 +66,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   }
 
   try {
-    const actorId = normalizeText((req as any).auth_context?.actor_id)
+    const actorId = normalizeText(verifiedStaffActorId(req))
     const dryRun = Boolean(body.dry_run)
     const result = await upsertLegacyItemMapping(db, {
       qbdItemListId: candidate.qbd_item_list_id,
@@ -122,7 +123,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         medusa_variant_id: medusaVariantId,
         medusa_sku: medusaSku,
         dry_run: Boolean(body.dry_run),
-        staff_actor_id: normalizeText((req as any).auth_context?.actor_id),
+        staff_actor_id: normalizeText(verifiedStaffActorId(req)),
         error_message: message.slice(0, 300),
       },
       logger,

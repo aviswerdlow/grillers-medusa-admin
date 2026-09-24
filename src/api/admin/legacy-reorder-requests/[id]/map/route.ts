@@ -1,3 +1,4 @@
+import { verifiedStaffActorId } from "../../../../../lib/staff-principal"
 import { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { upsertLegacyItemMapping } from "../../../../../lib/legacy-item-mapping"
@@ -58,7 +59,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return
   }
 
-  const actorId = normalizeText((req as any).auth_context?.actor_id)
+  const actorId = normalizeText(verifiedStaffActorId(req))
   const dryRun = Boolean(body.dry_run)
 
   try {
