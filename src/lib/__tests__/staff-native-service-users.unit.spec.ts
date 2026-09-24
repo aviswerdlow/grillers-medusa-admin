@@ -75,6 +75,18 @@ describe("native service-user staff boundary", () => {
     expect((await boundary(request("usr_reader", "GET", "/admin/products", true))).res.code).toBe(403)
   })
 
+  it("refuses every non-GET method for a native reader while the wider boundary is in log mode", async () => {
+    process.env.GP_STAFF_BOUNDARY_MODE = "log"
+    for (const method of ["HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
+      for (const path of ["/admin/products", "/admin/orders", "/admin/users"]) {
+        const denied = await boundary(request("usr_reader", method, path))
+        expect(denied.res.code).toBe(403)
+        expect(denied.next).not.toHaveBeenCalled()
+      }
+    }
+    expect((await boundary(request("usr_reader", "GET", "/admin/products"))).next).toHaveBeenCalledTimes(1)
+  })
+
   it("does not activate an unconfigured or deleted native service user", async () => {
     expect((await boundary(request("usr_unknown", "GET", "/admin/products"))).res.code).toBe(403)
     userRead.mockResolvedValueOnce(null as any)

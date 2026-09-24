@@ -3,12 +3,18 @@ import type { MedusaRequest, MedusaResponse, MedusaNextFunction } from "@medusaj
 import { staffBoundaryMode, reportStaffBoundaryDenial } from "../../lib/staff-boundary-rollout"
 import { isDeepStrictEqual } from "node:util"
 import { Modules } from "@medusajs/framework/utils"
-import { isBootstrapStaffIdentity, isStaffGrantMetadataKey, staffAccessStatus, staffRole, staffSessionIsCurrent } from "../../lib/staff-access-policy"
+import { configuredIds, isBootstrapStaffIdentity, isStaffGrantMetadataKey, staffAccessStatus, staffRole, staffSessionIsCurrent } from "../../lib/staff-access-policy"
 import { currentStaffCustomer, requestStaffPrincipal, resolveStaffPrincipal, StaffAccessDenied, verifiedStaffAuditFields } from "../../lib/staff-principal"
 import { adminRouteCapability, isServiceRoute } from "../../lib/staff-route-capabilities"
 import { ORDER_PROMISE_READ_PATH } from "../../lib/order-promise-reader"
 
 export async function enforceStaffCapabilities(req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) {
+  // A designated native reader is read-only even while the wider staff boundary
+  // observes other callers in log mode during rollout.
+  const transport = (req as any).auth_context
+  if (transport?.actor_type === "user" && configuredIds("GP_ADMIN_READ_ONLY_USER_IDS").has(String(transport.actor_id || "")) && req.method !== "GET") {
+    return res.status(403).json({ message: "This read-only account cannot perform admin writes." })
+  }
   // Checkout enforcement is independent of the staff observation switch.
   if (orderReviewEnforcementMode() === "required" && req.method === "POST" && (/^\/admin\/draft-orders(?:\/[^/]+\/convert-to-order)?\/?$/.test(req.path) || /^\/admin\/orders\/?$/.test(req.path))) {
     return res.status(403).json({ message: "Create orders through the reviewed customer or staff checkout. Native draft conversion has no accepted-order review." })
