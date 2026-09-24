@@ -52,6 +52,7 @@ export default async function orderCanceledEmailHandler({
 
     await sendTrackedEmail(container, {
       to: order.email,
+      medusa_customer_id: order.customer_id,
       stream: "transactional",
       purpose: "transactional",
       template_key: "order-canceled",

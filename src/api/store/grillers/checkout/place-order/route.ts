@@ -1,3 +1,4 @@
+import { prepareReceiptSnapshot } from "../../../../../lib/receipt-email-orders";
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http";
 import {
   ContainerRegistrationKeys,
@@ -600,6 +601,7 @@ async function placeInvoiceOrder(
     },
   });
 
+  await prepareReceiptSnapshot(req.scope, cartId);
   const { errors, result } = await completeCartWorkflow(req.scope).run({
     input: { id: cartId },
     context: { transactionId: cartId },
@@ -806,6 +808,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       },
     });
 
+    await prepareReceiptSnapshot(req.scope, cartId);
     const { errors, result } = await completeCartWorkflow(req.scope).run({
       input: { id: cartId },
       context: { transactionId: cartId },

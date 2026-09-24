@@ -1,3 +1,4 @@
+import { resolveOrderReceiptEmail } from "../receipt-email-orders"
 import { fulfillmentDates, formatFulfillmentDate } from "../fulfillment-dates";
 import { STRAPI_MODULE } from "../../modules/strapi"
 import StrapiModuleService from "../../modules/strapi/service"
@@ -7,6 +8,7 @@ type Container = { resolve: (key: string) => any }
 
 const ORDER_FIELDS = [
   "id",
+  "customer_id",
   "display_id",
   "email",
   "currency_code",
@@ -703,6 +705,7 @@ const variantTitleForItem = (
 
 export type OrderForEmail = {
   id: string
+  customer_id?: string | null
   display_id?: number | string
   email: string
   currency_code: string
@@ -773,7 +776,9 @@ export const fetchOrderForEmail = async (
     filters: { id: orderId },
   })
   const order = orders?.[0] as Record<string, unknown> | undefined
-  return order ? normalizeOrderForEmail(await hydrateStrapiTitles(container, order)) : null
+  if (!order) return null
+  const recipient = await resolveOrderReceiptEmail(container, order)
+  return normalizeOrderForEmail(await hydrateStrapiTitles(container, { ...order, email: recipient }))
 }
 
 export const normalizeOrderForEmail = (

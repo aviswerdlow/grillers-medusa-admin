@@ -1,3 +1,4 @@
+import { prepareReceiptEmailCompletion } from "./middlewares/receipt-email"
 import {
   authenticate,
   defineMiddlewares,
@@ -638,6 +639,16 @@ export default defineMiddlewares({
     { matcher: "/store/grillers/checkout/place-order", method: ["POST"], middlewares: [guardCompletedCart] },
     { matcher: "/store/gp-inventory/availability", method: ["POST"], middlewares: [guardInventoryVariants] },
     { matcher: "/store/gp-inventory/resolution", method: ["POST"], middlewares: [guardInventoryResolution] },
+    {
+      matcher: "/store/customers/me/receipt-email",
+      method: ["GET", "POST"],
+      middlewares: [authenticate("customer", ["session", "bearer"])],
+    },
+    {
+      matcher: "/store/carts/:id/complete",
+      method: ["POST"],
+      middlewares: [prepareReceiptEmailCompletion],
+    },
     { matcher: "/store/*", middlewares: [hideShippingInternals] },
     { matcher: "/store/carts/:id/complete", method: ["POST"], middlewares: [prepareNativeShippingAcceptance] },
     {
