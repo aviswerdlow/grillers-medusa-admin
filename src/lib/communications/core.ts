@@ -8,6 +8,11 @@ import { emitOpsAlert } from "../ops-alert"
 import { isInSendBlackout } from "./hebrew-calendar"
 import { instrumentEmailHtml } from "./links"
 import { primaryContactEnabled, hasPrimaryContactState } from "../customer-contact-rollout"
+import {
+  approvedEssentialEmailDuringBlackout,
+  ESSENTIAL_EMAIL_BLACKOUT_POLICY_VERSION,
+  observanceSendPolicyEnabled,
+} from "./observance-send-policy"
 
 type KnexLike = any
 
@@ -857,10 +862,29 @@ export async function recordCommunicationEvent(
     updated_at: now,
   }
 
-  await db("gp_communication_event")
+  const insert = db("gp_communication_event")
     .insert(row)
     .onConflict(db.raw('("event_id") where "deleted_at" is null'))
     .ignore()
+  if (eventId.startsWith("postmark-webhook:")) {
+    const inserted =
+      typeof insert.returning === "function"
+        ? await insert.returning("id")
+        : await insert
+    if (Array.isArray(inserted) && inserted.length === 0) {
+      // Another callback won the event-id race. Only that callback fans out.
+      const winner = await db("gp_communication_event")
+        .whereNull("deleted_at")
+        .where("event_id", eventId)
+        .first()
+      if (!winner) {
+        throw new Error("Postmark event conflict has no visible winner")
+      }
+      return winner
+    }
+  } else {
+    await insert
+  }
 
   try {
     const { writeEventDestinations } = await import("./destinations.js")
@@ -1119,20 +1143,22 @@ export async function sendTrackedEmail(
     }
   }
 
-  // PLATFORM RULE — no operator override: marketing and lifecycle email
-  // never sends during Shabbat/Yom Tov (business clock, Atlanta).
-  // Transactional receipts are customer-triggered and stay unblocked.
+  // During the approved observance policy, only the reviewed, necessary
+  // account/order templates may cross the blackout. The switch defaults off
+  // until the durable deferral paths and production send owners are ready.
   // Deferred is NOT a failure: callers reschedule at deferUntil; nothing
   // is logged to gp_message_log so the retry sends cleanly.
   // Gated on PURPOSE as well as stream: cart-recovery flows ride the
   // transactional Postmark stream for inbox placement but are still
   // marketing (marketing_1to1) — stream is a deliverability choice, not
   // a semantic classification.
-  if (
+  const observancePolicy = observanceSendPolicyEnabled()
+  const blackoutApplies =
     input.stream === "broadcast" ||
     input.stream === "lifecycle" ||
-    requiresMarketingConsent(purpose)
-  ) {
+    requiresMarketingConsent(purpose) ||
+    (observancePolicy && !approvedEssentialEmailDuringBlackout(input, purpose))
+  if (blackoutApplies) {
     const blackout = isInSendBlackout(now)
     if (blackout.blocked) {
       await recordCommunicationEvent(db, {
@@ -1150,6 +1176,9 @@ export async function sendTrackedEmail(
           topic: input.topic,
           reason: blackout.reason || "shabbat_blackout",
           defer_until: blackout.until ? blackout.until.toISOString() : null,
+          policy_version: observancePolicy
+            ? ESSENTIAL_EMAIL_BLACKOUT_POLICY_VERSION
+            : null,
         },
         context: experimentContext
           ? { experiment_context: experimentContext }
@@ -1522,15 +1551,55 @@ export async function requestPreferencesLink(
   })
 }
 
+function stableWebhookPayload(value: any): any {
+  if (Array.isArray(value)) return value.map(stableWebhookPayload)
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, stableWebhookPayload(value[key])])
+    )
+  }
+  return value
+}
+
+export function postmarkWebhookEventId(
+  payload: Record<string, any>,
+  traceId?: string
+): string {
+  const trace = typeof traceId === "string" ? traceId.trim() : ""
+  const identity = trace
+    ? `trace:${trace}`
+    : `payload:${JSON.stringify(stableWebhookPayload(payload))}`
+  return `postmark-webhook:${crypto.createHash("sha256").update(identity).digest("hex")}`
+}
+
+export function isHardPostmarkBounce(payload: Record<string, any>): boolean {
+  if (payload.TypeCode !== undefined && payload.TypeCode !== null) {
+    const code = Number(payload.TypeCode)
+    if (Number.isFinite(code)) return code === 1
+  }
+  return String(payload.Type || "").toLowerCase() === "hardbounce"
+}
+
 export async function updatePostmarkMessageState(
   db: KnexLike,
-  payload: Record<string, any>
+  payload: Record<string, any>,
+  traceId?: string
 ): Promise<Record<string, any> | null> {
+  const eventId = postmarkWebhookEventId(payload, traceId)
+  const priorEvent = await db("gp_communication_event")
+    .whereNull("deleted_at")
+    .where("event_id", eventId)
+    .first()
+  if (priorEvent) return null
+
   const messageId = payload.MessageID || payload.MessageId || payload.MessageID__c
   const recordType = String(payload.RecordType || payload.Type || "").toLowerCase()
   const email = payload.Recipient || payload.Email || payload.email
   const now = payload.ReceivedAt ? asDate(payload.ReceivedAt) : new Date()
   const patch: Record<string, any> = { updated_at: new Date() }
+  const hardBounce = recordType.includes("bounce") && isHardPostmarkBounce(payload)
 
   if (recordType.includes("delivery")) {
     patch.status = "delivered"
@@ -1540,7 +1609,9 @@ export async function updatePostmarkMessageState(
   } else if (recordType.includes("click")) {
     patch.clicked_at = now
   } else if (recordType.includes("bounce")) {
-    patch.status = "bounced"
+    // Soft/transient bounces are not permanent delivery failures. Keep the
+    // prior send state so the same business event cannot resend automatically.
+    if (hardBounce) patch.status = "bounced"
     patch.bounced_at = now
   } else if (recordType.includes("spam")) {
     patch.status = "complained"
@@ -1580,7 +1651,7 @@ export async function updatePostmarkMessageState(
     })
   }
 
-  if (recordType.includes("bounce")) {
+  if (hardBounce) {
     await recordSuppression(db, {
       email: email || message?.email,
       scope: "hard_bounce",
@@ -1623,6 +1694,7 @@ export async function updatePostmarkMessageState(
               : `email_${recordType || "webhook"}`
 
   await recordCommunicationEvent(db, {
+    event_id: eventId,
     event_name: canonicalEventName,
     email: email || message?.email,
     profile_id: message?.profile_id || null,
@@ -1630,7 +1702,9 @@ export async function updatePostmarkMessageState(
     flow_id: message?.flow_id || null,
     template_key: message?.template_key || null,
     message_id: message?.id || null,
-    properties: payload,
+    properties: recordType.includes("bounce")
+      ? { ...payload, bounce_classification: hardBounce ? "hard" : "non_hard" }
+      : payload,
   })
 
   return message
