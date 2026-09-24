@@ -190,7 +190,7 @@ describe("buildShippingForecastEvent on the REAL order", () => {
 
     let payload: ReturnType<typeof buildShippingForecastEvent>
     expect(() => {
-      payload = buildShippingForecastEvent(realOrder as any, ENV_PACKAGING_ON)
+      payload = buildShippingForecastEvent(realOrder as any)
     }).not.toThrow()
 
     expect(payload!).not.toBeNull()
@@ -200,13 +200,12 @@ describe("buildShippingForecastEvent on the REAL order", () => {
     expect(p.ship_state).toBe("MA")
     expect(p.dest_postal_code).toBe("02453")
     expect(p.route_market).toBe("national")
-    // charged == method.amount, decomposed into freight + packaging
+    // A legacy order retains its observed charge but has no accepted packing snapshot.
     expect(p.charged_shipping).toBe(164.49)
-    expect(p.packaging_cost).toBeGreaterThan(0)
-    expect(Math.round((p.freight + p.packaging_cost) * 100) / 100).toBe(
-      p.charged_shipping
-    )
-    expect(p.packaging_included_in_charge).toBe(true)
+    expect(p.estimate_status).toBe("unavailable_legacy_snapshot")
+    expect(p.packaging_cost).toBeNull()
+    expect(p.freight).toBeNull()
+    expect(p.packaging_included_in_charge).toBeNull()
   })
 
   it("regression: an opaque shipping_option_id must NOT shadow a UPS method.name", () => {
@@ -225,7 +224,7 @@ describe("buildShippingForecastEvent on the REAL order", () => {
       ],
       shipping_total: 42,
     }
-    const payload = buildShippingForecastEvent(order, ENV_PACKAGING_ON)
+    const payload = buildShippingForecastEvent(order)
     expect(payload).not.toBeNull()
     expect(payload!.properties.service).toBe("GROUND")
   })
@@ -460,7 +459,7 @@ describe("shipping_forecast edge cases (Finding #5)", () => {
       ],
       shipping_total: 0,
     }
-    expect(buildShippingForecastEvent(order, ENV_PACKAGING_ON)).toBeNull()
+    expect(buildShippingForecastEvent(order)).toBeNull()
   })
 
   it("plant-pickup order: no UPS service code → no forecast", () => {
@@ -477,7 +476,7 @@ describe("shipping_forecast edge cases (Finding #5)", () => {
       ],
       shipping_total: 0,
     }
-    expect(buildShippingForecastEvent(order, ENV_PACKAGING_ON)).toBeNull()
+    expect(buildShippingForecastEvent(order)).toBeNull()
   })
 
   it("gift-card-only order with NO physical line items on a UPS method emits no forecast", () => {
@@ -497,19 +496,16 @@ describe("shipping_forecast edge cases (Finding #5)", () => {
       ],
       shipping_total: 12,
     }
-    expect(buildShippingForecastEvent(order, ENV_PACKAGING_ON)).toBeNull()
+    expect(buildShippingForecastEvent(order)).toBeNull()
   })
 
-  it("zero-weight FOOD order (no per-item weight metadata) STILL emits a forecast with the 1-box packaging floor", () => {
-    // Critical real-order behavior: order 135 has 9 food lines but ZERO weight
-    // metadata, so estimated_weight_lb = 0. The packaging estimator floors at one
-    // box, so the forecast MUST still be emitted (we must not suppress the very
-    // orders this subscriber exists to reconcile).
-    const payload = buildShippingForecastEvent(realOrder as any, ENV_PACKAGING_ON)
+  it("legacy food orders emit unavailable estimates instead of invented zero weight and one box", () => {
+    const payload = buildShippingForecastEvent(realOrder as any)
     expect(payload).not.toBeNull()
-    expect(payload!.properties.estimated_weight_lb).toBe(0)
-    expect(payload!.properties.boxes).toBeGreaterThanOrEqual(1)
-    expect(payload!.properties.packaging_cost).toBeGreaterThan(0)
+    expect(payload!.properties.estimate_status).toBe("unavailable_legacy_snapshot")
+    expect(payload!.properties.estimated_weight_lb).toBeNull()
+    expect(payload!.properties.boxes).toBeNull()
+    expect(payload!.properties.packaging_cost).toBeNull()
   })
 
   it("multi-shipment: forecast uses the LAST shipping method", () => {
@@ -528,7 +524,7 @@ describe("shipping_forecast edge cases (Finding #5)", () => {
         (realOrder as any).shipping_methods[0], // UPS Overnight, amount 164.49
       ],
     }
-    const payload = buildShippingForecastEvent(order, ENV_PACKAGING_ON)
+    const payload = buildShippingForecastEvent(order)
     expect(payload).not.toBeNull()
     expect(payload!.properties.service).toBe("OVERNIGHT")
     expect(payload!.properties.charged_shipping).toBe(164.49)

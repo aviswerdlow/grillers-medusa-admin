@@ -1,3 +1,6 @@
+import { shippingLine, packingConfig } from "../../../lib/__tests__/__fixtures__/shipping-inputs"
+import { PHYSICAL_WEIGHT_CONTRACT } from "../../../lib/shipping-weights"
+import { getPackagingConfig } from "../../../lib/packaging-cost-strapi"
 import { MedusaError } from "@medusajs/framework/utils"
 import GrillersFulfillmentProviderService from "../service"
 import { emitOpsAlert } from "../../../lib/ops-alert"
@@ -31,8 +34,11 @@ const forecastEnv = {
   GRILLERS_SHIPPING_FORECAST_ENABLED: "true",
 }
 
+jest.mock("../../../lib/packaging-cost-strapi", () => ({ getPackagingConfig: jest.fn() }))
+
 function service() {
-  return new GrillersFulfillmentProviderService({ logger } as any, {})
+  const query={graph:jest.fn(async ({filters})=>({data:filters.id.map((id:string)=>({...shippingLine().variant,id}))}))}
+  return new GrillersFulfillmentProviderService({ logger, query } as any, {})
 }
 
 function setWwexEnv() {
@@ -61,6 +67,7 @@ function writeConstantForecastModel(amount: number) {
     JSON.stringify({
       status: "trained",
       schema_version: "shipping_cost_forecast_v2",
+      weight_input_contract: PHYSICAL_WEIGHT_CONTRACT,
       generated_at: "2026-06-16T00:00:00.000Z",
       smearing_factor: 1,
       features: {
@@ -97,6 +104,7 @@ const forecastCart = {
   shipping_address: { province: "VA", postal_code: "23219" },
   items: [
     {
+      variant_id: "variant_fixture",
       unit_price: 100,
       quantity: 2,
       metadata: { pricing_mode: "per lb", estimated_weight_lb: 1.2 },
@@ -110,7 +118,22 @@ describe("GrillersFulfillmentProviderService", () => {
     jest.clearAllMocks()
     clearWwexEnv()
     clearForecastEnv()
+    ;(getPackagingConfig as jest.Mock).mockResolvedValue(packingConfig())
   })
+
+  it("blocks unavailable physical inputs before forecast, carrier or price-table fallback",async()=>{
+    const svc=service(); global.fetch=jest.fn();
+    await expect(svc.calculatePrice({service_code:"GROUND"} as any,{items:[{quantity:1}],shipping_address:{postal_code:"30340"}} as any,{} as any)).rejects.toThrow("item-weight or packing review");
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(emitOpsAlert).toHaveBeenCalledWith(expect.objectContaining({alertKind:"shipping_inputs_unavailable"}));
+  });
+
+  it("replaces caller packing data with the reviewed server plan at selection",async()=>{
+    const svc=service();
+    const result=await svc.validateFulfillmentData({service_code:"GROUND"},{service_code:"PICKUP",packages:[{packed_weight_lb:1}],shipping_packing_plan_v1:{fake:true}},{items:[shippingLine()],shipping_address:{postal_code:"30340"}});
+    expect(result.service_code).toBe("GROUND");expect(result.packages).toBeUndefined();
+    expect(result.shipping_packing_plan_v1.weights.physicalWeightLb).toBe(1.5);
+  });
 
   it("exposes UPS Ground, 3 Day Select, 2nd Day Air, and Overnight services", async () => {
     const options = await service().getFulfillmentOptions()
@@ -142,7 +165,7 @@ describe("GrillersFulfillmentProviderService", () => {
       { service_code: "3_DAY_SELECT" } as any,
       {
         shipping_address: { postal_code: "90048" },
-        items: [{ unit_price: 100, quantity: 1, metadata: {} }],
+        items: [{ variant_id: "variant_fixture", unit_price: 100, quantity: 1, metadata: {} }],
       } as any,
       {} as any
     )
@@ -178,7 +201,7 @@ describe("GrillersFulfillmentProviderService", () => {
       { service_code: "ATLANTA_DELIVERY" } as any,
       {
         shipping_address: { postal_code: "30340", province: "GA" },
-        items: [{ unit_price: 100, quantity: 1, metadata: {} }],
+        items: [{ variant_id: "variant_fixture", unit_price: 100, quantity: 1, metadata: {} }],
       } as any,
       {} as any
     )
@@ -255,7 +278,7 @@ describe("GrillersFulfillmentProviderService", () => {
           last_name: "Customer",
           phone: "2148798521",
         },
-        items: [{ unit_price: 100, quantity: 1, metadata: {} }],
+        items: [{ variant_id: "variant_fixture", unit_price: 100, quantity: 1, metadata: {} }],
       } as any,
       {} as any
     )
@@ -310,8 +333,8 @@ describe("GrillersFulfillmentProviderService", () => {
           phone: "2148798521",
         },
         items: [
-          { unit_price: 100, quantity: 1, metadata: {} },
-          { unit_price: 200, quantity: 2, metadata: {} },
+          { variant_id: "variant_fixture", unit_price: 100, quantity: 1, metadata: {} },
+          { variant_id: "variant_fixture", unit_price: 200, quantity: 2, metadata: {} },
         ],
       } as any,
       {} as any
@@ -504,7 +527,7 @@ describe("GrillersFulfillmentProviderService", () => {
       { service_code: "2ND_DAY_AIR" } as any,
       {
         shipping_address: { postal_code: "90048" },
-        items: [{ unit_price: 100, quantity: 1, metadata: {} }],
+        items: [{ variant_id: "variant_fixture", unit_price: 100, quantity: 1, metadata: {} }],
       } as any,
       {} as any
     )
@@ -519,7 +542,7 @@ describe("GrillersFulfillmentProviderService", () => {
       { service_code: "GROUND" } as any,
       {
         shipping_address: { postal_code: "30340" },
-        items: [{ unit_price: 100, quantity: 1, metadata: {} }],
+        items: [{ variant_id: "variant_fixture", unit_price: 100, quantity: 1, metadata: {} }],
       } as any,
       {} as any
     )
@@ -561,7 +584,7 @@ describe("GrillersFulfillmentProviderService", () => {
       { service_code: "GROUND" } as any,
       {
         shipping_address: { postal_code: "30340", province: "GA" },
-        items: [{ unit_price: 100, quantity: 1, metadata: {} }],
+        items: [{ variant_id: "variant_fixture", unit_price: 100, quantity: 1, metadata: {} }],
       } as any,
       {} as any
     )

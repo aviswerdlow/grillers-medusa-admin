@@ -6,6 +6,10 @@ import {
   resetPackagingOverridesCache,
 } from "../packaging-cost-strapi"
 
+it("retains the reviewed policy, external dimensions and separate fit calibration",()=>{
+  expect(packagingOverridesFromColdChainSetting({PackingPolicyVersion:"review-v1",PackagingBoxes:[{PackagingTier:"m330",LengthIn:18,WidthIn:15,HeightIn:13,MaxFitUnits:12,FitRuleId:"fit-v1"}]})).toMatchObject({policyVersion:"review-v1",packagingBoxes:[{lengthIn:18,widthIn:15,heightIn:13,maxFitUnits:12,fitRuleId:"fit-v1"}]})
+})
+
 describe("resolvePackagingConfig — layering default < strapi < env", () => {
   it("defaults to Peter's numbers with no strapi/env", () => {
     const c = resolvePackagingConfig({})

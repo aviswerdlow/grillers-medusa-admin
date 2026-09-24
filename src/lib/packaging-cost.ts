@@ -41,6 +41,11 @@ export type ContinuousPackagingBoxRule = {
   maxTransitDays: number | null;
   maxTotalWeightLb: number;
   tareWeightLb: number;
+  lengthIn?: number | null;
+  widthIn?: number | null;
+  heightIn?: number | null;
+  maxFitUnits?: number | null;
+  fitRuleId?: string | null;
 };
 
 export type ContinuousPackagingConfig = {
@@ -49,6 +54,7 @@ export type ContinuousPackagingConfig = {
 };
 
 export type PackagingCostConfig = {
+  policyVersion?: string | null;
   model: PackagingCostModel;
   continuous: ContinuousPackagingConfig | null;
   dryIceUsdPerLb: number;
@@ -120,6 +126,7 @@ export function transitDaysForOrder(
 /** Reads optional env overrides so costs can be tuned without a redeploy. */
 /** Editable overrides sourced from Strapi cold-chain-setting (the costs that drift). */
 export type PackagingCostOverrides = {
+  policyVersion?: string | null;
   model?: string | null;
   dryIceUsdPerLb?: number | string | null;
   boxCost?: {
@@ -141,6 +148,11 @@ export type PackagingCostOverrides = {
     maxTotalWeightLb?: number | string | null;
     tareWeightLb?: number | string | null;
     active?: boolean | null;
+    lengthIn?: number | string | null;
+    widthIn?: number | string | null;
+    heightIn?: number | string | null;
+    maxFitUnits?: number | string | null;
+    fitRuleId?: string | null;
   }>;
 };
 
@@ -208,6 +220,11 @@ function continuousConfigFromOverrides(
       maxTransitDays,
       maxTotalWeightLb,
       tareWeightLb,
+      ...(row.lengthIn !== undefined ? { lengthIn: positive(row.lengthIn) } : {}),
+      ...(row.widthIn !== undefined ? { widthIn: positive(row.widthIn) } : {}),
+      ...(row.heightIn !== undefined ? { heightIn: positive(row.heightIn) } : {}),
+      ...(row.maxFitUnits !== undefined ? { maxFitUnits: positive(row.maxFitUnits) } : {}),
+      ...(row.fitRuleId !== undefined ? { fitRuleId: row.fitRuleId } : {}),
     });
   }
   const tiers = new Set(boxes.map((box) => box.boxTier));
@@ -264,6 +281,7 @@ export function resolvePackagingConfig(
       ? "continuous_weight"
       : "legacy_tiered";
   return {
+    ...(s.policyVersion !== undefined ? { policyVersion: s.policyVersion } : {}),
     model,
     continuous: model === "continuous_weight" ? continuous : null,
     dryIceUsdPerLb: pick("GRILLERS_DRY_ICE_USD_PER_LB", s.dryIceUsdPerLb, d.dryIceUsdPerLb),

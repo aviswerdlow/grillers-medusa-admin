@@ -64,10 +64,16 @@ export function packagingOverridesFromColdChainSetting(
           maxTotalWeightLb: value.MaxTotalWeightLb ?? null,
           tareWeightLb: value.TareWeightLb ?? null,
           active: value.Active ?? null,
+          ...(value.LengthIn !== undefined ? { lengthIn: value.LengthIn } : {}),
+          ...(value.WidthIn !== undefined ? { widthIn: value.WidthIn } : {}),
+          ...(value.HeightIn !== undefined ? { heightIn: value.HeightIn } : {}),
+          ...(value.MaxFitUnits !== undefined ? { maxFitUnits: value.MaxFitUnits } : {}),
+          ...(value.FitRuleId !== undefined ? { fitRuleId: value.FitRuleId } : {}),
         };
       })
     : [];
   return {
+    ...(s?.PackingPolicyVersion !== undefined ? { policyVersion: s.PackingPolicyVersion } : {}),
     model: s?.PackagingCostModel ?? null,
     dryIceUsdPerLb: s?.DryIcePricePerLb ?? null,
     boxCost: {

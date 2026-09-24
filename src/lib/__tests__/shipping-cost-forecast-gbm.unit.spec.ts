@@ -1,3 +1,4 @@
+import { shippingLine } from "./__fixtures__/shipping-inputs"
 import fs from "node:fs"
 import path from "node:path"
 
@@ -43,17 +44,12 @@ describe("GBM shipping forecast (v3)", () => {
 
   it("computes the destination zone from the ZIP and produces a sane per-service charge", () => {
     const cart = (service: string, province: string, postal: string) =>
-      shippingForecastInputFromFulfillmentData(service, {
-        shipping_address: { province_code: province, postal_code: postal },
-        items: [
-          { unit_price: 60, quantity: 3, metadata: { pricing_mode: "per lb", estimated_weight_lb: 4 } },
-          { unit_price: 40, quantity: 2, metadata: { pricing_mode: "per pack", estimated_weight_lb: 3 } },
-        ],
-      })!
+      ({service,ship_state:province.replace("us-", "").toUpperCase(),ship_postal_code:postal,subtotal:260,line_count:2,unit_count:5,per_lb_line_count:1,fixed_line_count:1,unknown_pricing_line_count:0,estimated_product_weight_lb:18})
 
     const gaGround = evaluateGbm(MODEL as any, cart("GROUND", "us-ga", "30309"))
     const caOvernight = evaluateGbm(MODEL as any, cart("OVERNIGHT", "us-ca", "90024"))
 
+    // Preserve the historical feature vector; this is not approval of a new physical-mass model.
     // sane magnitudes and ordering: a local-ish Ground order is cheaper than a
     // cross-country Overnight order
     expect(gaGround).toBeGreaterThan(5)
@@ -69,7 +65,7 @@ describe("GBM shipping forecast (v3)", () => {
   it("falls back to a default zone for an unseen ZIP without throwing", () => {
     const input = shippingForecastInputFromFulfillmentData("GROUND", {
       shipping_address: { province_code: "us-ak", postal_code: "99950" },
-      items: [{ unit_price: 50, quantity: 1, metadata: {} }],
+      items: [shippingLine({unit_price:50})],
     })!
     expect(() => evaluateGbm(MODEL as any, input)).not.toThrow()
     expect(evaluateGbm(MODEL as any, input)).toBeGreaterThanOrEqual(0)

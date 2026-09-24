@@ -1,4 +1,5 @@
 import fs from "node:fs"
+import { PHYSICAL_WEIGHT_CONTRACT, resolveShippingWeights, type ResolvedShippingWeights, type ShippingLine } from "./shipping-weights"
 
 type LineItemLike = {
   unit_price?: number | null
@@ -28,6 +29,7 @@ type CommonFallbacks = {
 
 // v2: ridge regression on log1p(cost) with Duan smearing.
 type LinearForecastModel = {
+  weight_input_contract?: string
   status: "trained"
   schema_version: typeof SCHEMA_VERSION
   generated_at?: string
@@ -49,6 +51,7 @@ type GbmColumn =
   | { kind: "cat"; feature: string; level: string }
 type GbmNode = { f: number; t: number; l: number; r: number; leaf: boolean; v: number; ml: boolean }
 type GbmForecastModel = {
+  weight_input_contract?: string
   status: "trained"
   schema_version: typeof GBM_SCHEMA
   model_type: "hist_gbm"
@@ -71,6 +74,7 @@ function isGbmModel(model: ShippingCostForecastModel): model is GbmForecastModel
 }
 
 export type ShippingCostForecastInput = {
+  weight_input_contract?: string
   service: string
   ship_state?: string | null
   ship_postal_code?: string | null
@@ -223,28 +227,10 @@ function pricingMode(item: LineItemLike): "fixed" | "per_lb" | "unknown" {
   return "unknown"
 }
 
-function estimateLineWeight(item: LineItemLike): number {
-  const quantity = toNumber(item.quantity) || 1
-  const metadataWeight = toNumber(
-    metadataValue(item, [
-      "estimated_weight_lb",
-      "avg_pack_weight_lb",
-      "average_pack_weight_lb",
-      "approx_pack_weight_lb",
-      "pack_weight_lb",
-    ])
-  )
-  if (metadataWeight > 0) return metadataWeight * quantity
-  const metadataOunces = toNumber(
-    metadataValue(item, ["estimated_weight_oz", "avg_pack_weight_oz", "pack_weight_oz"])
-  )
-  if (metadataOunces > 0) return (metadataOunces / 16) * quantity
-  return 0
-}
-
 export function shippingForecastInputFromFulfillmentData(
   serviceCode: unknown,
-  data: Record<string, any>
+  data: Record<string, any>,
+  options: { persistedOrder?: boolean; resolvedWeights?: ResolvedShippingWeights } = {}
 ): ShippingCostForecastInput | null {
   const items: LineItemLike[] = Array.isArray(data.items) ? data.items : []
   if (!items.length) return null
@@ -258,7 +244,7 @@ export function shippingForecastInputFromFulfillmentData(
     },
     { fixed: 0, per_lb: 0, unknown: 0 }
   )
-  const estimatedWeight = items.reduce((sum, item) => sum + estimateLineWeight(item), 0)
+  const weights = options.resolvedWeights ?? resolveShippingWeights(items as ShippingLine[], options)
   const shippingAddress = data.shipping_address || {}
   return {
     service: normalizeService(serviceCode || data.service_code),
@@ -278,7 +264,8 @@ export function shippingForecastInputFromFulfillmentData(
     fixed_line_count: pricingCounts.fixed,
     per_lb_line_count: pricingCounts.per_lb,
     unknown_pricing_line_count: pricingCounts.unknown,
-    estimated_product_weight_lb: estimatedWeight,
+    estimated_product_weight_lb: weights.physicalWeightLb,
+    weight_input_contract: PHYSICAL_WEIGHT_CONTRACT,
     month: String((data.as_of_month as string) || currentMonth()),
   }
 }
@@ -428,6 +415,10 @@ export function forecastShippingCost(
   input: ShippingCostForecastInput
 ): ShippingCostForecastResult | null {
   if (!model || model.status !== "trained") return null
+  // Historical v2/v3 training derived weight from invoice quantity/rate/copy.
+  // New reviewed physical or SAM proxy inputs are not that same feature contract.
+  // A model needs an explicitly validated contract before consuming the new input.
+  if (input.weight_input_contract && model.weight_input_contract !== input.weight_input_contract) return null
 
   if (isGbmModel(model)) {
     const predicted = evaluateGbm(model, input) // mean cost; the markup buffer is applied at charge time

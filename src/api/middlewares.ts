@@ -21,6 +21,7 @@ import { opsErrorHandler } from "./middlewares/ops-error-handler"
 import { protectCustomerStaffAuthority } from "./middlewares/customer-staff-authority"
 import { enforceStaffCartAuthority } from "./middlewares/staff-cart-authority"
 import { bindFulfillmentAudit, enforceStaffCapabilities, enforceStaffSessionEpoch, protectAdminCustomerAuthority, publishAdminStaffAccess, publishCurrentStaffAccess } from "./middlewares/staff-capabilities"
+import { hideShippingInternals, prepareNativeShippingAcceptance } from "./middlewares/shipping-inputs"
 import {
   rawStripeWebhookBody,
   stripeSignatureHeader,
@@ -637,6 +638,8 @@ export default defineMiddlewares({
     { matcher: "/store/grillers/checkout/place-order", method: ["POST"], middlewares: [guardCompletedCart] },
     { matcher: "/store/gp-inventory/availability", method: ["POST"], middlewares: [guardInventoryVariants] },
     { matcher: "/store/gp-inventory/resolution", method: ["POST"], middlewares: [guardInventoryResolution] },
+    { matcher: "/store/*", middlewares: [hideShippingInternals] },
+    { matcher: "/store/carts/:id/complete", method: ["POST"], middlewares: [prepareNativeShippingAcceptance] },
     {
       matcher: "/admin/*",
       middlewares: [authenticate("user", ["session", "bearer", "api-key"]), enforceStaffCapabilities],
