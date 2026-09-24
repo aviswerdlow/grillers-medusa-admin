@@ -1,4 +1,7 @@
 import mysql from "mysql2/promise"
+import fs from "node:fs"
+import crypto from "node:crypto"
+import path from "node:path"
 import { ExecArgs } from "@medusajs/framework/types"
 import {
   ContainerRegistrationKeys,
@@ -733,7 +736,7 @@ function normalizeLegacyCustomer(row: LegacyCustomerRow) {
 function buildLegacyCustomerQuery(
   limit: number,
   offset: number,
-  options: { onlyNoPassword?: boolean } = {}
+  options: { onlyNoPassword?: boolean; ids?: string[] } = {}
 ) {
   const base = `
     SELECT
@@ -744,6 +747,7 @@ function buildLegacyCustomerQuery(
     FROM CUSTOMERS
     WHERE NULLIF(TRIM(EMAIL), '') IS NOT NULL
       ${options.onlyNoPassword ? "AND NULLIF(TRIM(PASSWORD), '') IS NULL" : ""}
+      ${options.ids?.length ? "AND ID IN (?)" : ""}
     ORDER BY ID
   `
 
@@ -772,6 +776,78 @@ export default async function importLegacyCustomers({ container }: ExecArgs) {
   const requestedBatchSize = getNumberArg(args, ["batch-size"], 500)
   const batchSize = Math.max(requestedBatchSize || 500, 1)
   const envFile = getStringArg(args, ["env-file", "legacy-env-file"])
+  const idsFile = getStringArg(args, ["ids-file"])
+  const manifestOutput = getStringArg(args, ["manifest-output"])
+  const b0Manifest = getStringArg(args, ["b0-manifest"])
+  const ruleManifest = getStringArg(args, ["rule-manifest"])
+  const expectedIdsSha256 = getStringArg(args, ["expected-ids-sha256"])
+  const expectedCount = getNumberArg(args, ["expected-count"], 0)
+
+  if (idsFile && (apply || updateExistingPasswords || onlyNoPassword || limit || offset)) {
+    throw new Error("--ids-file is dry-run only and cannot be combined with apply, password updates, or pagination")
+  }
+  if (idsFile && (!manifestOutput || !b0Manifest || !ruleManifest || !expectedIdsSha256 || !expectedCount)) {
+    throw new Error("--ids-file requires manifest output, B0 and rule manifests, expected ID hash, and expected count")
+  }
+  if (!idsFile && (manifestOutput || b0Manifest || ruleManifest || expectedIdsSha256 || expectedCount)) {
+    throw new Error("B0 receipt flags require --ids-file")
+  }
+
+  const selectedIds = idsFile
+    ? fs.readFileSync(idsFile, "utf8").trim().split(/\r?\n/)
+    : null
+  const sha256File = (file: string) =>
+    crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")
+  let b0Evidence: {
+    sourceSnapshotUtc: string
+    targetSnapshotUtc: string
+    sourceSha256: string
+    reviewSha256: string
+  } | null = null
+  if (selectedIds) {
+    if (selectedIds.length !== expectedCount ||
+        new Set(selectedIds).size !== selectedIds.length ||
+        selectedIds.some((id) => !/^\d+$/.test(id))) {
+      throw new Error("protected ID list count, uniqueness, or format mismatch")
+    }
+    const actualHash = sha256File(idsFile!)
+    if (actualHash !== expectedIdsSha256) {
+      throw new Error("protected ID list SHA-256 mismatch")
+    }
+
+    const b0 = JSON.parse(fs.readFileSync(b0Manifest!, "utf8"))
+    const rule = JSON.parse(fs.readFileSync(ruleManifest!, "utf8"))
+    const b0Sha256 = sha256File(b0Manifest!)
+    if (rule.b0_manifest_sha256 !== b0Sha256) {
+      throw new Error("rule manifest does not match the frozen B0 manifest")
+    }
+    const sourceFile = path.join(path.dirname(b0Manifest!), b0.source.private_file)
+    const reviewFile = path.join(path.dirname(ruleManifest!), rule.private_review_file)
+    if (sha256File(sourceFile) !== b0.source.sha256 ||
+        sha256File(reviewFile) !== rule.private_review_sha256) {
+      throw new Error("frozen B0 source or R1 review hash mismatch")
+    }
+    const sourceIds = new Set(
+      fs.readFileSync(sourceFile, "utf8").trim().split(/\r?\n/)
+        .map((line) => String(JSON.parse(line).source_id))
+    )
+    const reviewedR1Ids = new Set(
+      fs.readFileSync(reviewFile, "utf8").trim().split(/\r?\n/)
+        .slice(1)
+        .filter((line) => line.split(",")[2] === "R1_guarded_new_customer")
+        .map((line) => line.split(",")[1])
+    )
+    if (reviewedR1Ids.size !== selectedIds.length ||
+        selectedIds.some((id) => !sourceIds.has(id) || !reviewedR1Ids.has(id))) {
+      throw new Error("selected IDs differ from the exact reviewed B0 R1 set")
+    }
+    b0Evidence = {
+      sourceSnapshotUtc: b0.source.snapshot_utc,
+      targetSnapshotUtc: b0.target.snapshot_utc,
+      sourceSha256: b0.source.sha256,
+      reviewSha256: rule.private_review_sha256,
+    }
+  }
 
   const loadedEnv = loadEnvFilesUntil([
     envFile,
@@ -804,7 +880,8 @@ export default async function importLegacyCustomers({ container }: ExecArgs) {
     const connection = await mysql.createConnection(legacyConnectionConfig)
     try {
       const [rows] = await connection.query(
-        buildLegacyCustomerQuery(pageLimit, currentOffset, { onlyNoPassword })
+        buildLegacyCustomerQuery(pageLimit, currentOffset, { onlyNoPassword, ids: selectedIds ?? undefined }),
+        selectedIds ? [selectedIds] : []
       )
       return rows as LegacyCustomerRow[]
     } finally {
@@ -822,12 +899,23 @@ export default async function importLegacyCustomers({ container }: ExecArgs) {
     addressRowsCreated: 0,
     failed: 0,
   }
+  const receiptRows: Array<Record<string, unknown>> = []
+
+  if (selectedIds) {
+    const readOnly = await db.raw("select current_setting('transaction_read_only') as read_only")
+    if (readOnly?.rows?.[0]?.read_only !== "on") {
+      throw new Error("B0 importer dry run requires a read-only PostgreSQL session")
+    }
+  }
 
   async function processLegacyCustomerRow(row: LegacyCustomerRow) {
     stats.seen += 1
     const legacy = normalizeLegacyCustomer(row)
     if (!legacy.emailLower) {
       stats.skippedInvalidEmail += 1
+      if (selectedIds) {
+        receiptRows.push({ legacy_customer_id: legacy.legacyCustomerId, outcome: "invalid_email" })
+      }
       return
     }
 
@@ -888,8 +976,21 @@ export default async function importLegacyCustomers({ container }: ExecArgs) {
         customerId,
         apply,
       })
+      if (selectedIds) {
+        receiptRows.push({
+          legacy_customer_id: legacy.legacyCustomerId,
+          outcome: "dry_run",
+          customer_action: existing ? "would_match_existing" : "would_create",
+          existing_customer_id: customerId,
+          auth_status: auth.status,
+          address_status: addressResult.status,
+        })
+      }
     } catch (error) {
       stats.failed += 1
+      if (selectedIds) {
+        receiptRows.push({ legacy_customer_id: legacy.legacyCustomerId, outcome: "failed" })
+      }
       logger.error(
         `[legacy-customers] failed legacy_customer_id=${legacy.legacyCustomerId}: ${
           error instanceof Error ? error.message : String(error)
@@ -899,10 +1000,10 @@ export default async function importLegacyCustomers({ container }: ExecArgs) {
   }
 
   let currentOffset = offset
-  let remaining = limit > 0 ? limit : Number.POSITIVE_INFINITY
+  let remaining = selectedIds ? selectedIds.length : limit > 0 ? limit : Number.POSITIVE_INFINITY
 
   while (remaining > 0) {
-    const pageLimit = Math.min(batchSize, remaining)
+    const pageLimit = selectedIds ? 0 : Math.min(batchSize, remaining)
     const batch = await fetchLegacyCustomerBatch(pageLimit, currentOffset)
     if (!batch.length) {
       break
@@ -923,9 +1024,33 @@ export default async function importLegacyCustomers({ container }: ExecArgs) {
       })}`
     )
 
-    if (batch.length < pageLimit) {
+    if (selectedIds || batch.length < pageLimit) {
       break
     }
+  }
+
+  if (selectedIds) {
+    const seen = new Set(receiptRows.map((row) => String(row.legacy_customer_id)))
+    if (seen.size !== selectedIds.length || selectedIds.some((id) => !seen.has(id))) {
+      throw new Error("selected ID coverage mismatch; refusing to issue a complete B0 dry-run receipt")
+    }
+    const manifest = {
+      kind: "gp337_existing_importer_r1_dry_run",
+      created_at_utc: new Date().toISOString(),
+      writes: 0,
+      target_read_only: true,
+      selected_ids_sha256: expectedIdsSha256,
+      b0_manifest_sha256: sha256File(b0Manifest!),
+      rule_manifest_sha256: sha256File(ruleManifest!),
+      b0_source_sha256: b0Evidence!.sourceSha256,
+      b0_r1_review_sha256: b0Evidence!.reviewSha256,
+      b0_source_snapshot_utc: b0Evidence!.sourceSnapshotUtc,
+      b0_target_snapshot_utc: b0Evidence!.targetSnapshotUtc,
+      expected_ids: selectedIds.length,
+      stats,
+      rows: receiptRows.sort((a, b) => Number(a.legacy_customer_id) - Number(b.legacy_customer_id)),
+    }
+    fs.writeFileSync(manifestOutput!, JSON.stringify(manifest, null, 2) + "\n", { flag: "wx", mode: 0o600 })
   }
 
   logger.info(
