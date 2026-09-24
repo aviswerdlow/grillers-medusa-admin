@@ -70,6 +70,7 @@ function orderSmsConsent(overrides: Record<string, any> = {}) {
 
 function fakeDb(options: {
   count?: number
+  customerAfterClaim?: Record<string, any>
   messageRow?: Record<string, any> | null
   orderRows?: Record<string, any>[]
   suppressionRow?: Record<string, any> | null
@@ -113,6 +114,7 @@ function fakeDb(options: {
       return chain
     }
     chain.first = async () => {
+      if (table === "customer") return messageRow && options.customerAfterClaim ? options.customerAfterClaim : { metadata: {} }
       if (table === "gp_sms_program_suppression") return suppressionRow
       if (table === "gp_message_log") {
         return chain._filters.every(
@@ -539,6 +541,38 @@ describe("transactional Twilio transport", () => {
     )
     expect(state.messageRow?.metadata.trigger_event).toBe("order.placed")
     expect(state.messageRow?.metadata.fulfillment_id).toBeNull()
+  })
+
+  it("holds a queued historical order text after primary-number replacement", async () => {
+    process.env.TWILIO_TRANSACTIONAL_SMS_ENABLED = "true"
+    process.env.TWILIO_ACCOUNT_SID = `AC${"1".repeat(32)}`
+    process.env.TWILIO_AUTH_TOKEN = "synthetic"
+    process.env.TWILIO_TRANSACTIONAL_MESSAGING_SERVICE_SID = `MG${"2".repeat(32)}`
+    process.env.TWILIO_TRANSACTIONAL_FROM = "+18445550100"
+    process.env.MEDUSA_BACKEND_URL = "https://backend.example.com"
+    const state = fakeDb({
+      customerAfterClaim: {
+        metadata: { primary_contact_v1: { version: 1, phone: "4045550101" } },
+      },
+    })
+    global.fetch = jest.fn() as any
+    const result = await sendOrderShippedSms(
+      { resolve: () => state.db } as any,
+      {
+        order: { ...order(), customer_id: "cus_controlled" },
+        fulfillmentId: "ful_contact",
+        trackingNumber: "TRACK123",
+      }
+    )
+    expect(result).toEqual({ ok: true, skipped: true })
+    expect(global.fetch).not.toHaveBeenCalled()
+    expect(
+      state.writes.some(
+        (write) =>
+          write.data.error_message ===
+          "retired_customer_sms_destination_after_claim"
+      )
+    ).toBe(true)
   })
 
   it("excludes only its own deferred row from the six-per-order SMS cap", async () => {

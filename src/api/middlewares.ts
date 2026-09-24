@@ -36,6 +36,7 @@ import {
 } from "../lib/stripe-webhook-signature"
 
 import { filterPublicCatalog, guardNewCartItems, guardAddedCartItem, guardUpdatedCartItem, guardCompletedCart, guardCartPaymentSession, guardInventoryVariants, guardInventoryResolution } from "./middlewares/public-catalog"
+import { guardCustomerContactWrite, guardCustomerProvenanceCreate } from "./middlewares/customer-contact"
 
 const MIDDLEWARES_PATH = "src/api/middlewares.ts"
 
@@ -782,6 +783,21 @@ export default defineMiddlewares({
       matcher: "/store/legacy-order-history/*",
       method: ["GET", "POST"],
       middlewares: [authenticate("customer", ["session", "bearer"])],
+    },
+    {
+      matcher: "/store/customers/me/contact",
+      method: ["POST"],
+      middlewares: [authenticate("customer", ["session", "bearer"])],
+    },
+    {
+      matcher: "/store/customers/me",
+      method: ["POST"],
+      middlewares: [authenticate("customer", ["session", "bearer"]), guardCustomerContactWrite],
+    },
+    {
+      matcher: "/store/customers",
+      method: ["POST"],
+      middlewares: [guardCustomerProvenanceCreate],
     },
     {
       matcher: "/store/customers/me/password",

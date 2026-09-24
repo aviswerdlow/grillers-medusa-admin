@@ -21,6 +21,8 @@ module.exports = {
 
 if (process.env.TEST_TYPE === "integration:catalog") {
   module.exports.testMatch = ["**/integration-tests/catalog/*.spec.[jt]s"];
+} else if (process.env.TEST_TYPE === "integration:contacts") {
+  module.exports.testMatch = ["**/integration-tests/contacts/*.spec.[jt]s"];
 } else if (process.env.TEST_TYPE === "integration:http") {
   module.exports.testMatch = ["**/integration-tests/http/*.spec.[jt]s"];
 } else if (process.env.TEST_TYPE === "integration:modules") {

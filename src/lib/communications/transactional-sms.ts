@@ -1,3 +1,4 @@
+import { permitsCustomerSmsDestination } from "./primary-destination"
 import crypto from "crypto"
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
@@ -438,6 +439,7 @@ async function twilioMessageRequest(
 
 export type SendOrderShippedSmsInput = {
   order: {
+    customer_id?: string | null
     id?: string | null
     display_id?: string | number | null
     email?: string | null
@@ -550,6 +552,9 @@ async function sendOrderTransactionalSms(
     })
   }
   const phone = validation.consent.phone
+  if (!(await permitsCustomerSmsDestination(db, input.order?.customer_id, phone, validation.consent.timestamp))) {
+    return suppress("retired_customer_sms_destination", phone)
+  }
 
   const fulfillmentEligibility = orderShippedSmsFulfillmentEligibility(
     input.order
@@ -644,7 +649,7 @@ async function sendOrderTransactionalSms(
       id: messageId,
       idempotency_key: idempotencyKey,
       profile_id: null,
-      medusa_customer_id: null,
+      medusa_customer_id: input.order?.customer_id || null,
       email: input.order.email || "",
       email_lower: String(input.order.email || "").trim().toLowerCase(),
       channel: "sms",
@@ -730,6 +735,11 @@ async function sendOrderTransactionalSms(
     // Re-check immediately before provider I/O so a STOP received after the
     // claim committed still cancels the send. Twilio's carrier block remains
     // the final protection for the unavoidable network-call race.
+    if (!(await permitsCustomerSmsDestination(db, input.order?.customer_id, phone, validation.consent.timestamp))) {
+      await db("gp_message_log").where("id", claim.messageId).update({ status: "suppressed",
+        error_message: "retired_customer_sms_destination_after_claim", updated_at: new Date() })
+      return suppress("retired_customer_sms_destination", phone, { after_claim: true })
+    }
     if (await isProgramSuppressed(db, phone)) {
       await db("gp_message_log").where("id", claim.messageId).update({
         status: "suppressed",
