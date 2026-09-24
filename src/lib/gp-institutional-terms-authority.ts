@@ -45,6 +45,9 @@ export function authorizeInstitutionalTerms(input: {
   maxAgeMs: number
 }): InstitutionalTermsDecision {
   if (!input.featureEnabled) return { status: "deny", reason: "feature_disabled" }
+  if (input.sourceStatus !== "success") {
+    return { status: "hold", reason: "qbd_source_unavailable" }
+  }
   const { link, snapshot } = input
   if (!link || !exactId(input.customerId) || !exactId(input.expectedTestCompanyKey)) {
     return { status: "deny", reason: "no_verified_account_link" }
@@ -53,7 +56,7 @@ export function authorizeInstitutionalTerms(input: {
       link.companyKey !== input.expectedTestCompanyKey || !exactId(link.customerListId)) {
     return { status: "deny", reason: "no_verified_account_link" }
   }
-  if (input.sourceStatus !== "success" || !snapshot) {
+  if (!snapshot) {
     return { status: "hold", reason: "qbd_source_unavailable" }
   }
   if (snapshot.source !== "quickbooks_desktop_test_company" ||
