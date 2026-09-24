@@ -804,6 +804,7 @@ export default async function importLegacyCustomers({ container }: ExecArgs) {
     sourceSha256: string
     reviewSha256: string
   } | null = null
+  let b0RowHmacs: Map<string, string> | null = null
   if (selectedIds) {
     if (selectedIds.length !== expectedCount ||
         new Set(selectedIds).size !== selectedIds.length ||
@@ -827,10 +828,14 @@ export default async function importLegacyCustomers({ container }: ExecArgs) {
         sha256File(reviewFile) !== rule.private_review_sha256) {
       throw new Error("frozen B0 source or R1 review hash mismatch")
     }
-    const sourceIds = new Set(
-      fs.readFileSync(sourceFile, "utf8").trim().split(/\r?\n/)
-        .map((line) => String(JSON.parse(line).source_id))
-    )
+    const sourceRows = fs.readFileSync(sourceFile, "utf8").trim().split(/\r?\n/)
+      .map((line) => JSON.parse(line))
+    const sourceIds = new Set(sourceRows.map((row) => String(row.source_id)))
+    b0RowHmacs = new Map(sourceRows.map((row) => [String(row.source_id), String(row.row_hmac)]))
+    if (sourceIds.size !== sourceRows.length || b0RowHmacs.size !== sourceRows.length ||
+        selectedIds.some((id) => !/^[0-9a-f]{64}$/.test(b0RowHmacs!.get(id) ?? ""))) {
+      throw new Error("frozen B0 source identities or selected row fingerprints are incomplete")
+    }
     const reviewedR1Ids = new Set(
       fs.readFileSync(reviewFile, "utf8").trim().split(/\r?\n/)
         .slice(1)
@@ -914,7 +919,8 @@ export default async function importLegacyCustomers({ container }: ExecArgs) {
     if (!legacy.emailLower) {
       stats.skippedInvalidEmail += 1
       if (selectedIds) {
-        receiptRows.push({ legacy_customer_id: legacy.legacyCustomerId, outcome: "invalid_email" })
+        receiptRows.push({ legacy_customer_id: legacy.legacyCustomerId,
+          b0_row_hmac: b0RowHmacs!.get(legacy.legacyCustomerId), outcome: "invalid_email" })
       }
       return
     }
@@ -979,6 +985,7 @@ export default async function importLegacyCustomers({ container }: ExecArgs) {
       if (selectedIds) {
         receiptRows.push({
           legacy_customer_id: legacy.legacyCustomerId,
+          b0_row_hmac: b0RowHmacs!.get(legacy.legacyCustomerId),
           outcome: "dry_run",
           customer_action: existing ? "would_match_existing" : "would_create",
           existing_customer_id: customerId,
@@ -989,7 +996,8 @@ export default async function importLegacyCustomers({ container }: ExecArgs) {
     } catch (error) {
       stats.failed += 1
       if (selectedIds) {
-        receiptRows.push({ legacy_customer_id: legacy.legacyCustomerId, outcome: "failed" })
+        receiptRows.push({ legacy_customer_id: legacy.legacyCustomerId,
+          b0_row_hmac: b0RowHmacs!.get(legacy.legacyCustomerId), outcome: "failed" })
       }
       logger.error(
         `[legacy-customers] failed legacy_customer_id=${legacy.legacyCustomerId}: ${
