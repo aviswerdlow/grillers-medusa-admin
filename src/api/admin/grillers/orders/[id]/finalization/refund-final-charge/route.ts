@@ -6,7 +6,7 @@ import {
   amountInMinorUnits,
   metadataObject,
 } from "../../../../../../../lib/catch-weight-finalization"
-import { releaseAllocationLineQuantities } from "../../../../../../../lib/inventory-allocation"
+import { releaseAllocationLineQuantities, validateAllocationLineReleases } from "../../../../../../../lib/inventory-allocation"
 import { emitOpsAlert } from "../../../../../../../lib/ops-alert"
 
 type RefundBody = {
@@ -354,6 +354,12 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       body.allocation_releases,
       currencyCode
     )
+    if (allocation.orderId && allocation.orderId !== order.id) {
+      return res.status(422).json({ message: "Allocation order does not match the refunded order." })
+    }
+    if (allocation.lines.length) {
+      await validateAllocationLineReleases({ db, orderId: order.id, lines: allocation.lines })
+    }
 
     if (pendingQbdPosting(metadata)) {
       return res.status(409).json({
@@ -474,6 +480,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         actorType: "staff",
         actorId,
         note: body.note || null,
+        logger,
       })
     }
 

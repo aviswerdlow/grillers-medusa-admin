@@ -1,6 +1,13 @@
 import { variantNativeStock, unmirroredInventoryDemand, unmirroredVariantUnits, nativeReservedUnitsForLine } from "../inventory-stock"
 import { checkInventoryAvailability } from "../inventory-allocation"
 
+const originalNativeFlag = process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED
+beforeEach(() => { process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED = "true" })
+afterAll(() => {
+  if (originalNativeFlag === undefined) delete process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED
+  else process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED = originalNativeFlag
+})
+
 function variant(id = "variant", stocked = 5, reserved = 0, required = 1): any {
   return { id, manage_inventory: true, allow_backorder: false, metadata: {}, product: { id: "product", metadata: {} },
     inventory_items: [{ inventory_item_id: "item", required_quantity: required,
@@ -89,6 +96,26 @@ it("preserves the existing future-dated ordering window", async () => {
   const [line] = await check(dependencies([variant("variant", 0)]), { requested_fulfillment_date: "2026-10-19" })
   expect(line).toMatchObject({ decision: "future_allowed", reason: "future_window" })
   expect(line.earliest_available_date).toBeUndefined()
+})
+
+it("keeps the future window ahead of current availability and restores earliest dates", async () => {
+  const [future] = await check(dependencies([variant()]), { requested_fulfillment_date: "2026-10-19" })
+  expect(future).toMatchObject({ decision: "future_allowed", reason: "future_window" })
+  const [partial] = await check(dependencies([variant("variant", 1)]), {
+    lines: [{ variant_id: "variant", quantity: 2 }], requested_fulfillment_date: "2026-09-20",
+  })
+  expect(partial).toMatchObject({ decision: "partial", earliest_available_date: "2026-10-04" })
+  const [blocked] = await check(dependencies([variant("variant", 0)]))
+  expect(blocked).toMatchObject({ decision: "blocked", earliest_available_date: "2026-10-03" })
+})
+
+it("uses the legacy stock and advisory allocation path while the native flag is off", async () => {
+  process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED = "false"
+  const legacy = { id: "variant", manage_inventory: true, allow_backorder: false,
+    inventory_quantity: 5, inventory_items: [], product: { id: "product", metadata: {} }, metadata: {} }
+  const [line] = await check(dependencies([legacy], [commitment(2)]))
+  expect(line).toMatchObject({ decision: "available", current_stock_quantity: 5,
+    allocated_quantity: 2, available_to_promise_quantity: 3 })
 })
 
 it("keeps inactive/internal products and unverified alternatives out even with native stock", async () => {

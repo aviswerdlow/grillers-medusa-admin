@@ -84,6 +84,7 @@ jest.mock("../../../../../../lib/order-review-checkout", () => ({
       },
     },
   })),
+  withReviewCartLock: jest.fn(async (_scope, _cartId, work) => work()),
 }))
 
 // Import POST AFTER mocks are registered.
@@ -103,7 +104,7 @@ function makeReqRes() {
   }
   const orderModule = { updateOrders: jest.fn() }
   const query = {
-    graph: jest.fn(async () => ({
+    graph: jest.fn(async (_input?: any) => ({
       data: [
         {
           id: "cart_test_123",
@@ -294,6 +295,41 @@ describe("place-order route ops alerting", () => {
     expect(cartModule.updateCarts).not.toHaveBeenCalled()
     expect(createPaymentSessionsWorkflow).not.toHaveBeenCalled()
     expect(completeCartWorkflow).not.toHaveBeenCalled()
+  })
+
+  it("passes a legacy inventory-quantity variant through the real resolver with native checkout off", async () => {
+    const priorNativeFlag = process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED
+    process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED = "false"
+    try {
+      ;(getPaymentContextCustomer as jest.Mock).mockResolvedValueOnce({
+        customer: { id: "cus_medusa_123", email: "avi@example.com", metadata: {} },
+        staffTargetCustomerId: null,
+      })
+      const { req, res, query, cartModule } = makeReqRes()
+      const cartGraph = query.graph.getMockImplementation()!
+      ;(query.graph as jest.Mock).mockImplementation(async (input: any) => input.entity === "product_variant"
+        ? { data: [{ id: "variant_123", manage_inventory: true, allow_backorder: false,
+          inventory_quantity: 5, inventory_items: [], metadata: {}, product: { id: "prod_123", metadata: {} } }] }
+        : input.entity === "cart" ? cartGraph(input) : { data: [] })
+      const db: any = jest.fn(() => {
+        const chain: any = { select: () => chain, whereNull: () => chain, whereIn: () => chain,
+          insert: jest.fn(async () => undefined), then: (resolve: any) => resolve([]) }
+        return chain
+      })
+      const resolve = req.scope.resolve
+      req.scope.resolve = (key: string) => key === ContainerRegistrationKeys.PG_CONNECTION ? db : resolve(key)
+      const realResolver = jest.requireActual("../../../../../../lib/inventory-allocation").checkInventoryAvailability
+      ;(checkInventoryAvailability as jest.Mock).mockImplementationOnce(realResolver)
+
+      await POST(req, res)
+
+      expect(checkInventoryAvailability).toHaveBeenCalled()
+      expect(cartModule.updateCarts).toHaveBeenCalled()
+      expect(res.status).not.toHaveBeenCalledWith(409)
+    } finally {
+      if (priorNativeFlag === undefined) delete process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED
+      else process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED = priorNativeFlag
+    }
   })
 })
 

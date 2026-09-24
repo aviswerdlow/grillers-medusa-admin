@@ -4,6 +4,13 @@ import {
   releaseAllocationsForOrder,
 } from "../inventory-allocation"
 
+const originalNativeFlag = process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED
+beforeEach(() => { process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED = "true" })
+afterAll(() => {
+  if (originalNativeFlag === undefined) delete process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED
+  else process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED = originalNativeFlag
+})
+
 function chainForRows(rows: any[], onUpdate?: jest.Mock) {
   const chain: any = {
     select: jest.fn(() => chain),

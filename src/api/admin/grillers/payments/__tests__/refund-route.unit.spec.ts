@@ -147,7 +147,11 @@ describe("staff payment refund route", () => {
     expect(res.status).toHaveBeenCalledWith(200)
   })
 
-  it("releases allocation quantities when staff submits line-level refund releases", async () => {
+  it.each([
+    ["snapshotted", { native_reservation_snapshot: { line_quantity: 3, reservations: [] } }, false, false],
+    ["legacy", {}, true, false],
+    ["invalid snapshot", { native_reservation_snapshot: { line_quantity: 3, reservations: [{ id: "res_missing" }] } }, false, true],
+  ])("handles %s allocation state before a line-level refund", async (_kind, metadata, legacy, invalid) => {
     const refund = {
       id: "refund_123",
       amount: 2,
@@ -192,9 +196,10 @@ describe("staff payment refund route", () => {
         line_item_id: "line_123",
         quantity: 3,
         status: "reserved",
-        metadata: { native_reservation_snapshot: { line_quantity: 3, reservations: [] } },
+        metadata,
       },
     ])
+    const logger = { warn: jest.fn() }
     const req = {
       params: { id: "pay_123" },
       body: {
@@ -213,6 +218,7 @@ describe("staff payment refund route", () => {
           if (key === Modules.LOCKING) return { execute: async (_keys: string[], work: any) => work() }
           if (key === "query") return query
           if (key === ContainerRegistrationKeys.PG_CONNECTION) return db
+          if (key === ContainerRegistrationKeys.LOGGER) return logger
           throw new Error(`Unknown dependency ${key}`)
         },
       },
@@ -226,6 +232,12 @@ describe("staff payment refund route", () => {
     } as any
 
     await POST(req, res)
+
+    if (invalid) {
+      expect(paymentModule.refundPayment).not.toHaveBeenCalled()
+      expect(res.status).toHaveBeenCalledWith(500)
+      return
+    }
 
     expect(updates).toEqual(
       expect.arrayContaining([
@@ -254,6 +266,7 @@ describe("staff payment refund route", () => {
       ])
     )
     expect(res.status).toHaveBeenCalledWith(200)
+    expect(logger.warn).toHaveBeenCalledTimes(legacy ? 1 : 0)
   })
 
   it("emits an ops alert when a refund overwrites a pending QBD posting request", async () => {
