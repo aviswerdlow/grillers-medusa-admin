@@ -1,5 +1,5 @@
 import { buildShippingForecastEvent } from "../../subscribers/analytics/shipping-forecast";
-import { shippingLine, packingConfig } from "./__fixtures__/shipping-inputs";
+import { shippingLine, packingConfig, packingContext } from "./__fixtures__/shipping-inputs";
 import {
   createShippingPackingPlan,
   SHIPPING_PACKING_PLAN_KEY,
@@ -8,7 +8,7 @@ function order() {
   const items = [shippingLine({ quantity: 2 })],
     plan = createShippingPackingPlan(
       items,
-      { service: "GROUND", postalCode: "19103" },
+      { ...packingContext(), postalCode: "19103" },
       packingConfig(),
     );
   return {

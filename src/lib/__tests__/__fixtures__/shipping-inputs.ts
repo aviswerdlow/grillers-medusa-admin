@@ -3,6 +3,58 @@ import { SHIPPING_WEIGHT_KEY } from "../../shipping-weights";
 import { resolvePackagingConfig } from "../../packaging-cost";
 
 // Entirely synthetic. These are not Peter's approved masses or packing rules.
+export function packingExposureRules(
+  bands: { ThroughHours: number; DryIceBlocksPerBox: number }[],
+  services = ["GROUND", "UPS_3_DAY_SELECT", "UPS_2ND_DAY_AIR", "OVERNIGHT"],
+  boxes = ["m330", "l345"],
+) {
+  return services.flatMap(Service => boxes.flatMap(BoxTier => bands.map(band => ({ Service, BoxTier, ...band }))));
+}
+export function seasonalPolicy(overrides: Record<string, unknown> = {}) {
+  const policy = {
+    Name: "Synthetic normal",
+    Revision: "fixture-season-v1",
+    Active: true,
+    ApprovedBy: "synthetic-fixture",
+    ApprovedAt: "2026-09-19T01:00:00Z",
+    ApprovalReference: "Synthetic test only; not operating approval",
+    EffectiveFrom: "2026-01-01",
+    EffectiveThrough: "2026-12-31",
+    DelayAllowanceHours: 0,
+    MaxExposureHours: 168,
+    MaxGrossWeightLb: 50,
+    AllowGround: true,
+    Allow3Day: true,
+    Allow2Day: true,
+    AllowOvernight: true,
+    AllowMicro: false,
+    Allow330: true,
+    Allow345: true,
+    ...overrides,
+  };
+  return { ...policy, ExposureRules: overrides.ExposureRules ?? packingExposureRules([
+    { ThroughHours: 24, DryIceBlocksPerBox: 1 },
+    { ThroughHours: 48, DryIceBlocksPerBox: 2 },
+    { ThroughHours: 72, DryIceBlocksPerBox: 3 },
+    { ThroughHours: 168, DryIceBlocksPerBox: 3 },
+  ], ["GROUND", "UPS_3_DAY_SELECT", "UPS_2ND_DAY_AIR", "OVERNIGHT"].filter((_, i) =>
+    [policy.AllowGround, policy.Allow3Day, policy.Allow2Day, policy.AllowOvernight][i]),
+  ["m330", "l345"].filter((_, i) => [policy.Allow330, policy.Allow345][i])) };
+}
+export function packingContext() {
+  return {
+    service: "GROUND",
+    postalCode: "30340",
+    validatedTransit: {
+      days: 1,
+      revision: "fixture-calendar-v1",
+      packingDays: 1,
+      elapsedHours: 24,
+      packedAt: "2026-10-05T16:00:00Z",
+      arrivalBy: "2026-10-06T16:00:00Z",
+    },
+  };
+}
 export function weightRecord(
   overrides: Partial<ShippingWeightRecord> = {},
 ): ShippingWeightRecord {
@@ -50,10 +102,13 @@ export const packingConfig = () =>
   resolvePackagingConfig({
     env: {},
     strapi: {
+      enabled: true,
+      seasonalPolicies: [seasonalPolicy()],
       model: "continuous_weight",
       policyVersion: "fixture-packing-v1",
       dryIceUsdPerLb: 1,
       minimumDryIceAmountLb: 2,
+      dryIceBlockWeightLb: 2,
       transitDayThresholds: [
         { transitDays: 1, dryIceMultiplier: 1 },
         { transitDays: 2, dryIceMultiplier: 2 },
@@ -73,6 +128,7 @@ export const packingConfig = () =>
           heightIn: 12,
           maxFitUnits: 10,
           fitRuleId: "fixture-fit-v1",
+          dryIceFitUnitsPerLb: 0.1,
         },
         {
           boxTier: "l345",
@@ -87,6 +143,7 @@ export const packingConfig = () =>
           heightIn: 12,
           maxFitUnits: 10,
           fitRuleId: "fixture-fit-v1",
+          dryIceFitUnitsPerLb: 0.1,
         },
       ],
     },

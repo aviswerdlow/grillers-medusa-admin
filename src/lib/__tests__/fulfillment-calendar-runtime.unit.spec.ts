@@ -156,7 +156,7 @@ afterEach(() => {
 });
 
 test.each(["GROUND", "PICKUP", "ATLANTA_DELIVERY", "SCHEDULED_DELIVERY"])(
-  "%s legacy checkout passes preparation and completion with enforcement unset and no calendar infrastructure",
+  "%s compatibility preserves the approved packing boundary with enforcement unset",
   async (service) => {
     delete process.env.GP_CALENDAR_ENFORCEMENT;
     delete process.env.GRILLERS_CALENDAR_SIGNING_KEY;
@@ -169,15 +169,6 @@ test.each(["GROUND", "PICKUP", "ATLANTA_DELIVERY", "SCHEDULED_DELIVERY"])(
       resolve: (name: string) =>
         name === "logger" ? { warn } : h.scope.resolve(name),
     };
-    if (service === "GROUND") {
-      h.cart.shipping_methods[0].data = {
-        [SHIPPING_PACKING_PLAN_KEY]: createShippingPackingPlan(
-          h.cart.items,
-          { service, postalCode: h.cart.shipping_address.postal_code },
-          packingConfig()
-        ),
-      };
-    }
     const next = jest.fn();
     const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
     await prepareNativeShippingAcceptance(
@@ -185,10 +176,16 @@ test.each(["GROUND", "PICKUP", "ATLANTA_DELIVERY", "SCHEDULED_DELIVERY"])(
       res as any,
       next
     );
-    expect(next).toHaveBeenCalledWith();
-    expect(res.status).not.toHaveBeenCalled();
-    await validateCalendarAcceptance(scope, clone(h.cart));
-    await validateShippingAcceptance(scope, clone(h.cart));
+    if (service === "GROUND") {
+      expect(next).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(409);
+      await expect(prepareShippingAcceptance(scope, h.cart.id)).rejects.toMatchObject({ code: "shipping_calendar_required" });
+    } else {
+      expect(next).toHaveBeenCalledWith();
+      expect(res.status).not.toHaveBeenCalled();
+      await validateCalendarAcceptance(scope, clone(h.cart));
+      await validateShippingAcceptance(scope, clone(h.cart));
+    }
     expect(loadCalendarSource).not.toHaveBeenCalled();
     expect(h.cart.metadata[CALENDAR_ACCEPTED_KEY]).toBeUndefined();
     expect(warn).toHaveBeenCalledWith(

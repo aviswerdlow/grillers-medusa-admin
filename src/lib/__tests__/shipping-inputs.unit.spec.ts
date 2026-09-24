@@ -2,6 +2,7 @@ import {
   weightRecord,
   shippingLine,
   packingConfig,
+  packingContext,
 } from "./__fixtures__/shipping-inputs";
 import {
   resolveShippingLine,
@@ -23,11 +24,7 @@ import {
   forecastShippingCost,
 } from "../shipping-cost-forecast";
 
-const context = {
-  service: "GROUND",
-  postalCode: "30340",
-  validatedTransit: { days: 1, revision: "fixture-calendar-v1" },
-};
+const context = packingContext();
 const withRecord = (record: any) =>
   shippingLine({
     variant: {

@@ -13,7 +13,6 @@ import {
 } from "./shipping-weights";
 import { loadShippingCatalogLines } from "./shipping-catalog-inputs";
 import { currentCalendarSelection } from "./fulfillment-calendar-runtime";
-import { requiresFulfillmentCalendar } from "./fulfillment-calendar-rollout";
 import { packingContextFromCalendar } from "./fulfillment-calendar-selection";
 import { weightImportHash } from "./sam-shipping-weight-import";
 import {
@@ -66,13 +65,11 @@ async function shippingAcceptanceContext(container: any, cartId: string) {
   const { method, service } = carriers[0],
     lines = await loadShippingCatalogLines(query, cart.items ?? []);
   const calendar = await currentCalendarSelection(container, cartId);
-  if (!calendar && requiresFulfillmentCalendar(cart))
-    throw new ShippingInputError("shipping_calendar_required");
+  // Seasonal packing requires a verified date even during calendar rollout.
+  if (!calendar) throw new ShippingInputError("shipping_calendar_required");
   const expected = createShippingPackingPlan(
     lines,
-    calendar
-      ? packingContextFromCalendar(calendar.selection)
-      : { service, postalCode: cart.shipping_address?.postal_code ?? "" },
+    packingContextFromCalendar(calendar.selection),
     await getPackagingConfig(process.env)
   );
   const selected = shippingMetadata(method.data)[

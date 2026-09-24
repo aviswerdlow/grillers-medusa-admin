@@ -12,9 +12,9 @@
  *     PackagingBoxes activate the continuous spreadsheet model only when the
  *     complete normalized input set is valid.
  *
- * Never throws and never blocks the rate path: any fetch failure or missing
- * field falls back to the hardcoded defaults (which are correct). The fetched
- * overrides are cached briefly so we don't hit Strapi on every rate quote.
+ * Only published policies are fetched. A failed read supplies no approval;
+ * the shared shipping planner then makes carrier quotes unavailable. Legacy
+ * defaults remain for offline analysis, not as approval for customer quotes.
  */
 import {
   resolvePackagingConfig,
@@ -24,7 +24,7 @@ import {
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
-let cache: { value: PackagingCostOverrides; at: number } | null = null;
+let cache: { value: PackagingCostOverrides; at: number; source: string } | null = null;
 
 /** Reset the in-memory cache (tests). */
 export function resetPackagingOverridesCache(): void {
@@ -69,10 +69,13 @@ export function packagingOverridesFromColdChainSetting(
           ...(value.HeightIn !== undefined ? { heightIn: value.HeightIn } : {}),
           ...(value.MaxFitUnits !== undefined ? { maxFitUnits: value.MaxFitUnits } : {}),
           ...(value.FitRuleId !== undefined ? { fitRuleId: value.FitRuleId } : {}),
+          ...(value.DryIceFitUnitsPerLb !== undefined ? { dryIceFitUnitsPerLb: value.DryIceFitUnitsPerLb } : {}),
         };
       })
     : [];
   return {
+    ...(s?.Enabled !== undefined ? { enabled: s.Enabled === true } : {}),
+    ...(s?.SeasonalPackingPolicies !== undefined ? { seasonalPolicies: s.SeasonalPackingPolicies } : {}),
     ...(s?.PackingPolicyVersion !== undefined ? { policyVersion: s.PackingPolicyVersion } : {}),
     model: s?.PackagingCostModel ?? null,
     dryIceUsdPerLb: s?.DryIcePricePerLb ?? null,
@@ -82,6 +85,7 @@ export function packagingOverridesFromColdChainSetting(
       l345: s?.BoxCost345 ?? null,
     },
     minimumDryIceAmountLb: s?.MinimumDryIceAmount ?? null,
+    dryIceBlockWeightLb: s?.DryIceBlockWeightLb ?? null,
     transitDayThresholds: thresholds,
     packagingBoxes,
   };
@@ -99,7 +103,7 @@ export async function fetchPackagingOverridesFromStrapi(
     // rate path. AbortError is swallowed by the catch below → falls back to {}.
     const url =
       `${base.replace(/\/+$/, "")}/api/cold-chain-setting` +
-      `?populate[TransitDayThresholds]=*&populate[PackagingBoxes]=*`;
+      `?status=published&populate[TransitDayThresholds]=*&populate[PackagingBoxes]=*&populate[SeasonalPackingPolicies][populate][ExposureRules]=*`;
     const res = await fetch(url, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       signal: AbortSignal.timeout(2000),
@@ -121,9 +125,11 @@ export async function getPackagingConfig(
   env: Record<string, string | undefined> = process.env,
   now: number = Date.now()
 ): Promise<PackagingCostConfig> {
-  if (!cache || now - cache.at > CACHE_TTL_MS) {
+  // Never reuse a different CMS origin/token's approved policy.
+  const source = JSON.stringify([env.STRAPI_URL ?? "", env.STRAPI_TOKEN ?? ""]);
+  if (!cache || cache.source !== source || now < cache.at || now - cache.at > CACHE_TTL_MS) {
     const overrides = await fetchPackagingOverridesFromStrapi(env);
-    cache = { value: overrides, at: now };
+    cache = { value: overrides, at: now, source };
   }
   return resolvePackagingConfig({ strapi: cache.value, env });
 }

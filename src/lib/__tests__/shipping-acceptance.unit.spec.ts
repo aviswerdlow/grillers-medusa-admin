@@ -11,10 +11,10 @@ import {
   SHIPPING_WEIGHT_SNAPSHOT_KEY,
   SHIPPING_WEIGHT_KEY,
 } from "../shipping-weights";
-import { shippingLine, packingConfig } from "./__fixtures__/shipping-inputs";
+import { shippingLine, packingConfig, packingContext } from "./__fixtures__/shipping-inputs";
 import path from "node:path";
 jest.mock("../fulfillment-calendar-runtime", () => ({ currentCalendarSelection: jest.fn(async () => ({selection:{}})) }));
-jest.mock("../fulfillment-calendar-selection", () => ({ packingContextFromCalendar: jest.fn(() => ({service:"GROUND",postalCode:"30340"})) }));
+jest.mock("../fulfillment-calendar-selection", () => ({ packingContextFromCalendar: jest.fn(() => require("./__fixtures__/shipping-inputs").packingContext()) }));
 jest.mock("../packaging-cost-strapi", () => ({
   getPackagingConfig: jest.fn(),
 }));
@@ -23,7 +23,7 @@ function harness() {
   const line = shippingLine();
   const plan = createShippingPackingPlan(
     [line],
-    { service: "GROUND", postalCode: "30340" },
+    packingContext(),
     packingConfig(),
   );
   const cart: any = {
@@ -110,6 +110,16 @@ test("completed-cart replay does not replace accepted snapshots", async () => {
   h.cart.completed_at = "2026-09-19T03:00:00Z";
   await prepareShippingAcceptance(h.container, h.cart.id);
   expect(h.module.updateLineItems).not.toHaveBeenCalled();
+});
+
+test("a policy cost change requires quote acceptance again and preserves the original cart snapshot", async () => {
+  const h = harness();
+  await prepareShippingAcceptance(h.container, h.cart.id);
+  const original = clone(h.cart.metadata[SHIPPING_PACKING_PLAN_KEY]);
+  const updated = packingConfig(); updated.dryIceUsdPerLb = 2;
+  (getPackagingConfig as jest.Mock).mockResolvedValue(updated);
+  await expect(validateShippingAcceptance(h.container, h.cart)).rejects.toMatchObject({ code: "shipping_selection_changed_refresh_required" });
+  expect(h.cart.metadata[SHIPPING_PACKING_PLAN_KEY]).toEqual(original);
 });
 
 test("the installed Medusa line conversion carries the prepared snapshot into the order", async () => {

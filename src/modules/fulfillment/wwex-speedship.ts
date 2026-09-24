@@ -1,4 +1,5 @@
 import { ShippingInputError } from "../../lib/shipping-weights"
+import { carrierPackageWeightLimit } from "../../lib/shipping-carrier-limits"
 import type { ShippingPackingPlan } from "../../lib/shipping-packing-plan"
 
 type LoggerLike = {
@@ -807,8 +808,7 @@ export function createWwexSpeedshipClientFromEnv(
         width: positiveNumber(env.WWEX_DEFAULT_PACKAGE_WIDTH_IN),
         height: positiveNumber(env.WWEX_DEFAULT_PACKAGE_HEIGHT_IN),
       },
-      maxPackageWeightLb:
-        positiveNumber(env.WWEX_MAX_PACKAGE_WEIGHT_LB) || 40,
+      maxPackageWeightLb: carrierPackageWeightLimit(env),
       insuranceRequestFlag: envBool(env, "WWEX_INSURANCE_ENABLED", false),
       handlingCharge: env.WWEX_HANDLING_CHARGE_VALUE
         ? {
