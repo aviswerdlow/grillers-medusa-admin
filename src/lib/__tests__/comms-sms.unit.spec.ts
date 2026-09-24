@@ -37,7 +37,7 @@ jest.mock("../communications/queue", () => ({
 function fakeSmsDb(
   profile: Record<string, any>,
   messageCount = 0,
-  options: { profileAfterClaim?: Record<string, any> } = {}
+  options: { profileAfterClaim?: Record<string, any>; customerAfterClaim?: Record<string, any> } = {}
 ) {
   let messageRow: Record<string, any> | null = null
   const writes: Array<{ table: string; data: any }> = []
@@ -62,6 +62,7 @@ function fakeSmsDb(
       return chain
     }
     chain.first = async () => {
+      if (table === "customer") return messageRow && options.customerAfterClaim ? options.customerAfterClaim : { metadata: {} }
       if (table === "gp_customer_profile") {
         return messageRow && options.profileAfterClaim
           ? { ...profile, ...options.profileAfterClaim }
@@ -1038,6 +1039,25 @@ describe("marketing-only SMS policy", () => {
       global.fetch = priorFetch
       process.env = { ...savedEnv }
     }
+  })
+
+  it("cancels a queued marketing send when the account retires its destination after claim", async () => {
+    const savedEnv = { ...process.env }; const priorFetch=global.fetch
+    jest.useFakeTimers().setSystemTime(new Date("2026-07-14T20:00:00.000Z"))
+    try {
+      configureMarketingSmsTestEnv()
+      const profile={ ...qualifyingMarketingProfile(), medusa_customer_id: "cus_controlled" }
+      const { db, writes }=fakeSmsDb(profile,0,{ customerAfterClaim: { metadata: {
+        primary_contact_v1: { version: 1, phone: "4045550101" }
+      } } })
+      global.fetch=jest.fn() as any
+      const result=await sendTrackedSms({resolve:()=>db} as any,{
+        to:"+14045550100",body:"Griller's Pride seasonal special. Reply STOP to unsubscribe.",
+        stream:"broadcast",purpose:"broadcast",template_key:"contact-race",profile_id:profile.id,
+        idempotency_key:"contact-race",staff_test:true })
+      expect(result).toEqual({ok:true,skipped:true});expect(global.fetch).not.toHaveBeenCalled()
+      expect(writes.some(w=>w.data.error_message==="retired_customer_sms_destination_after_claim")).toBe(true)
+    } finally { jest.useRealTimers();global.fetch=priorFetch;process.env={...savedEnv} }
   })
 
   it("rechecks consent after the claim and lets a concurrent STOP cancel provider I/O", async () => {

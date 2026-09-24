@@ -3,7 +3,7 @@ import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { configuredIds, staffCapabilities, staffRole, staffSessionIsCurrent, type StaffCapability, type StaffCustomer, type StaffRole } from "./staff-access-policy"
 
 export const STAFF_AUTHORIZATION_HEADER = "x-gp-staff-authorization"
-export type StaffPrincipal = { id: string; kind: "customer" | "operator" | "service"; email: string | null; name: string; role: StaffRole; capabilities: Set<StaffCapability>; transport_id: string; auth: Record<string, any>; service_role?: "read_only" | "qbd_catalog" | "communications" }
+export type StaffPrincipal = { id: string; kind: "customer" | "operator" | "service"; service_scope?: "parity"; email: string | null; name: string; role: StaffRole; capabilities: Set<StaffCapability>; transport_id: string; auth: Record<string, any>; service_role?: "read_only" | "qbd_catalog" | "communications" }
 export class StaffAccessDenied extends Error {}
 
 export function signedCustomerContext(req: MedusaRequest, header: unknown): Record<string, any> | null {
@@ -39,6 +39,10 @@ export async function resolveStaffPrincipal(req: MedusaRequest): Promise<StaffPr
     return { id: auth.actor_id, kind: "customer", email: customer.email || null, name: [customer.first_name, customer.last_name].filter(Boolean).join(" ") || customer.email || auth.actor_id, role: staffRole(customer), capabilities: staffCapabilities(customer), transport_id: transportId, auth }
   }
   if (req.headers[STAFF_AUTHORIZATION_HEADER]) throw new StaffAccessDenied("This credential is not the staff gateway.")
+  // The narrower parity reader never inherits broader discovery/writer power.
+  if (configuredIds("GP_PARITY_READ_API_KEY_IDS").has(transportId)) {
+    return { id: transportId, kind: "service", service_scope: "parity", email: null, name: "Original-order parity reader", role: "customer", capabilities: new Set(), transport_id: transportId, auth: transport }
+  }
   const matches = ([
     ["GP_ADMIN_READ_ONLY_API_KEY_IDS", "read_only"],
     ["GP_QBD_CATALOG_API_KEY_IDS", "qbd_catalog"],

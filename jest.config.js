@@ -21,6 +21,8 @@ module.exports = {
 
 if (process.env.TEST_TYPE === "integration:catalog") {
   module.exports.testMatch = ["**/integration-tests/catalog/*.spec.[jt]s"];
+} else if (process.env.TEST_TYPE === "integration:contacts") {
+  module.exports.testMatch = ["**/integration-tests/contacts/*.spec.[jt]s"];
 } else if (process.env.TEST_TYPE === "integration:http") {
   module.exports.testMatch = ["**/integration-tests/http/*.spec.[jt]s"];
 } else if (process.env.TEST_TYPE === "integration:modules") {
@@ -35,4 +37,7 @@ if (process.env.TEST_TYPE === "integration:catalog") {
 
 if (process.env.TEST_TYPE === "integration:incoming-stock") {
   module.exports.testMatch = ["**/integration-tests/incoming-stock/*.spec.[jt]s"];
+}
+if (process.env.TEST_TYPE === "integration:order-promise") {
+  module.exports.testMatch = ["**/integration-tests/order-promise/*.spec.[jt]s"];
 }

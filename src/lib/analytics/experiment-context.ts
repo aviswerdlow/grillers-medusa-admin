@@ -3,6 +3,8 @@ type ExperimentLineContext = Record<
   {
     variant_key: string
     assignment_id: string
+    version?: string | null
+    evaluation_version?: string | null
     surface?: string
     impact?: string
     route_market?: string
@@ -60,6 +62,8 @@ function parseContext(value: unknown): ExperimentLineContext {
     context[experimentKey] = {
       variant_key: record.variant_key,
       assignment_id: record.assignment_id,
+      ...(typeof record.version === "string" ? { version: record.version } : {}),
+      ...(typeof record.evaluation_version === "string" ? { evaluation_version: record.evaluation_version } : {}),
       ...(typeof record.surface === "string"
         ? { surface: record.surface }
         : {}),

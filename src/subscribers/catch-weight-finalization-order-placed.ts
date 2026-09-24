@@ -1,8 +1,6 @@
+import { ORDER_PROMISE_KEY } from "../lib/order-promise"
 import type { SubscriberArgs, SubscriberConfig } from "@medusajs/framework"
-import {
-  ContainerRegistrationKeys,
-  Modules,
-} from "@medusajs/framework/utils"
+import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import {
   CATCH_WEIGHT_ORDER_FIELDS,
   ensureFinalizationForOrder,
@@ -52,7 +50,8 @@ export default async function catchWeightFinalizationOrderPlacedHandler({
   if (!orderId) {
     await emitCatchWeightFinalizationSubscriberAlert({
       alertKind: "catch_weight_finalization_skipped",
-      title: "Catch-weight finalization initialization skipped because order id is missing",
+      title:
+        "Catch-weight finalization initialization skipped because order id is missing",
       orderId: null,
       logger,
     })
@@ -74,13 +73,24 @@ export default async function catchWeightFinalizationOrderPlacedHandler({
       logger.warn(`[catch-weight-finalization] order not found id=${orderId}`)
       await emitCatchWeightFinalizationSubscriberAlert({
         alertKind: "catch_weight_finalization_skipped",
-        title: "Catch-weight finalization initialization skipped because order was not found",
+        title:
+          "Catch-weight finalization initialization skipped because order was not found",
         orderId,
         logger,
       })
       return
     }
 
+    // Reviewed checkout initializes packing only after its successful native
+    // return is bound. An order.placed callback may arrive before that return.
+    // The completion wrapper owns initialization/recovery for this case.
+    if (
+      order.metadata?.[ORDER_PROMISE_KEY] &&
+      !(await db("gp_order_promise_binding")
+        .where({ order_id: order.id })
+        .first())
+    )
+      return
     const { finalization, lines } = await ensureFinalizationForOrder(db, order)
     const metadata = orderPlacedFinalizationMetadata(order, finalization)
 

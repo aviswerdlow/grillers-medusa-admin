@@ -34,7 +34,7 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
       req.scope = { resolve(key: string) {
         if (key === "logger") return { warn }
         if (key === ContainerRegistrationKeys.CONFIG_MODULE) return { projectConfig: { http: { jwtSecret: secret, jwtExpiresIn: "1h" } } }
-        if (key === Modules.API_KEY) return { authenticate: async (token: string) => token === "sk_gateway" ? { id: "apk_gateway" } : token === "sk_reader" ? { id: "apk_reader" } : token === "sk_unknown" ? { id: "apk_unknown" } : null }
+        if (key === Modules.API_KEY) return { authenticate: async (token: string) => token === "sk_gateway" ? { id: "apk_gateway" } : token === "sk_reader" ? { id: "apk_reader" } : token === "sk_parity" ? { id: "apk_parity" } : token === "sk_unknown" ? { id: "apk_unknown" } : null }
         if (key === Modules.CUSTOMER) return { retrieveCustomer: customerRead }
         if (key === Modules.USER) return { retrieveUser: userRead }
         if (key === Modules.AUTH) return { retrieveAuthIdentity: authRead }
@@ -64,6 +64,7 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     jest.clearAllMocks()
     process.env.GP_STAFF_GATEWAY_API_KEY_ID = "apk_gateway"
     process.env.GP_ADMIN_READ_ONLY_API_KEY_IDS = "apk_reader"
+    process.env.GP_PARITY_READ_API_KEY_IDS = "apk_parity"
     process.env.GP_PRIVILEGED_ADMIN_USER_IDS = "usr_recovery"
     process.env.GP_STAFF_BOOTSTRAP_CUSTOMER_IDS = "cus_bootstrap"
     customers = { cus_staff: { id: "cus_staff", email: "staff@example.test", first_name: "Fixture", last_name: "Manager", metadata: { gp_staff_role: "manager" } },
@@ -134,6 +135,21 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     expect((await request("/admin/grillers/orders/o/finalization", { key: "sk_reader", token: null, method: "GET" })).status).toBe(403)
     process.env.GP_ADMIN_READ_ONLY_API_KEY_IDS = "apk_gateway"
     expect((await request("/admin/products", { token: null, method: "GET" })).status).toBe(403)
+  })
+  it("restricts a parity key to the original-order GET even when also listed as a broad reader", async () => {
+    process.env.GP_ADMIN_READ_ONLY_API_KEY_IDS = "apk_reader,apk_parity"
+    const route = "/admin/grillers/analytics/order-promises"
+    expect((await request(route, { key: "sk_parity", token: null, method: "GET" })).status).toBe(200)
+    for (const path of ["/admin/orders", "/admin/orders/o", "/admin/customers", "/admin/products", "/admin/grillers/inventory/allocations"]) {
+      expect((await request(path, { key: "sk_parity", token: null, method: "GET" })).status).toBe(403)
+    }
+    expect((await request(route, { key: "sk_parity", token: null })).status).toBe(403)
+    expect((await request(route, { key: "sk_reader", token: null, method: "GET" })).status).toBe(403)
+    expect((await request(route, { method: "GET" })).status).toBe(403)
+    expect((await request(route, { key: "sk_parity", method: "GET" })).status).toBe(403)
+    process.env.GP_PARITY_READ_API_KEY_IDS = ""
+    process.env.GP_ADMIN_READ_ONLY_API_KEY_IDS = "apk_reader"
+    expect((await request(route, { key: "sk_parity", token: null, method: "GET" })).status).toBe(403)
   })
   it("separates incoming-stock review from writes and denies background readers", async () => {
     const route = "/admin/grillers/inventory/incoming"
@@ -253,6 +269,14 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     process.env.GP_ADMIN_READ_ONLY_API_KEY_IDS = "apk_reader,apk_unknown"
     expect((await request("/admin/orders", { key: "sk_unknown", token: null, method: "GET" })).status).toBe(403)
     delete process.env.GP_COMMUNICATIONS_ADMIN_API_KEY_IDS
+  })
+
+  it("does not let log-only staff rollout bypass required order review", async () => {
+    process.env.GP_STAFF_BOUNDARY_MODE = "log"
+    process.env.GP_ORDER_REVIEW_ENFORCEMENT = "required"
+    expect((await request("/admin/draft-orders", { key: "sk_unknown", token: null })).status).toBe(403)
+    expect(effects).not.toHaveBeenCalled()
+    delete process.env.GP_ORDER_REVIEW_ENFORCEMENT
   })
 
 })

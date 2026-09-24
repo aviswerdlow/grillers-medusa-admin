@@ -111,8 +111,8 @@ export function composeShippingPrice(input: {
     input.source === "cms_fallback"
       ? null
       : input.source === "forecast"
-        ? priceCents(input.carrierFreightEstimate)
-        : rate;
+      ? priceCents(input.carrierFreightEstimate)
+      : rate;
   const total = rate + addition;
   if (
     !Number.isSafeInteger(total) ||
@@ -168,7 +168,9 @@ function seal(value: unknown, purpose: string): string {
     cipher.update(JSON.stringify(value), "utf8"),
     cipher.final(),
   ]);
-  return `${keyId}.${Buffer.concat([iv, cipher.getAuthTag(), body]).toString("base64url")}`;
+  return `${keyId}.${Buffer.concat([iv, cipher.getAuthTag(), body]).toString(
+    "base64url"
+  )}`;
 }
 function open(value: unknown, purpose: string): any {
   if (
@@ -183,14 +185,14 @@ function open(value: unknown, purpose: string): any {
     const decipher = createDecipheriv(
       "aes-256-gcm",
       key(purpose, keyId),
-      raw.subarray(0, 12),
+      raw.subarray(0, 12)
     );
     decipher.setAuthTag(raw.subarray(12, 28));
     return JSON.parse(
       Buffer.concat([
         decipher.update(raw.subarray(28)),
         decipher.final(),
-      ]).toString("utf8"),
+      ]).toString("utf8")
     );
   } catch {
     return fail("shipping_price_acceptance_required");
@@ -213,7 +215,7 @@ export function shippingPriceBinding(cart: any, plan: ShippingPackingPlan) {
         "province",
         "postal_code",
         "country_code",
-      ].map((k) => [k, cart.shipping_address?.[k] ?? null]),
+      ].map((k) => [k, cart.shipping_address?.[k] ?? null])
     ),
     items: (cart.items ?? [])
       .map((i: any) => ({
@@ -229,7 +231,7 @@ export function issueShippingPriceToken(
   cart: any,
   plan: ShippingPackingPlan,
   quote: ShippingPriceQuote,
-  now = Date.now(),
+  now = Date.now()
 ) {
   return seal(
     {
@@ -237,7 +239,7 @@ export function issueShippingPriceToken(
       expiresAt: now + 15 * 60_000,
       quote,
     },
-    "quote",
+    "quote"
   );
 }
 export function readShippingPriceToken(
@@ -245,7 +247,7 @@ export function readShippingPriceToken(
   cart: any,
   plan: ShippingPackingPlan,
   policy: ShippingPricePolicy,
-  now = Date.now(),
+  now = Date.now()
 ): ShippingPriceQuote {
   const token = open(value, "quote");
   if (
@@ -269,10 +271,17 @@ export function readShippingPriceToken(
     fail("shipping_price_changed_refresh_required");
   return quote;
 }
+/** Only trusted checkout code may inspect expiry; never expose private quote costs. */
+export function shippingPriceTokenExpiry(value: unknown): number {
+  const expiresAt = open(value, "quote").expiresAt;
+  if (!Number.isFinite(expiresAt))
+    fail("shipping_price_changed_refresh_required");
+  return expiresAt;
+}
 export function acceptShippingPrice(
   cart: any,
   method: any,
-  quote: ShippingPriceQuote,
+  quote: ShippingPriceQuote
 ): AcceptedShippingPrice {
   const gross = priceCents(quote.customerShippingBeforePromotions);
   const shippingTax = priceCents(cart.shipping_tax_total);
@@ -315,7 +324,7 @@ export function sealAcceptedShippingPrice(accepted: AcceptedShippingPrice) {
 export function readAcceptedShippingPrice(order: any): AcceptedShippingPrice {
   const value = open(
     order?.metadata?.[SHIPPING_PRICE_ACCEPTED_KEY],
-    "accepted",
+    "accepted"
   ) as AcceptedShippingPrice;
   if (
     value.version !== 1 ||

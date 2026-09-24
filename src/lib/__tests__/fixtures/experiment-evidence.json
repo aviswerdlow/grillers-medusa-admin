@@ -1,0 +1,68 @@
+{
+  "secret": "synthetic-only-experiment-evidence-2026",
+  "releaseId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "definition": {
+    "key": "synthetic_launch",
+    "surface": "homepage",
+    "impact": "revenue",
+    "status": "active",
+    "defaultVariant": "control",
+    "variants": [
+      {
+        "key": "control",
+        "label": "Current"
+      },
+      {
+        "key": "test",
+        "label": "Candidate"
+      }
+    ]
+  },
+  "input": {
+    "experimentKey": "synthetic_launch",
+    "variantKey": "test",
+    "assignmentId": "synthetic_launch:test:visitor-fixture",
+    "surface": "homepage",
+    "impact": "revenue",
+    "source": "statsig",
+    "isEnabled": true,
+    "isBlocked": false
+  },
+  "evaluation": {
+    "source": "statsig",
+    "rule_id": "synthetic-rule",
+    "group_name": "candidate",
+    "value": {
+      "variant": "test"
+    }
+  },
+  "issued": {
+    "experimentKey": "synthetic_launch",
+    "variantKey": "test",
+    "assignmentId": "synthetic_launch:test:visitor-fixture",
+    "surface": "homepage",
+    "impact": "revenue",
+    "source": "statsig",
+    "isEnabled": true,
+    "isBlocked": false,
+    "version": "5724b383c6cdeb76512de16b881b5f7a0f2b6977e8a088ea6e2d1abfa90d6d44",
+    "evaluationVersion": "a2b9777d5ee867b6b5891d91ea0a900c4a6bb404e9fe9854b11d6c688043cef4",
+    "releaseId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "versionKeyId": "fixture-key",
+    "versionSignature": "a9deaad9b1e9b87cf245b2ca182fbc66d40185e740035da35c941659c375ce98"
+  },
+  "metadata": {
+    "experiment_context_status": "complete",
+    "experiment_context": {
+      "synthetic_launch": {
+        "variant_key": "test",
+        "assignment_id": "synthetic_launch:test:visitor-fixture",
+        "version": "5724b383c6cdeb76512de16b881b5f7a0f2b6977e8a088ea6e2d1abfa90d6d44",
+        "evaluation_version": "a2b9777d5ee867b6b5891d91ea0a900c4a6bb404e9fe9854b11d6c688043cef4",
+        "release_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "version_key_id": "fixture-key",
+        "version_signature": "a9deaad9b1e9b87cf245b2ca182fbc66d40185e740035da35c941659c375ce98"
+      }
+    }
+  }
+}

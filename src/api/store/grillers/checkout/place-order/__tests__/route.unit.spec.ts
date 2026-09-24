@@ -1,4 +1,12 @@
-import { completeCartWorkflow, createPaymentSessionsWorkflow } from "@medusajs/core-flows"
+const priorReviewMode = process.env.GP_ORDER_REVIEW_ENFORCEMENT
+beforeEach(() => { process.env.GP_ORDER_REVIEW_ENFORCEMENT = "required"; jest.clearAllMocks() })
+afterEach(() => { if (priorReviewMode === undefined) delete process.env.GP_ORDER_REVIEW_ENFORCEMENT; else process.env.GP_ORDER_REVIEW_ENFORCEMENT = priorReviewMode })
+import { acceptCheckoutReview } from "../../../../../../lib/order-review-checkout"
+import { OrderPromiseError } from "../../../../../../lib/order-promise"
+import {
+  completeCartWorkflow,
+  createPaymentSessionsWorkflow,
+} from "@medusajs/core-flows"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { emitOpsAlert } from "../../../../../../lib/ops-alert"
 import { checkInventoryAvailability } from "../../../../../../lib/inventory-allocation"
@@ -29,7 +37,9 @@ jest.mock("../../../../../../lib/inventory-allocation", () => ({
   qbdListIdFromMetadata: jest.fn(() => "80000001-123"),
   requestedFulfillmentDateFromMetadata: jest.fn((metadata) => {
     if (!metadata || typeof metadata !== "object") return undefined
-    return (metadata as Record<string, unknown>).scheduledDate as string | undefined
+    return (metadata as Record<string, unknown>).scheduledDate as
+      | string
+      | undefined
   }),
 }))
 
@@ -45,6 +55,36 @@ jest.mock("../../../../payment-methods/utils", () => {
     getStripeCustomerId: jest.fn(() => "cus_123"),
   }
 })
+
+// The review adapter has its own authority/hash tests; these cases retain
+// their original ATP and alerting focus after the required review handoff.
+jest.mock("../../../../../../lib/order-review-checkout", () => ({
+  ...jest.requireActual("../../../../../../lib/order-review-checkout"),
+  assertReviewOwner: jest.fn(async () => ({
+    staff: false,
+    customerId: "cus_medusa_123",
+  })),
+  readReviewAcceptance: jest.fn(() => ({
+    reviewId: "gpor_fixture",
+    requestId: "d98224fb-c599-4a63-92ba-22189c505126",
+    analyticsConsent: null,
+  })),
+  reviewCart: jest.fn(async () => ({
+    id: "cart_test_123",
+    customer_id: "cus_medusa_123",
+  })),
+  acceptCheckoutReview: jest.fn(async () => ({
+    completed: false,
+    snapshot: {
+      promise: {
+        terms: {
+          payment_consent_version: "v1",
+          payment_consent_text: "I consent",
+        },
+      },
+    },
+  })),
+}))
 
 // Import POST AFTER mocks are registered.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -197,18 +237,26 @@ describe("place-order route ops alerting", () => {
   })
 
   it("surfaces shipping review as a recoverable conflict without a payment session", async () => {
-    ;(getPaymentContextCustomer as jest.Mock).mockRejectedValueOnce(new ShippingInputError("unreviewed_shipping_weight"))
+    ;(getPaymentContextCustomer as jest.Mock).mockRejectedValueOnce(
+      new ShippingInputError("unreviewed_shipping_weight")
+    )
     const { req, res } = makeReqRes()
     await POST(req, res)
     expect(res.status).toHaveBeenCalledWith(409)
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({type:"shipping_review_required"}))
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "shipping_review_required" })
+    )
     expect(createPaymentSessionsWorkflow).not.toHaveBeenCalled()
     expect(emitOpsAlert).not.toHaveBeenCalled()
   })
 
   it("blocks checkout before payment session creation when server-side ATP is unresolved", async () => {
     ;(getPaymentContextCustomer as jest.Mock).mockResolvedValueOnce({
-      customer: { id: "cus_medusa_123", email: "avi@example.com", metadata: {} },
+      customer: {
+        id: "cus_medusa_123",
+        email: "avi@example.com",
+        metadata: {},
+      },
       staffTargetCustomerId: null,
     })
     ;(checkInventoryAvailability as jest.Mock).mockResolvedValueOnce([
@@ -247,4 +295,43 @@ describe("place-order route ops alerting", () => {
     expect(createPaymentSessionsWorkflow).not.toHaveBeenCalled()
     expect(completeCartWorkflow).not.toHaveBeenCalled()
   })
+})
+
+it("rejects a stale review before payment or native order effects", async () => {
+  ;(getPaymentContextCustomer as jest.Mock).mockResolvedValueOnce({
+    customer: { id: "cus_medusa_123", metadata: {} },
+    staffTargetCustomerId: null,
+  })
+  ;(acceptCheckoutReview as jest.Mock).mockRejectedValueOnce(
+    new OrderPromiseError("order_review_changed_refresh_required")
+  )
+  const { req, res } = makeReqRes()
+  await POST(req, res)
+  expect(res.status).toHaveBeenCalledWith(409)
+  expect(createPaymentSessionsWorkflow).not.toHaveBeenCalled()
+  expect(completeCartWorkflow).not.toHaveBeenCalled()
+})
+
+it("default-off keeps the legacy consent and reaches the inventory guard without a review", async () => {
+  delete process.env.GP_ORDER_REVIEW_ENFORCEMENT
+  ;(getPaymentContextCustomer as jest.Mock).mockResolvedValueOnce({ customer: { id: "cus_medusa_123", metadata: {} } })
+  ;(checkInventoryAvailability as jest.Mock).mockResolvedValueOnce([{ variant_id: "variant_123", requested_quantity: 3, available_to_promise_quantity: 0, decision: "blocked", reason: "out_of_stock" }])
+  const { req, res } = makeReqRes()
+  await POST(req, res)
+  expect(acceptCheckoutReview).not.toHaveBeenCalled()
+  expect(checkInventoryAvailability).toHaveBeenCalled()
+  expect(req.body.consent_version).toBe("v1")
+  expect(req.body.consent_text).toBe("I consent")
+  expect(res.status).toHaveBeenCalledWith(409)
+  expect(createPaymentSessionsWorkflow).not.toHaveBeenCalled()
+})
+it("default-off still requires final-charge consent before any payment", async () => {
+  delete process.env.GP_ORDER_REVIEW_ENFORCEMENT
+  ;(getPaymentContextCustomer as jest.Mock).mockResolvedValueOnce({ customer: { id: "cus_medusa_123", metadata: {} } })
+  const { req, res } = makeReqRes()
+  delete req.body.consent_text
+  await POST(req, res)
+  expect(res.status).toHaveBeenCalledWith(400)
+  expect(res.json).toHaveBeenCalledWith({ message: "Final charge consent is required." })
+  expect(createPaymentSessionsWorkflow).not.toHaveBeenCalled()
 })
