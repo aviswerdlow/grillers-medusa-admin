@@ -15,6 +15,7 @@ import {
   classifyTransactionalInboundSms,
   orderShippedSmsFulfillmentEligibility,
   sanitizeOrderSmsConsentMetadata,
+  resumeBlackoutDeferredOrderSms,
   sendOrderSmsEnrollmentConfirmation,
   sendOrderShippedSms,
   transactionalSmsConfigured,
@@ -32,6 +33,18 @@ jest.mock("../communications/destinations", () => ({
 jest.mock("../communications/queue", () => ({
   enqueueCommunicationEvent: jest.fn(async () => true),
 }))
+
+jest.mock("../communications/hebrew-calendar", () => ({
+  isInSendBlackout: jest.fn(() => ({ blocked: false })),
+  nextAllowedSendTime: jest.fn(() => new Date("2026-07-12T02:00:00Z")),
+}))
+
+jest.mock("../emails/order-fetch", () => ({
+  fetchOrderForEmail: jest.fn(),
+}))
+
+const { isInSendBlackout } = jest.requireMock("../communications/hebrew-calendar")
+const { fetchOrderForEmail } = jest.requireMock("../emails/order-fetch")
 
 function orderSmsConsent(overrides: Record<string, any> = {}) {
   return {
@@ -128,6 +141,13 @@ function fakeDb(options: {
           ? [{ count: options.count || 0 }]
           : chain._select && table === "order"
             ? options.orderRows || []
+            : table === "gp_message_log" &&
+                chain._filters.some(
+                  ([key, value]: [string, any]) =>
+                    key === "status" && value === "deferred"
+                ) &&
+                messageRow?.status === "deferred"
+              ? [messageRow]
             : []
       ).then(resolve)
     return chain
@@ -294,6 +314,85 @@ describe("transactional Twilio transport", () => {
     process.env = { ...savedEnv }
     global.fetch = savedFetch
     jest.restoreAllMocks()
+  })
+
+  it("defers order SMS during blackout when the new policy is enabled", async () => {
+    process.env.GP_OBSERVANCE_SEND_POLICY_ENABLED = "true"
+    process.env.TWILIO_TRANSACTIONAL_SMS_ENABLED = "true"
+    process.env.TWILIO_ACCOUNT_SID = `AC${"a".repeat(32)}`
+    process.env.TWILIO_AUTH_TOKEN = "auth_test"
+    process.env.TWILIO_TRANSACTIONAL_MESSAGING_SERVICE_SID = `MG${"b".repeat(32)}`
+    process.env.TWILIO_TRANSACTIONAL_STATUS_WEBHOOK_URL =
+      "https://backend.example.com/webhooks/twilio/sms/transactional/status"
+    process.env.TWILIO_TRANSACTIONAL_FROM = "+18335747455"
+    ;(isInSendBlackout as jest.Mock).mockReturnValue({
+      blocked: true,
+      reason: "shabbat",
+      until: new Date("2026-07-11T02:00:00Z"),
+    })
+    const state = fakeDb()
+    global.fetch = jest.fn() as any
+
+    const result = await sendOrderShippedSms(
+      { resolve: () => state.db } as any,
+      { order: order(), fulfillmentId: "ful_123", trackingNumber: "TRACK123" }
+    )
+
+    expect(result).toMatchObject({ ok: false, deferred: true })
+    expect(global.fetch).not.toHaveBeenCalled()
+    expect(state.messageRow?.status).toBe("deferred")
+    expect(state.messageRow?.metadata.defer_until).toBe(
+      "2026-07-11T02:00:00.000Z"
+    )
+
+    ;(isInSendBlackout as jest.Mock).mockReturnValue({ blocked: false })
+    const messageSid = `SM${"d".repeat(32)}`
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      json: async () => ({ sid: messageSid, status: "queued" }),
+    })) as any
+    const resumed = await sendOrderShippedSms(
+      { resolve: () => state.db } as any,
+      { order: order(), fulfillmentId: "ful_123", trackingNumber: "TRACK123" }
+    )
+    expect(resumed).toEqual({ ok: true, messageSid })
+    expect(
+      state.writes.filter(
+        (write) => write.table === "gp_message_log" && write.op === "insert"
+      )
+    ).toHaveLength(1)
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it("rechecks the original phone before replaying a deferred SMS", async () => {
+    process.env.GP_OBSERVANCE_SEND_POLICY_ENABLED = "true"
+    ;(fetchOrderForEmail as jest.Mock).mockResolvedValue({
+      ...order(),
+      shipping_address: { phone: "(404) 555-0199" },
+    })
+    const state = fakeDb({
+      messageRow: {
+        id: "gpmsg_deferred123",
+        status: "deferred",
+        channel: "sms",
+        order_id: "order_123",
+        template_key: ORDER_SMS_TEMPLATE_SHIPPED,
+        metadata: {
+          program: ORDER_SMS_PROGRAM,
+          phone: "+14045550100",
+          fulfillment_id: "ful_123",
+          tracking_number: "TRACK123",
+          defer_until: "2026-07-11T02:00:00.000Z",
+        },
+      },
+    })
+    global.fetch = jest.fn() as any
+    const summary = await resumeBlackoutDeferredOrderSms(
+      { resolve: () => state.db } as any
+    )
+    expect(summary).toMatchObject({ processed: 1, skipped: 1, sent: 0 })
+    expect(state.messageRow?.status).toBe("suppressed")
+    expect(global.fetch).not.toHaveBeenCalled()
   })
 
   function order() {

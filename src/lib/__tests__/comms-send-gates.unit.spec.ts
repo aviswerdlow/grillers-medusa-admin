@@ -126,12 +126,22 @@ function baseInput(overrides: Record<string, any> = {}) {
 
 describe("sendTrackedEmail gates", () => {
   let notification: { createNotifications: jest.Mock }
+  const originalPolicyFlag = process.env.GP_OBSERVANCE_SEND_POLICY_ENABLED
 
   beforeEach(() => {
     jest.clearAllMocks()
+    delete process.env.GP_OBSERVANCE_SEND_POLICY_ENABLED
     ;(isInSendBlackout as jest.Mock).mockReturnValue({ blocked: false })
     notification = {
       createNotifications: jest.fn(async () => [{ provider_id: "pm_msg_1" }]),
+    }
+  })
+
+  afterAll(() => {
+    if (originalPolicyFlag === undefined) {
+      delete process.env.GP_OBSERVANCE_SEND_POLICY_ENABLED
+    } else {
+      process.env.GP_OBSERVANCE_SEND_POLICY_ENABLED = originalPolicyFlag
     }
   })
 
@@ -318,6 +328,51 @@ describe("sendTrackedEmail gates", () => {
     expect(result.ok).toBe(true)
     expect(result.skipped).toBeUndefined()
     expect(notification.createNotifications).toHaveBeenCalledTimes(1)
+  })
+
+  it("allows an approved order notice under the enabled policy", async () => {
+    process.env.GP_OBSERVANCE_SEND_POLICY_ENABLED = "true"
+    ;(isInSendBlackout as jest.Mock).mockReturnValue({
+      blocked: true,
+      reason: "shabbat",
+      until: new Date("2026-07-11T02:00:00Z"),
+    })
+    const { db, state } = fakeDb()
+    state.gp_customer_profile = [consentedProfile({ email_consent: false })]
+    const result = await sendTrackedEmail(
+      fakeContainer(db, notification),
+      baseInput({
+        stream: "transactional",
+        purpose: "transactional",
+        template_key: "order-placed",
+        topic: "order_updates",
+        order_id: "order_123",
+      })
+    )
+    expect(result.ok).toBe(true)
+    expect(notification.createNotifications).toHaveBeenCalledTimes(1)
+  })
+
+  it("defers unapproved service email under the enabled policy", async () => {
+    process.env.GP_OBSERVANCE_SEND_POLICY_ENABLED = "true"
+    ;(isInSendBlackout as jest.Mock).mockReturnValue({
+      blocked: true,
+      reason: "shabbat",
+      until: new Date("2026-07-11T02:00:00Z"),
+    })
+    const { db, state } = fakeDb()
+    state.gp_customer_profile = [consentedProfile({ email_consent: false })]
+    const result = await sendTrackedEmail(
+      fakeContainer(db, notification),
+      baseInput({
+        stream: "transactional",
+        purpose: "service",
+        template_key: "customer-welcome",
+        topic: "account",
+      })
+    )
+    expect(result).toMatchObject({ ok: false, deferred: true })
+    expect(notification.createNotifications).not.toHaveBeenCalled()
   })
 
   it("staff_test still defers during the send blackout", async () => {
