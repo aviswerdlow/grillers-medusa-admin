@@ -4,6 +4,8 @@ jest.mock("../../../../../../../../lib/wwex-finalization-shipment", () => ({
 }))
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { emitOpsAlert } from "../../../../../../../../lib/ops-alert"
+import { previewFinalization } from "../../../../../../../../lib/catch-weight-finalization"
+import { institutionalCheckoutAuthority, reserveInstitutionalCheckout } from "../../../../../../../../lib/gp-institutional-checkout"
 
 const mockApproveFinalization = jest.fn()
 const mockInvoiceArOrderMetadata = jest.fn((_input: any) => ({
@@ -31,6 +33,11 @@ jest.mock("../../../../../../../../lib/catch-weight-finalization", () => ({
 
 jest.mock("../../../../../../../../lib/ops-alert", () => ({
   emitOpsAlert: jest.fn(async () => ({ ok: true, skipped: false })),
+}))
+jest.mock("../../../../../../../../lib/gp-institutional-checkout", () => ({
+  institutionalCheckoutAuthority: jest.fn(),
+  institutionalDollarsToCents: jest.requireActual("../../../../../../../../lib/gp-institutional-checkout").institutionalDollarsToCents,
+  reserveInstitutionalCheckout: jest.fn(),
 }))
 
 import { POST } from "../route"
@@ -71,9 +78,15 @@ function makeScope() {
 }
 
 describe("approve finalization route", () => {
+  const priorInstitutionalFlag = process.env.GP_INSTITUTIONAL_TERMS_ENABLED
   beforeEach(() => {
     jest.clearAllMocks()
     mockIsInvoiceOrder.mockReturnValue(false)
+    delete process.env.GP_INSTITUTIONAL_TERMS_ENABLED
+  })
+  afterAll(() => {
+    if (priorInstitutionalFlag === undefined) delete process.env.GP_INSTITUTIONAL_TERMS_ENABLED
+    else process.env.GP_INSTITUTIONAL_TERMS_ENABLED = priorInstitutionalFlag
   })
 
   it("passes finalized lines and shipper packages into the A/R envelope without starting a charge", async () => {
@@ -185,6 +198,47 @@ describe("approve finalization route", () => {
       })
     )
   })
+it("holds a flagged invoice before release when its source is stale", async () => {
+  process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+  mockIsInvoiceOrder.mockReturnValue(true)
+  ;(institutionalCheckoutAuthority as jest.Mock).mockResolvedValueOnce({ status: "hold", reason: "stale_source" })
+  const { scope, query, orderModule } = makeScope()
+  query.graph.mockResolvedValueOnce({ data: [{
+    id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
+    metadata: { gp_institutional_commitment_id: "cart:cart_123" },
+  }] } as any)
+  const res = makeRes()
+  await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
+  expect(res.status).toHaveBeenCalledWith(409)
+  expect(mockApproveFinalization).not.toHaveBeenCalled()
+  expect(reserveInstitutionalCheckout).not.toHaveBeenCalled()
+  expect(orderModule.updateOrders).not.toHaveBeenCalled()
+})
+
+it("reserves the packed invoice total before A/R release", async () => {
+  process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+  mockIsInvoiceOrder.mockReturnValue(true)
+  const account = { companyKey: "TEST_SHA", customerListId: "TEST_LIST", creditLimitCents: 100000, invoices: [] }
+  ;(institutionalCheckoutAuthority as jest.Mock).mockResolvedValueOnce({ status: "allow", account })
+  ;(reserveInstitutionalCheckout as jest.Mock).mockResolvedValueOnce({ status: "reserved", projectedCents: 50000 })
+  ;(previewFinalization as jest.Mock).mockResolvedValueOnce({ errors: [], totals: { final_order_total: 500 } })
+  mockApproveFinalization.mockResolvedValueOnce({
+    finalization: { id: "fin_123", status: "released_to_fulfillment" },
+    totals: { final_order_total: 500, delta_total: 50 }, lines: [], packages: [],
+  })
+  const { scope, query } = makeScope()
+  query.graph.mockResolvedValueOnce({ data: [{
+    id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
+    metadata: { gp_institutional_commitment_id: "cart:cart_123" },
+  }] } as any)
+  const res = makeRes()
+  await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
+  expect(reserveInstitutionalCheckout).toHaveBeenCalledWith(expect.objectContaining({
+    account, reservationId: "cart:cart_123", amountCents: 50000,
+  }))
+  expect(mockApproveFinalization).toHaveBeenCalledTimes(1)
+  expect(res.status).toHaveBeenCalledWith(200)
+})
 })
 
 it("holds an invoice shipment before approval and A/R release when pricing is incomplete", async () => {

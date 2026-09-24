@@ -14,6 +14,11 @@ import {
 import { FINALIZATION_PACKED_PENDING_CHARGE_EVENT } from "../../../../../../../lib/auto-finalize-charge"
 import { requestStaffPrincipal } from "../../../../../../../lib/staff-principal"
 import {
+  institutionalCheckoutAuthority,
+  institutionalDollarsToCents,
+  reserveInstitutionalCheckout,
+} from "../../../../../../../lib/gp-institutional-checkout"
+import {
   emitFinalizationRouteFailureAlert,
   jsonError,
   loadFinalizationOrderForRoute,
@@ -46,6 +51,34 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           "Shipping needs review before this invoice order can be released."
         )
       shippingCostMetadata = quoted.metadata
+    }
+    if (isInvoiceOrder(order) && process.env.GP_INSTITUTIONAL_TERMS_ENABLED === "true") {
+      const commitmentId = metadataObject(order.metadata).gp_institutional_commitment_id
+      if (typeof commitmentId !== "string" || commitmentId !== `cart:${order.cart_id}` ||
+          typeof order.customer_id !== "string" || !order.customer_id) {
+        throw new Error("Institutional order identity or reservation is unverified.")
+      }
+      const authority = await institutionalCheckoutAuthority(order.customer_id)
+      if (authority.status !== "allow") {
+        throw new Error("Institutional terms need a current account review.")
+      }
+      const preview = await previewFinalization(db, {
+        ...order,
+        metadata: { ...metadataObject(order.metadata), ...shippingCostMetadata },
+      })
+      if (preview.errors.length) {
+        throw new Error("Finalization cannot be approved until all line errors are fixed.")
+      }
+      const amountCents = institutionalDollarsToCents(preview.totals.final_order_total)
+      const credit = await reserveInstitutionalCheckout({
+        db,
+        account: authority.account,
+        reservationId: commitmentId,
+        amountCents,
+      })
+      if (credit.status !== "reserved") {
+        throw new Error("Institutional credit is on hold for review.")
+      }
     }
     const approved = await approveFinalization(
       db,
