@@ -70,6 +70,18 @@ describe("institutional document exposure (#370 fixtures)", () => {
     expect(result.reasons).toContain("posted_cancellation_waiting_for_qbd:TEST_ORDER_G")
   })
 
+  it("holds a cancelled posted order even while its invoice remains in the QBD read", () => {
+    const result = calculateInstitutionalExposure({
+      invoices: [invoice("TEST_INVOICE_G", 40000)],
+      commitments: [commitment("TEST_ORDER_G", 40000, "cancelled", "TEST_INVOICE_G")],
+    })
+
+    expect(result.totalCents).toBe(40000)
+    expect(result.commitmentCents).toBe(0)
+    expect(result.quarantined).toBe(true)
+    expect(result.reasons).toContain("posted_cancellation_waiting_for_qbd:TEST_ORDER_G")
+  })
+
   it("quarantines uncertain credits and a posted order lacking invoice identity", () => {
     const result = calculateInstitutionalExposure({
       invoices: [],
