@@ -229,6 +229,7 @@ it.each([guardNativeCartInventory, guardNativePaymentInventory])("refuses unmana
 })
 
 it("leaves native checkout guards off until explicitly enabled", async () => {
+  delete process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED
   const next = jest.fn()
   const req: any = { scope: { resolve: () => { throw new Error("flag-off guard read inventory") } } }
   await guardNativeCartInventory(req, {} as any, next)
