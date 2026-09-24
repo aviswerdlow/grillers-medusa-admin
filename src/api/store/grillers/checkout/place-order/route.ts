@@ -51,6 +51,7 @@ import {
   reserveInstitutionalCheckout,
   type InstitutionalCheckoutAuthority,
 } from "../../../../../lib/gp-institutional-checkout";
+import { withInstitutionalFinalizationWrite } from "../../../../../lib/gp-institutional-finalization-lock";
 import { sanitizeOrderSmsConsentMetadata } from "../../../../../lib/communications/transactional-sms";
 
 import { ShippingInputError } from "../../../../../lib/shipping-weights";
@@ -686,7 +687,10 @@ async function placeInvoiceOrder(
 
   // Track catch-weight packing/weighing via a finalization row, but NO payment setup (no card).
   // The final weight is invoiced (Phase 4) rather than charged.
-  const finalization = await ensureFinalizationForOrder(db, order);
+  const finalization = await withInstitutionalFinalizationWrite(
+    db, order, (workDb) => ensureFinalizationForOrder(workDb, order),
+    { readReleased: true }
+  );
 
   // Re-stamp the source-backed reservation alongside the finalization fields.
   const metadata = {
@@ -996,7 +1000,10 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       );
     }
 
-    const finalization = await ensureFinalizationForOrder(db, order);
+    const finalization = await withInstitutionalFinalizationWrite(
+      db, order, (workDb) => ensureFinalizationForOrder(workDb, order),
+      { readReleased: true }
+    );
     await ensurePaymentSetup(db, {
       order,
       cartId,

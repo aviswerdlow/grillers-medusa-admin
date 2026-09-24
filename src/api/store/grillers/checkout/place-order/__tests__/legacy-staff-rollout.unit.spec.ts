@@ -97,6 +97,12 @@ function fixture(lane: "card" | "invoice" = "card") {
   const locking = { execute: jest.fn(async (_key, fn) => { beforeLock?.(); return fn(); }) };
   const sessions = jest.fn(async (_input: any) => ({ result: {} }));
   const complete = jest.fn(async () => ({ errors: [], result: { id: "order_fixture" } }));
+  const trx: any = jest.fn(() => ({
+    where: () => ({ whereNull: () => ({ first: async () => null }) }),
+  }));
+  trx.raw = jest.fn(async () => ({ rows: [] }));
+  const db: any = jest.fn();
+  db.transaction = jest.fn(async (run) => run(trx));
   (createPaymentSessionsWorkflow as unknown as jest.Mock).mockReturnValue({ run: sessions });
   (completeCartWorkflow as unknown as jest.Mock).mockReturnValue({ run: complete });
   const req: any = {
@@ -108,7 +114,7 @@ function fixture(lane: "card" | "invoice" = "card") {
       if (key === Modules.CART) return cartModule;
       if (key === Modules.ORDER) return orderModule;
       if (key === Modules.LOCKING) return locking;
-      if (key === ContainerRegistrationKeys.PG_CONNECTION) return {};
+      if (key === ContainerRegistrationKeys.PG_CONNECTION) return db;
       if (key === ContainerRegistrationKeys.REMOTE_QUERY) return async () => [{ payment_collection: { id: "paycol_fixture" } }];
       if (key === ContainerRegistrationKeys.LOGGER) return { error: jest.fn(), warn: jest.fn() };
       throw new Error(`Unexpected service ${key}`);

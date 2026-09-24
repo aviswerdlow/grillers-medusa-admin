@@ -141,6 +141,7 @@ export type CreditReservationStore = {
  */
 export async function reserveInstitutionalCredit(input: {
   db: CreditDatabase
+  transaction?: CreditTransaction
   store: CreditReservationStore
   companyKey: string
   customerListId: string
@@ -165,7 +166,7 @@ export async function reserveInstitutionalCredit(input: {
     throw new Error("Only a valid accepted order can reserve institutional credit")
   }
 
-  return input.db.transaction(async (trx) => {
+  const reserve = async (trx: CreditTransaction): Promise<CreditReservationDecision> => {
     await trx.raw("select pg_advisory_xact_lock(hashtextextended(?, 0))", [
       `gp_institutional_credit:${companyKey}:${customerListId}`,
     ])
@@ -190,5 +191,6 @@ export async function reserveInstitutionalCredit(input: {
     // order ID under this account lock rather than create another commitment.
     await input.store.reserve(trx, { companyKey, customerListId }, input.commitment)
     return { status: "reserved", projectedCents, exposure }
-  })
+  }
+  return input.transaction ? reserve(input.transaction) : input.db.transaction(reserve)
 }

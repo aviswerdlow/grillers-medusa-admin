@@ -193,6 +193,23 @@ describe("atomic institutional credit reservations", () => {
     expect(rows[0].amountCents).toBe(20000)
   })
 
+  it("uses the caller's finalization transaction for the credit lock and reservation", async () => {
+    process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+    const { base, rows } = harness()
+    const transaction = { raw: jest.fn(async () => undefined) }
+    const db = { transaction: jest.fn(async () => { throw new Error("nested transaction") }) }
+    const result = await reserveInstitutionalCredit({
+      ...base, db, transaction, commitment: commitment("TEST_ORDER_A", 20000),
+    })
+    expect(result.status).toBe("reserved")
+    expect(db.transaction).not.toHaveBeenCalled()
+    expect(transaction.raw).toHaveBeenCalledWith(
+      expect.stringContaining("pg_advisory_xact_lock"),
+      ["gp_institutional_credit:TEST_COMPANY_A:TEST_LIST_001"]
+    )
+    expect(rows).toHaveLength(1)
+  })
+
   it("holds stale source, missing limit, and uncertain QBD credits", async () => {
     process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
     const { base } = harness()

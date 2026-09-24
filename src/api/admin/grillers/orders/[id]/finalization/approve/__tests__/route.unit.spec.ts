@@ -58,7 +58,12 @@ function makeScope() {
       data: [{ id: "order_123", metadata: {} }],
     })),
   }
-  const db = jest.fn()
+  const db: any = jest.fn()
+  const trx: any = jest.fn(() => ({
+    where: () => ({ whereNull: () => ({ first: async () => ({ status: "packed_pending_review" }) }) }),
+  }))
+  trx.raw = jest.fn(async () => ({ rows: [] }))
+  db.transaction = jest.fn(async (run) => run(trx))
   const orderModule = {
     updateOrders: jest.fn(async () => undefined),
   }
@@ -74,7 +79,7 @@ function makeScope() {
     },
   }
 
-  return { db, eventBus, logger, orderModule, query, scope }
+  return { db, trx, eventBus, logger, orderModule, query, scope }
 }
 
 describe("approve finalization route", () => {
@@ -215,7 +220,7 @@ it("holds a flagged invoice before release when its source is stale", async () =
   expect(orderModule.updateOrders).not.toHaveBeenCalled()
 })
 
-it("reserves the packed invoice total before A/R release", async () => {
+it("reserves the packed invoice total in the approval transaction before A/R release", async () => {
   process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
   mockIsInvoiceOrder.mockReturnValue(true)
   const account = { companyKey: "TEST_SHA", customerListId: "TEST_LIST", creditLimitCents: 100000, invoices: [] }
@@ -226,7 +231,7 @@ it("reserves the packed invoice total before A/R release", async () => {
     finalization: { id: "fin_123", status: "released_to_fulfillment" },
     totals: { final_order_total: 500, delta_total: 50 }, lines: [], packages: [],
   })
-  const { scope, query } = makeScope()
+  const { scope, query, trx } = makeScope()
   query.graph.mockResolvedValueOnce({ data: [{
     id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
     metadata: { gp_institutional_commitment_id: "cart:cart_123" },
@@ -234,10 +239,33 @@ it("reserves the packed invoice total before A/R release", async () => {
   const res = makeRes()
   await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
   expect(reserveInstitutionalCheckout).toHaveBeenCalledWith(expect.objectContaining({
-    account, reservationId: "cart:cart_123", amountCents: 50000,
+    account, reservationId: "cart:cart_123", amountCents: 50000, transaction: trx,
   }))
   expect(mockApproveFinalization).toHaveBeenCalledTimes(1)
   expect(res.status).toHaveBeenCalledWith(200)
+})
+
+it("rolls back approval when the packed total differs from the reserved amount", async () => {
+  process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+  mockIsInvoiceOrder.mockReturnValue(true)
+  ;(institutionalCheckoutAuthority as jest.Mock).mockResolvedValueOnce({ status: "allow", account: {
+    companyKey: "TEST_SHA", customerListId: "TEST_LIST", creditLimitCents: 100000, invoices: [],
+  } })
+  ;(reserveInstitutionalCheckout as jest.Mock).mockResolvedValueOnce({ status: "reserved" })
+  ;(previewFinalization as jest.Mock).mockResolvedValueOnce({ errors: [], totals: { final_order_total: 500 } })
+  mockApproveFinalization.mockResolvedValueOnce({
+    finalization: { id: "fin_123", status: "released_to_fulfillment" },
+    totals: { final_order_total: 501 }, lines: [], packages: [],
+  })
+  const { scope, query, orderModule } = makeScope()
+  query.graph.mockResolvedValueOnce({ data: [{
+    id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
+    metadata: { gp_institutional_commitment_id: "cart:cart_123" },
+  }] } as any)
+  const res = makeRes()
+  await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
+  expect(res.status).toHaveBeenCalledWith(409)
+  expect(orderModule.updateOrders).not.toHaveBeenCalled()
 })
 })
 

@@ -75,12 +75,14 @@ export function institutionalDollarsToCents(amount: unknown): number {
 /** The cart ID is a stable pre-order reservation ID; it travels on the order. */
 export async function reserveInstitutionalCheckout(input: {
   db: any
+  transaction?: any
   account: InstitutionalCheckoutAuthority
   reservationId: string
   amountCents: number
 }): Promise<CreditReservationDecision> {
   return reserveInstitutionalCredit({
     db: input.db,
+    transaction: input.transaction,
     store: new PostgresInstitutionalCreditStore(),
     companyKey: input.account.companyKey,
     customerListId: input.account.customerListId,
