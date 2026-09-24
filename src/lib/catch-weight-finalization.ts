@@ -1,3 +1,4 @@
+import { acceptedFinalizationSource } from "./order-promise-finalization"
 import {
   isUpsServiceCode,
   normalizeGrillersUpsServiceCode,
@@ -375,13 +376,17 @@ export const packageCaptureErrors = (
       )
     ) {
       errors.push({
-        message: `Package ${index + 1} needs all three positive measured dimensions, or none when using an approved box type.`,
+        message: `Package ${
+          index + 1
+        } needs all three positive measured dimensions, or none when using an approved box type.`,
       })
     }
     const packedWeight = nullableNumber(pkg.packed_weight_lb)
     if (packedWeight !== null && packedWeight > 50) {
       errors.push({
-        message: `Package ${index + 1} is over 50 lb including dry ice and packaging.`,
+        message: `Package ${
+          index + 1
+        } is over 50 lb including dry ice and packaging.`,
       })
     }
     return errors
@@ -695,11 +700,11 @@ const normalizeUnitWeights = (value: unknown): number[] => {
   const raw = Array.isArray(value)
     ? value
     : typeof value === "string"
-      ? value
-          .split(/[,\n]/)
-          .map((item) => item.trim())
-          .filter(Boolean)
-      : []
+    ? value
+        .split(/[,\n]/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+    : []
 
   return raw
     .map((item) => nullableNumber(item))
@@ -994,13 +999,20 @@ const lineEstimate = (item: Record<string, any>) => {
       "detail.subtotal",
       "detail.raw_subtotal",
     ]) || roundMoney(unitPrice * quantity)
-  const total =
-    fieldAmount(item, [
-      "total",
-      "raw_total",
-      "detail.total",
-      "detail.raw_total",
-    ]) || subtotal
+  const hasTotal = [
+    item.total,
+    item.raw_total,
+    item.detail?.total,
+    item.detail?.raw_total,
+  ].some((value) => value !== null && value !== undefined)
+  const total = hasTotal
+    ? fieldAmount(item, [
+        "total",
+        "raw_total",
+        "detail.total",
+        "detail.raw_total",
+      ])
+    : subtotal
   const tax = fieldAmount(item, [
     "tax_total",
     "raw_tax_total",
@@ -1457,16 +1469,30 @@ export async function ensureFinalizationForOrder(
   order: Record<string, any>,
   status = FINALIZATION_PENDING_PICK
 ) {
+  const accepted = await acceptedFinalizationSource(db, order)
+  if (accepted) order = { ...order, items: accepted.items }
   const existing = await db("gp_order_finalization")
     .where({ order_id: order.id })
     .whereNull("deleted_at")
     .first()
 
-  const breakdown = orderBreakdown(order)
+  const breakdown = accepted
+    ? {
+        estimated_item_total: accepted.promise.lines.reduce(
+          (sum, line) => roundMoney(sum + line.estimated_line_subtotal),
+          0
+        ),
+        estimated_shipping_total: accepted.promise.shipping_total,
+        estimated_tax_total: accepted.promise.tax_total,
+        estimated_discount_total: accepted.promise.discount_total,
+        estimated_order_total: accepted.promise.placement_total,
+      }
+    : orderBreakdown(order)
   const metadata = metadataObject(order.metadata)
 
   const base = {
-    cart_id: order.cart_id || metadata.cart_id || null,
+    cart_id:
+      accepted?.promise.cart_id || order.cart_id || metadata.cart_id || null,
     customer_id: order.customer_id || null,
     customer_email: order.email || null,
     display_id:
@@ -1552,8 +1578,8 @@ export async function ensureFinalizationForOrder(
       const patch = canSyncPrePickOrderEdits
         ? prePickOrderEditRepairPatch(line, snapshot)
         : repairableStatuses.has(finalization.status)
-          ? existingLineRepairPatch(line, snapshot, finalization.status)
-          : customerTitleRepairPatch(line, snapshot)
+        ? existingLineRepairPatch(line, snapshot, finalization.status)
+        : customerTitleRepairPatch(line, snapshot)
       if (!Object.keys(patch).length) return line
 
       await db("gp_order_finalization_line")
@@ -2458,8 +2484,8 @@ export async function previewFinalization(
   const persistedStatus = options.preserveWorkflowStatus
     ? detail.finalization.status
     : errors.length
-      ? FINALIZATION_PACKED_PENDING_REVIEW
-      : FINALIZATION_PACKED_PENDING_CHARGE
+    ? FINALIZATION_PACKED_PENDING_REVIEW
+    : FINALIZATION_PACKED_PENDING_CHARGE
 
   if (options.persist) {
     await Promise.all(
@@ -2910,7 +2936,9 @@ export async function retrieveStripeFinalPaymentIntent(
   }
 
   const response = await fetch(
-    `https://api.stripe.com/v1/payment_intents/${encodeURIComponent(paymentIntentId)}`,
+    `https://api.stripe.com/v1/payment_intents/${encodeURIComponent(
+      paymentIntentId
+    )}`,
     {
       method: "GET",
       headers: {

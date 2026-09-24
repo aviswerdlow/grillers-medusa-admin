@@ -1,4 +1,3 @@
-import { prepareReceiptEmailCompletion } from "./middlewares/receipt-email"
 import {
   authenticate,
   defineMiddlewares,
@@ -19,10 +18,17 @@ import {
 } from "../modules/fulfillment/serviceability"
 import { emitOpsAlert, type OpsAlertSeverity } from "../lib/ops-alert"
 import { opsErrorHandler } from "./middlewares/ops-error-handler"
+import { hideShippingInternals } from "./middlewares/shipping-inputs"
 import { protectCustomerStaffAuthority } from "./middlewares/customer-staff-authority"
 import { enforceStaffCartAuthority } from "./middlewares/staff-cart-authority"
-import { bindFulfillmentAudit, enforceStaffCapabilities, enforceStaffSessionEpoch, protectAdminCustomerAuthority, publishAdminStaffAccess, publishCurrentStaffAccess } from "./middlewares/staff-capabilities"
-import { hideShippingInternals, prepareNativeShippingAcceptance } from "./middlewares/shipping-inputs"
+import {
+  bindFulfillmentAudit,
+  enforceStaffCapabilities,
+  enforceStaffSessionEpoch,
+  protectAdminCustomerAuthority,
+  publishAdminStaffAccess,
+  publishCurrentStaffAccess,
+} from "./middlewares/staff-capabilities"
 import {
   rawStripeWebhookBody,
   stripeSignatureHeader,
@@ -170,7 +176,10 @@ export async function blockFulfillmentBeforeFinalCharge(
     }
 
     const verifiedOrder = { ...order, metadata }
-    if (orderRequiresFinalCharge(verifiedOrder) && !finalChargeSucceeded(verifiedOrder)) {
+    if (
+      orderRequiresFinalCharge(verifiedOrder) &&
+      !finalChargeSucceeded(verifiedOrder)
+    ) {
       res.status(409).json({
         type: "payment_required",
         message:
@@ -187,7 +196,9 @@ export async function blockFulfillmentBeforeFinalCharge(
     })
     const logger = req.scope.resolve(ContainerRegistrationKeys.LOGGER)
     const message = error instanceof Error ? error.message : String(error)
-    logger.warn(`[catch-weight-finalization] fulfillment gate lookup failed: ${message}`)
+    logger.warn(
+      `[catch-weight-finalization] fulfillment gate lookup failed: ${message}`
+    )
     // Page for operator recovery; fulfillment remains blocked even if alert
     // delivery is unavailable. Never create an automatic bypass here.
     emitGuardFailureAlert({
@@ -302,9 +313,11 @@ async function filterUnserviceableShippingOptions(
 
   // Resolve the cart's shipping address up front; if we can't, fail open by
   // leaving res.json untouched.
-  let shippingAddress:
-    | { postal_code?: string | null; city?: string | null; province?: string | null }
-    | null = null
+  let shippingAddress: {
+    postal_code?: string | null
+    city?: string | null
+    province?: string | null
+  } | null = null
   try {
     const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
     const { data } = await query.graph({
@@ -366,7 +379,10 @@ async function filterUnserviceableShippingOptions(
       restricted.map(async (option: any) => {
         const serviceCode = resolveServiceCodeFromMethod(option)
         try {
-          const ok = await isDestinationServiceable(serviceCode, shippingAddress)
+          const ok = await isDestinationServiceable(
+            serviceCode,
+            shippingAddress
+          )
           return [option.id as string, ok] as const
         } catch {
           // Fail open per option.
@@ -519,69 +535,80 @@ export async function dropUnserviceableShippingMethods(req: {
       return []
     }
 
-    const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
-    const { data } = await query.graph({
-      entity: "cart",
-      fields: [
-        "id",
-        "shipping_address.postal_code",
-        "shipping_address.city",
-        "shipping_address.province",
-        "shipping_methods.id",
-        "shipping_methods.name",
-        "shipping_methods.data",
-        "shipping_methods.shipping_option_id",
-        "shipping_methods.shipping_option.name",
-        "shipping_methods.shipping_option.data",
-      ],
-      filters: { id: cartId },
-    })
+    return await req.scope.resolve(Modules.LOCKING).execute(
+      cartId,
+      async () => {
+        const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+        const { data } = await query.graph({
+          entity: "cart",
+          fields: [
+            "id",
+            "completed_at",
+            "shipping_address.postal_code",
+            "shipping_address.city",
+            "shipping_address.province",
+            "shipping_methods.id",
+            "shipping_methods.name",
+            "shipping_methods.data",
+            "shipping_methods.shipping_option_id",
+            "shipping_methods.shipping_option.name",
+            "shipping_methods.shipping_option.data",
+          ],
+          filters: { id: cartId },
+        })
 
-    const cart = data?.[0] as any
-    if (!cart) {
-      return []
-    }
+        const cart = data?.[0] as any
+        if (!cart || cart.completed_at) {
+          return []
+        }
 
-    const methods: any[] = Array.isArray(cart.shipping_methods)
-      ? cart.shipping_methods
-      : []
-    if (methods.length === 0) {
-      return []
-    }
+        const methods: any[] = Array.isArray(cart.shipping_methods)
+          ? cart.shipping_methods
+          : []
+        if (methods.length === 0) {
+          return []
+        }
 
-    // Effective address: a NEW address in the request body wins (covers the
-    // "change address out of zone" case); otherwise the cart's CURRENT address.
-    const effectiveAddress: EffectiveAddress | null =
-      extractAddressFromBody(req.body) || cart.shipping_address || null
+        // Effective address: a NEW address in the request body wins (covers the
+        // "change address out of zone" case); otherwise the cart's CURRENT address.
+        const effectiveAddress: EffectiveAddress | null =
+          extractAddressFromBody(req.body) || cart.shipping_address || null
 
-    const invalidMethodIds: string[] = []
-    for (const method of methods) {
-      const serviceCode = resolveServiceCodeFromMethod(method)
-      // Fast path: only restricted services can be unserviceable — skip the
-      // Strapi round-trip for everything else (UPS / pickup / unknown).
-      if (!ZIP_RESTRICTED_SERVICE_CODES.has(serviceCode)) continue
+        const invalidMethodIds: string[] = []
+        for (const method of methods) {
+          const serviceCode = resolveServiceCodeFromMethod(method)
+          // Fast path: only restricted services can be unserviceable — skip the
+          // Strapi round-trip for everything else (UPS / pickup / unknown).
+          if (!ZIP_RESTRICTED_SERVICE_CODES.has(serviceCode)) continue
 
-      const serviceable = await isDestinationServiceable(
-        serviceCode,
-        effectiveAddress
-      )
-      if (!serviceable && method?.id) {
-        invalidMethodIds.push(method.id)
-      }
-    }
+          const serviceable = await isDestinationServiceable(
+            serviceCode,
+            effectiveAddress
+          )
+          if (!serviceable && method?.id) {
+            invalidMethodIds.push(method.id)
+          }
+        }
 
-    if (invalidMethodIds.length === 0) {
-      return []
-    }
+        if (invalidMethodIds.length === 0) {
+          return []
+        }
 
-    const cartModuleService = req.scope.resolve(Modules.CART)
-    await cartModuleService.deleteShippingMethods(invalidMethodIds)
+        const cartModuleService = req.scope.resolve(Modules.CART)
+        await cartModuleService.deleteShippingMethods(invalidMethodIds)
 
-    logger.info(
-      `[cart-shipping-presync] removed ${invalidMethodIds.length} unserviceable shipping method(s) from cart ${cartId} before re-price: ${invalidMethodIds.join(", ")}`
+        logger.info(
+          `[cart-shipping-presync] removed ${
+            invalidMethodIds.length
+          } unserviceable shipping method(s) from cart ${cartId} before re-price: ${invalidMethodIds.join(
+            ", "
+          )}`
+        )
+
+        return invalidMethodIds
+      },
+      { timeout: 30 }
     )
-
-    return invalidMethodIds
   } catch (error) {
     // Fail open: a heal failure must never block the cart mutation.
     const message = error instanceof Error ? error.message : String(error)
@@ -626,9 +653,20 @@ export default defineMiddlewares({
   errorHandler: opsErrorHandler,
   routes: [
     { matcher: "/store/carts*", middlewares: [enforceStaffCartAuthority] },
-    { matcher: "/store/payment-collections*", middlewares: [enforceStaffCartAuthority] },
-    { matcher: "/store/grillers/checkout/*", method: "POST", middlewares: [enforceStaffCartAuthority] },
-    { matcher: "/store/gp-inventory/resolution", method: "POST", middlewares: [enforceStaffCartAuthority] },
+    {
+      matcher: "/store/payment-collections*",
+      middlewares: [enforceStaffCartAuthority],
+    },
+    {
+      matcher: "/store/grillers/checkout/*",
+      method: "POST",
+      middlewares: [enforceStaffCartAuthority],
+    },
+    {
+      matcher: "/store/gp-inventory/resolution",
+      method: "POST",
+      middlewares: [enforceStaffCartAuthority],
+    },
     { matcher: "/store/products", method: ["GET"], middlewares: [filterPublicCatalog] },
     { matcher: "/store/products/:id", method: ["GET"], middlewares: [filterPublicCatalog] },
     { matcher: "/store/carts", method: ["POST"], middlewares: [guardNewCartItems] },
@@ -640,25 +678,19 @@ export default defineMiddlewares({
     { matcher: "/store/gp-inventory/availability", method: ["POST"], middlewares: [guardInventoryVariants] },
     { matcher: "/store/gp-inventory/resolution", method: ["POST"], middlewares: [guardInventoryResolution] },
     {
-      matcher: "/store/customers/me/receipt-email",
-      method: ["GET", "POST"],
-      middlewares: [authenticate("customer", ["session", "bearer"])],
-    },
-    {
-      matcher: "/store/carts/:id/complete",
-      method: ["POST"],
-      middlewares: [prepareReceiptEmailCompletion],
-    },
-    { matcher: "/store/*", middlewares: [hideShippingInternals] },
-    { matcher: "/store/carts/:id/complete", method: ["POST"], middlewares: [prepareNativeShippingAcceptance] },
-    {
       matcher: "/admin/*",
-      middlewares: [authenticate("user", ["session", "bearer", "api-key"]), enforceStaffCapabilities],
+      middlewares: [
+        authenticate("user", ["session", "bearer", "api-key"]),
+        enforceStaffCapabilities,
+      ],
     },
     {
       matcher: "/auth/token/refresh",
       method: "POST",
-      middlewares: [authenticate("*", ["bearer"], { allowUnregistered: true }), enforceStaffSessionEpoch],
+      middlewares: [
+        authenticate("*", ["bearer"], { allowUnregistered: true }),
+        enforceStaffSessionEpoch,
+      ],
     },
     {
       matcher: "/auth/session",
@@ -668,7 +700,10 @@ export default defineMiddlewares({
     {
       matcher: "/store/customers/me",
       method: "GET",
-      middlewares: [authenticate("customer", ["session", "bearer"]), publishCurrentStaffAccess],
+      middlewares: [
+        authenticate("customer", ["session", "bearer"]),
+        publishCurrentStaffAccess,
+      ],
     },
     {
       matcher: "/admin/customers",
@@ -699,6 +734,30 @@ export default defineMiddlewares({
       matcher: "/store/customers/me",
       method: ["POST"],
       middlewares: [authenticate("customer", ["session", "bearer"]), protectCustomerStaffAuthority],
+    },
+    {
+      matcher: "/store/customers/me/receipt-email",
+      method: ["GET", "POST"],
+      middlewares: [authenticate("customer", ["session", "bearer"])],
+    },
+    {
+      matcher: "/store/carts/:id/complete",
+      method: ["POST"],
+      middlewares: [
+        authenticate("customer", ["session", "bearer"], {
+          allowUnauthenticated: true,
+        }),
+      ],
+    },
+    { matcher: "/store/*", middlewares: [hideShippingInternals] },
+    {
+      matcher: "/store/carts/:id/order-review",
+      method: ["GET", "POST"],
+      middlewares: [
+        authenticate("customer", ["session", "bearer"], {
+          allowUnauthenticated: true,
+        }),
+      ],
     },
     {
       matcher: "/store/shipping-options",
