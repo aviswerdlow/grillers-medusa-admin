@@ -10,6 +10,7 @@ export function adminRouteCapability(path: string, method: string, body: any = {
   if (/^\/admin\/customers(?:\/[^/]+)?(?:\/addresses(?:\/[^/]+)?)?$/.test(p)) return read ? "customers.read" : method === "POST" || (method === "DELETE" && p.includes("/addresses/")) ? "customers.write" : null
   if (p === "/admin/grillers/customers" || /^\/admin\/grillers\/customers\/[^/]+\/offline-payment$/.test(p)) return "customers.write"
   if (/^\/admin\/grillers\/customers\/[^/]+\/institutional-terms$/.test(p)) return read ? "customers.read" : null
+  if (/^\/admin\/grillers\/orders\/[^/]+\/institutional-collection$/.test(p)) return read ? "orders.read" : null
   if (/^\/admin\/grillers\/communications(?:\/|$)/.test(p)) return "communications"
   if (/^\/admin\/grillers\/quickbooks-sync(?:\/|$)/.test(p) || /^\/admin\/grillers\/orders\/[^/]+\/accounting-action$/.test(p)) return "accounting"
   if (/^\/admin\/grillers\/inventory\/(availability|allocations)$/.test(p)) return "inventory.read"
