@@ -37,13 +37,18 @@ export async function institutionalFulfillmentDecision(input: {
   const cartId = text(input.order.cart_id)
   const metadata = input.order.metadata || {}
   const commitmentId = text(metadata.gp_institutional_commitment_id)
+  const postingStatus = String(metadata.qbd_posting_status)
+  const postingEvidence = postingStatus === "posted"
+    ? text(metadata.qbd_txn_id) !== null
+    : metadata.qbd_posting_required === true
   if (!orderId || !cartId || commitmentId !== `cart:${cartId}` ||
       metadata.payment_workflow !== "invoice_ar" ||
       metadata.finalization_status !== "released_to_fulfillment" ||
       metadata.fulfillment_gate_status !== "released" ||
       metadata.qbd_posting_action !== "invoice_ar_accounting_record" ||
       metadata.qbd_posting_request_key !== `invoice_ar:${orderId}` ||
-      !["pending", "pending_manual", "queued", "posted"].includes(String(metadata.qbd_posting_status))) {
+      !["pending", "pending_manual", "queued", "posted"].includes(postingStatus) ||
+      !postingEvidence) {
     return { status: "hold", reason: "invoice_release_unverified" }
   }
   const postedAmount = integer(metadata.qbd_posting_amount)

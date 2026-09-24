@@ -100,6 +100,7 @@ const releasedInvoice = {
     qbd_posting_action: "invoice_ar_accounting_record",
     qbd_posting_request_key: `invoice_ar:${orderId}`,
     qbd_posting_status: "pending_manual",
+    qbd_posting_required: true,
     qbd_posting_amount: 50000,
   },
 }
@@ -113,6 +114,15 @@ describe.each(routes)("institutional invoice gate on $matcher", (route) => {
     expect(h.createFulfillmentOrShipment).toHaveBeenCalledTimes(1)
     expect(h.db).toHaveBeenCalledWith("gp_order_finalization")
     expect(h.db).toHaveBeenCalledWith("gp_institutional_credit_commitment")
+  })
+
+  it("accepts a confirmed QBD invoice after posting clears the pending flag", async () => {
+    const h = harness(route, [{
+      ...releasedInvoice,
+      metadata: { ...releasedInvoice.metadata, qbd_posting_status: "posted", qbd_posting_required: false, qbd_txn_id: "TEST_TXN" },
+    }])
+    await h.run()
+    expect(h.createFulfillmentOrShipment).toHaveBeenCalledTimes(1)
   })
 
   it("blocks a forged metadata release with no durable credit row", async () => {
