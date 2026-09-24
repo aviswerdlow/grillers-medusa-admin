@@ -23,21 +23,36 @@ export async function currentStaffCustomer(req: MedusaRequest, id: string): Prom
 export async function resolveStaffPrincipal(req: MedusaRequest): Promise<StaffPrincipal> {
   const transport = (req as any).auth_context || {}
   const transportId = String(transport.actor_id || "")
-  if (transport.actor_type === "user" && configuredIds("GP_PRIVILEGED_ADMIN_USER_IDS").has(transportId)) {
-    const user = await req.scope.resolve(Modules.USER).retrieveUser(transportId)
-    if (user?.id !== transportId) throw new StaffAccessDenied("The admin account is unavailable.")
-    return { id: user.id, kind: "operator", email: user.email || null, name: [user.first_name, user.last_name].filter(Boolean).join(" ") || user.email || user.id, role: "super_admin", capabilities: new Set(), transport_id: transportId, auth: transport }
-  }
-  if (transport.actor_type !== "api-key") throw new StaffAccessDenied("This admin identity has no approved staff access.")
-  // A configured gateway key can never fall back to service/operator access,
-  // even if it is accidentally also listed as a read-only key.
-  if (transportId === process.env.GP_STAFF_GATEWAY_API_KEY_ID) {
+  const gatewayUser = transport.actor_type === "user" && !!transportId && transportId === process.env.GP_STAFF_GATEWAY_USER_ID?.trim()
+  const gatewayKey = transport.actor_type === "api-key" && !!transportId && transportId === process.env.GP_STAFF_GATEWAY_API_KEY_ID?.trim()
+  const readOnlyUser = transport.actor_type === "user" && configuredIds("GP_ADMIN_READ_ONLY_USER_IDS").has(transportId)
+  if (gatewayUser && readOnlyUser) throw new StaffAccessDenied("This native service user has conflicting classifications.")
+  // A gateway native user is a transport for the signed customer, never an
+  // operator. Resolve it before the privileged-user list so dual listing fails
+  // closed without the forwarded staff session.
+  if (gatewayUser || gatewayKey) {
+    if (gatewayUser) {
+      const user = await req.scope.resolve(Modules.USER).retrieveUser(transportId)
+      if (user?.id !== transportId) throw new StaffAccessDenied("The staff gateway account is unavailable.")
+    }
     const auth = signedCustomerContext(req, req.headers[STAFF_AUTHORIZATION_HEADER])
     if (!auth?.actor_id) throw new StaffAccessDenied("A signed-in staff session is required.")
     const customer = await currentStaffCustomer(req, auth.actor_id)
     if (!staffSessionIsCurrent(customer, auth)) throw new StaffAccessDenied("Staff access changed. Sign in again.")
     return { id: auth.actor_id, kind: "customer", email: customer.email || null, name: [customer.first_name, customer.last_name].filter(Boolean).join(" ") || customer.email || auth.actor_id, role: staffRole(customer), capabilities: staffCapabilities(customer), transport_id: transportId, auth }
   }
+  if (readOnlyUser) {
+    if (req.headers[STAFF_AUTHORIZATION_HEADER]) throw new StaffAccessDenied("This credential is not the staff gateway.")
+    const user = await req.scope.resolve(Modules.USER).retrieveUser(transportId)
+    if (user?.id !== transportId) throw new StaffAccessDenied("The read-only account is unavailable.")
+    return { id: transportId, kind: "service", email: null, name: "Integration: read_only", role: "customer", capabilities: new Set(), transport_id: transportId, auth: transport, service_role: "read_only" }
+  }
+  if (transport.actor_type === "user" && configuredIds("GP_PRIVILEGED_ADMIN_USER_IDS").has(transportId)) {
+    const user = await req.scope.resolve(Modules.USER).retrieveUser(transportId)
+    if (user?.id !== transportId) throw new StaffAccessDenied("The admin account is unavailable.")
+    return { id: user.id, kind: "operator", email: user.email || null, name: [user.first_name, user.last_name].filter(Boolean).join(" ") || user.email || user.id, role: "super_admin", capabilities: new Set(), transport_id: transportId, auth: transport }
+  }
+  if (transport.actor_type !== "api-key") throw new StaffAccessDenied("This admin identity has no approved staff access.")
   if (req.headers[STAFF_AUTHORIZATION_HEADER]) throw new StaffAccessDenied("This credential is not the staff gateway.")
   // The narrower parity reader never inherits broader discovery/writer power.
   if (configuredIds("GP_PARITY_READ_API_KEY_IDS").has(transportId)) {
