@@ -1,12 +1,12 @@
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
-import { reconcileInstitutionalReleaseIntent } from "../../lib/gp-institutional-release-intent"
-import { emitOpsAlert } from "../../lib/ops-alert"
-import run from "../gp-institutional-release-reconcile"
+import { reconcileInstitutionalReleaseIntent } from "../gp-institutional-release-intent"
+import { emitOpsAlert } from "../ops-alert"
+import run from "../../jobs/gp-institutional-release-reconcile"
 
-jest.mock("../../lib/gp-institutional-release-intent", () => ({
+jest.mock("../gp-institutional-release-intent", () => ({
   reconcileInstitutionalReleaseIntent: jest.fn(),
 }))
-jest.mock("../../lib/ops-alert", () => ({
+jest.mock("../ops-alert", () => ({
   emitOpsAlert: jest.fn(async () => ({ ok: true })),
 }))
 
