@@ -7,12 +7,15 @@ type QbSyncDashboardOperation = "status" | "requeue"
 type QbSyncDashboardAlertInput = {
   req: MedusaRequest
   operation: QbSyncDashboardOperation
-  reason: "upstream_error" | "unreachable"
+  reason: "upstream_error" | "unreachable" | "invalid_response"
   baseUrl: string
   status?: number | null
   syncQueueId?: string | null
   error?: unknown
-  logger?: { warn?: (message: string) => void; error?: (message: string) => void }
+  logger?: {
+    warn?: (message: string) => void
+    error?: (message: string) => void
+  }
 }
 
 function syncHost(baseUrl: string) {

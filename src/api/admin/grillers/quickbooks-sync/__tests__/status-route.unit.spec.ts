@@ -109,4 +109,103 @@ describe("QuickBooks sync status route alerting", () => {
       })
     )
   })
+
+  it.each([
+    "<html>Bad gateway</html>",
+    JSON.stringify({ error: "not configured" }),
+    "null",
+  ])("rejects a malformed successful upstream response: %s", async (body) => {
+    global.fetch = jest.fn(
+      async () => new Response(body, { status: 200 })
+    ) as any
+    const res = makeRes()
+    await GET(makeReq(), res)
+    expect(res.statusCode).toBe(502)
+    expect(res.body).not.toHaveProperty("summary")
+    expect(emitOpsAlert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        meta: expect.objectContaining({ reason: "invalid_response" }),
+      })
+    )
+  })
+
+  it("recovers with verified fresh session evidence and independent queue counts", async () => {
+    const payload = {
+      summary: {
+        total_orders: 9,
+        open: 7,
+        waiting: 7,
+        stale_pending: 0,
+        blocked: 0,
+        error: 0,
+        warning: 0,
+        skipped: 0,
+        synced: 2,
+      },
+      sync_status: {
+        active: false,
+        health: {
+          version: 1,
+          state: "fresh",
+          activity: "idle",
+          observed_at: "2026-09-20T16:00:00Z",
+          last_auth_at: "2026-09-20T15:59:00Z",
+          last_accepted_auth_at: "2026-09-20T15:59:00Z",
+          last_auth_status: "success",
+          age_seconds: 60,
+          max_age_seconds: 900,
+          expires_at: "2026-09-20T16:14:00Z",
+          issue: null,
+        },
+      },
+      orders: {
+        data: [],
+        current_page: 1,
+        per_page: 25,
+        total: 7,
+        last_page: 1,
+        has_more_pages: false,
+      },
+      recent_logs: [],
+    }
+    global.fetch = jest.fn(
+      async () => new Response(JSON.stringify(payload))
+    ) as any
+    const res = makeRes()
+    await GET(makeReq(), res)
+    expect(res.statusCode).toBe(200)
+    expect(res.body.summary).toEqual(payload.summary)
+    expect(res.body.sync_status.active).toBe(false)
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ cache: "no-store" })
+    )
+    expect(emitOpsAlert).not.toHaveBeenCalled()
+    payload.sync_status.health.age_seconds = 0
+    const inconsistent = makeRes()
+    await GET(makeReq(), inconsistent)
+    expect(inconsistent.statusCode).toBe(502)
+  })
+
+  it("returns unavailable on a bounded timeout without retaining a successful payload", async () => {
+    jest.useFakeTimers()
+    try {
+      global.fetch = jest.fn(
+        (_url, init: any) =>
+          new Promise((_resolve, reject) => {
+            init.signal.addEventListener("abort", () =>
+              reject(new Error("request timed out"))
+            )
+          })
+      ) as any
+      const res = makeRes()
+      const pending = GET(makeReq(), res)
+      await jest.advanceTimersByTimeAsync(12_000)
+      await pending
+      expect(res.statusCode).toBe(502)
+      expect(res.body).not.toHaveProperty("sync_status")
+    } finally {
+      jest.useRealTimers()
+    }
+  })
 })
