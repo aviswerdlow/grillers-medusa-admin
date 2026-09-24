@@ -291,7 +291,9 @@ describe("payment-method route utils", () => {
     });
   });
 
-  it("lets Peter's bootstrap super-admin Gmail resolve payment context", async () => {
+  it("uses an explicitly configured immutable bootstrap customer ID for payment context", async () => {
+    const originalBootstrap = process.env.GP_STAFF_BOOTSTRAP_CUSTOMER_IDS
+    process.env.GP_STAFF_BOOTSTRAP_CUSTOMER_IDS = "cus_peter"
     const staffCustomer = {
       id: "cus_peter",
       email: "PeterSwerdlow@gmail.com",
@@ -324,6 +326,8 @@ describe("payment-method route utils", () => {
       staffCustomer,
       staffTargetCustomerId: "cus_target",
     });
+    if (originalBootstrap === undefined) delete process.env.GP_STAFF_BOOTSTRAP_CUSTOMER_IDS
+    else process.env.GP_STAFF_BOOTSTRAP_CUSTOMER_IDS = originalBootstrap
   });
 
   it("blocks customer-context payment access for non-staff customers", async () => {

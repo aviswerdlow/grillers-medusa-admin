@@ -169,6 +169,7 @@ export default async function refundIssuedEmailHandler({
 
     await sendTrackedEmail(container, {
       to: order.email,
+      medusa_customer_id: order.customer_id,
       stream: "transactional",
       purpose: "transactional",
       template_key: "refund-issued",

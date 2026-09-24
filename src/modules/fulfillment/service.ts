@@ -40,21 +40,31 @@ import {
   shippingForecastInputFromFulfillmentData,
   type ShippingCostForecastResult,
 } from "../../lib/shipping-cost-forecast";
-import {
-  estimatePackagingCost,
-  packagingConfigFromEnv,
-  type PackagingCostConfig,
-} from "../../lib/packaging-cost";
 import { getPackagingConfig } from "../../lib/packaging-cost-strapi";
+import {
+  createShippingPackingPlan,
+  SHIPPING_PACKING_PLAN_KEY,
+  type ShippingPackingPlan,
+} from "../../lib/shipping-packing-plan";
+import { ShippingInputError } from "../../lib/shipping-weights";
+import { loadShippingCatalogLines } from "../../lib/shipping-catalog-inputs";
+import { calendarPackingContextForRate } from "../../lib/fulfillment-calendar-runtime";
+import { FulfillmentCalendarError } from "../../lib/fulfillment-calendar";
 
-/** True when packaging cost should be added to the forecast charge. */
-function packagingCostEnabled(env: Record<string, string | undefined>): boolean {
-  return ["1", "true", "yes", "on"].includes(
-    String(env.GRILLERS_SHIPPING_FORECAST_INCLUDE_PACKAGING || "")
-      .toLowerCase()
-      .trim()
-  );
-}
+import {
+  composeShippingPrice,
+  issueShippingPriceToken,
+  readShippingPriceToken,
+  SHIPPING_PRICE_TOKEN_KEY,
+  type ShippingPriceQuote,
+  type ShippingPriceSource,
+} from "../../lib/shipping-price-contract";
+import { getShippingPricePolicy } from "../../lib/shipping-price-policy-strapi";
+
+type ComposedCarrierRate = {
+  quote: ShippingPriceQuote;
+  plan: ShippingPackingPlan;
+};
 
 type InjectedDependencies = {
   logger: Logger;
@@ -199,7 +209,7 @@ function envNumber(value: unknown): number | null {
 // Watch-only: compute + log the forecast but don't let it set the customer's price.
 function forecastShadowMode(env: Record<string, string | undefined>): boolean {
   return ["1", "true", "yes", "on"].includes(
-    String(env.GRILLERS_SHIPPING_FORECAST_SHADOW || "").toLowerCase()
+    String(env.GRILLERS_SHIPPING_FORECAST_SHADOW || "").toLowerCase(),
   );
 }
 
@@ -213,12 +223,19 @@ const DEFAULT_MIN_FORECAST_USD = 5;
 const DEFAULT_MAX_FORECAST_USD = 250;
 
 function forecastMaxUsd(env: Record<string, string | undefined>): number {
-  return envNumber(env.GRILLERS_SHIPPING_FORECAST_MAX_USD) ?? DEFAULT_MAX_FORECAST_USD;
+  return (
+    envNumber(env.GRILLERS_SHIPPING_FORECAST_MAX_USD) ??
+    DEFAULT_MAX_FORECAST_USD
+  );
 }
 
-function shippingForecastEnabled(env: Record<string, string | undefined>): boolean {
+function shippingForecastEnabled(
+  env: Record<string, string | undefined>,
+): boolean {
   return ["1", "true", "yes", "on"].includes(
-    String(env.GRILLERS_SHIPPING_FORECAST_ENABLED || "").toLowerCase().trim()
+    String(env.GRILLERS_SHIPPING_FORECAST_ENABLED || "")
+      .toLowerCase()
+      .trim(),
   );
 }
 
@@ -237,7 +254,7 @@ function shippingForecastEnabled(env: Record<string, string | undefined>): boole
  */
 function resolveForecastCharge(
   forecast: ShippingCostForecastResult,
-  env: Record<string, string | undefined>
+  env: Record<string, string | undefined>,
 ): number | null {
   if (!(forecast.amount > 0)) return null;
   const modelMarkup = forecast.metadata.default_markup;
@@ -246,7 +263,8 @@ function resolveForecastCharge(
     (modelMarkup && modelMarkup > 0 ? modelMarkup : 1);
   const usesMarkup = markup > 1;
   const percentile = String(
-    env.GRILLERS_SHIPPING_FORECAST_SAFETY_PERCENTILE || (usesMarkup ? "p50" : "p75")
+    env.GRILLERS_SHIPPING_FORECAST_SAFETY_PERCENTILE ||
+      (usesMarkup ? "p50" : "p75"),
   ).toLowerCase();
   const buffer =
     percentile === "p90"
@@ -254,8 +272,12 @@ function resolveForecastCharge(
       : percentile === "p50" || percentile === "none"
         ? 0
         : forecast.confidence.residual_p75;
-  const charge = Math.round((forecast.amount * markup + buffer + Number.EPSILON) * 100) / 100;
-  const minUsd = envNumber(env.GRILLERS_SHIPPING_FORECAST_MIN_USD) ?? DEFAULT_MIN_FORECAST_USD;
+  const charge =
+    Math.round((forecast.amount * markup + buffer + Number.EPSILON) * 100) /
+    100;
+  const minUsd =
+    envNumber(env.GRILLERS_SHIPPING_FORECAST_MIN_USD) ??
+    DEFAULT_MIN_FORECAST_USD;
   const maxUsd = forecastMaxUsd(env);
   if (minUsd > 0 && charge < minUsd) return null;
   if (maxUsd != null && maxUsd > 0 && charge > maxUsd) return null;
@@ -267,28 +289,33 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
 
   protected logger_: Logger;
   protected options_: Options;
+  protected shippingContainer_: any;
   protected strapiSvc: any;
   protected wwexClient: WwexSpeedshipClient | null;
-  protected shippingCostForecastModel: ReturnType<typeof loadShippingCostForecastModel>;
+  protected shippingCostForecastModel: ReturnType<
+    typeof loadShippingCostForecastModel
+  >;
   protected shippingForecastModelPath: string | null;
   protected shippingForecastModelMtimeMs: number | null;
 
   // Example: your external shipper SDK/client
   protected client: {
     hasRates: (optionId: string) => Promise<boolean>;
-    calculate: (data: Record<string, unknown>) => Promise<number>;
+    calculate: (
+      data: Record<string, unknown>,
+    ) => Promise<number | ComposedCarrierRate>;
     create: (
       fulfillment: Partial<
         Omit<FulfillmentDTO, "provider_id" | "data" | "items">
       >,
-      items: Partial<Omit<FulfillmentItemDTO, "fulfillment">>[]
+      items: Partial<Omit<FulfillmentItemDTO, "fulfillment">>[],
     ) => Promise<Record<string, unknown>>;
     createReturn: (
-      fulfillment: Record<string, unknown>
+      fulfillment: Record<string, unknown>,
     ) => Promise<Record<string, unknown>>;
     cancel: (externalId: string) => Promise<void>;
     getDocuments: (
-      externalId: string
+      externalId: string,
     ) => Promise<Array<{ name: string; url: string }>>;
     getServices: () => Promise<
       Array<{ id: string; name: string; code: string }>
@@ -299,10 +326,11 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
     super();
     this.logger_ = container.logger;
     this.options_ = options;
+    this.shippingContainer_ = container;
     this.logger_.info("GrillersFulfillmentProviderService loaded");
     this.wwexClient = createWwexSpeedshipClientFromEnv(
       process.env,
-      this.logger_
+      this.logger_,
     );
     this.shippingCostForecastModel = null;
     this.shippingForecastModelPath = null;
@@ -324,14 +352,78 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
         // @ts-ignore
         const zip: string = optionData?.shipping_address?.postal_code;
         const serviceCode = normalizeServiceCode(optionData?.service_code);
-        const items = Array.isArray(optionData?.items) ? optionData.items : [];
+        let items = Array.isArray(optionData?.items) ? optionData.items : [];
 
-        // Resolve the packaging cost config (default < Strapi cold-chain-setting
-        // < env) only when the feature is on, so the Strapi fetch never adds
-        // latency to a freight-only quote.
-        const packagingConfig = packagingCostEnabled(process.env)
-          ? await getPackagingConfig(process.env)
-          : undefined;
+        // All carrier paths share physical mass and fit inputs, even when the
+        // customer packaging charge is disabled. Missing inputs cannot fall
+        // through to a normal zero/one-pound quote or a price-table success.
+        let packingPlan: ShippingPackingPlan | undefined;
+        if (isUpsServiceCode(serviceCode)) {
+          try {
+            items = await loadShippingCatalogLines(
+              this.shippingContainer_.query,
+              items,
+            );
+            const dates = await calendarPackingContextForRate(
+              this.shippingContainer_.query,
+              optionData?.id || optionData?.cart_id,
+              serviceCode,
+            );
+            packingPlan = createShippingPackingPlan(
+              items,
+              dates,
+              await getPackagingConfig(process.env),
+            );
+          } catch (error) {
+            if (error instanceof FulfillmentCalendarError)
+              throw new MedusaError(
+                MedusaError.Types.NOT_ALLOWED,
+                error.message,
+              );
+            if (!(error instanceof ShippingInputError)) throw error;
+            await emitOpsAlert({
+              alertKind: "shipping_inputs_unavailable",
+              title: "Carrier shipping needs an item-weight or packing review",
+              path: "src/modules/fulfillment/service.ts",
+              source: "medusa",
+              severity: "warn",
+              logger: this.logger_,
+              meta: {
+                reason: error.code,
+                item_count: items.length,
+                service_code: serviceCode,
+              },
+            });
+            throw new MedusaError(MedusaError.Types.NOT_ALLOWED, error.message);
+          }
+        }
+        const pricePolicy = packingPlan ? await getShippingPricePolicy() : null;
+        const compose = (
+          source: ShippingPriceSource,
+          rate: number,
+          carrierFreightEstimate?: number,
+        ): ComposedCarrierRate => ({
+          quote: composeShippingPrice({
+            source,
+            rate,
+            carrierFreightEstimate,
+            currency: String(optionData.currency_code || ""),
+            plan: packingPlan!,
+            policy: pricePolicy!,
+          }),
+          plan: packingPlan!,
+        });
+        if (packingPlan && optionData[SHIPPING_PRICE_TOKEN_KEY]) {
+          return {
+            quote: readShippingPriceToken(
+              optionData[SHIPPING_PRICE_TOKEN_KEY],
+              optionData,
+              packingPlan,
+              pricePolicy!,
+            ),
+            plan: packingPlan,
+          };
+        }
         const forecastAmount = this.calculateForecastShippingRate(
           {
             ...optionData,
@@ -339,23 +431,31 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
             shipping_address: optionData?.shipping_address,
             items,
           },
-          packagingConfig
+          packingPlan,
         );
         // Shadow mode: the forecast is computed and logged (in calculateForecastShippingRate)
         // for watch-only comparison, but does NOT set the customer's price — we fall through
         // to the live WWEX/Strapi rate. Flip GRILLERS_SHIPPING_FORECAST_SHADOW off to go live.
         if (forecastAmount !== null && !forecastShadowMode(process.env)) {
-          return forecastAmount;
+          return compose(
+            "forecast",
+            forecastAmount.amount,
+            forecastAmount.rawFreight,
+          );
         }
 
-        const wwexAmount = await this.calculateWwexShippingRate({
-          ...optionData,
-          service_code: serviceCode,
-          shipping_address: optionData?.shipping_address,
-          items,
-        });
+        const wwexAmount = await this.calculateWwexShippingRate(
+          {
+            ...optionData,
+            packages: undefined,
+            service_code: serviceCode,
+            shipping_address: optionData?.shipping_address,
+            items,
+          },
+          packingPlan,
+        );
         if (wwexAmount !== null) {
-          return wwexAmount;
+          return compose("wwex", wwexAmount);
         }
 
         const eligibleSubtotal = eligibleSubtotalAmount(items);
@@ -378,12 +478,12 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
                   "Content-Type": "application/json",
                   Authorization: `Bearer ${process.env.STRAPI_TOKEN}`,
                 },
-              }
+              },
             );
             structuredRateResponseStatus = response.status || null;
             if (response.ok) {
               const zone = strapiRow<AtlantaDeliveryZoneRate>(
-                (await response.json())?.data?.[0]
+                (await response.json())?.data?.[0],
               );
               if (zone) {
                 return (
@@ -396,9 +496,10 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
             }
           } catch (error) {
             structuredRateFallbackReason = "request_failed";
-            const message = error instanceof Error ? error.message : String(error);
+            const message =
+              error instanceof Error ? error.message : String(error);
             this.logger_.warn(
-              `[fulfillment] failed to load structured Atlanta delivery rate for ${zip}; falling back to shipping-zones: ${message}`
+              `[fulfillment] failed to load structured Atlanta delivery rate for ${zip}; falling back to shipping-zones: ${message}`,
             );
             await emitOpsAlert({
               alertKind: "atlanta_delivery_structured_rate_fallback",
@@ -424,7 +525,7 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
 
           if (structuredRateFallbackReason) {
             this.logger_.warn(
-              `[fulfillment] structured Atlanta delivery rate ${structuredRateFallbackReason} for ${zip}; falling back to shipping-zones`
+              `[fulfillment] structured Atlanta delivery rate ${structuredRateFallbackReason} for ${zip}; falling back to shipping-zones`,
             );
             await emitOpsAlert({
               alertKind: "atlanta_delivery_structured_rate_fallback",
@@ -459,13 +560,14 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
                 "Content-Type": "application/json",
                 Authorization: `Bearer ${process.env.STRAPI_TOKEN}`,
               },
-            }
+            },
           );
           shippingZonesPayload = await response.json().catch(() => ({}));
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
+          const message =
+            error instanceof Error ? error.message : String(error);
           this.logger_.warn(
-            `[fulfillment] failed to load shipping zones for service ${serviceCode || "unknown"}: ${message}`
+            `[fulfillment] failed to load shipping zones for service ${serviceCode || "unknown"}: ${message}`,
           );
           await emitOpsAlert({
             alertKind: "shipping_zone_catalog_unavailable",
@@ -484,7 +586,7 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
           });
           throw new MedusaError(
             MedusaError.Types.NOT_ALLOWED,
-            `This shipping option isn’t available for ${zip || city || "this address"}. Please choose a different shipping option.`
+            `This shipping option isn’t available for ${zip || city || "this address"}. Please choose a different shipping option.`,
           );
         }
 
@@ -495,7 +597,7 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
         const zones = shippingZonesPayload?.data;
         if (!response.ok || !Array.isArray(zones)) {
           this.logger_.warn(
-            `[fulfillment] shipping zones response was unusable for service ${serviceCode || "unknown"}; surfacing NOT_ALLOWED`
+            `[fulfillment] shipping zones response was unusable for service ${serviceCode || "unknown"}; surfacing NOT_ALLOWED`,
           );
           await emitOpsAlert({
             alertKind: "shipping_zone_catalog_unavailable",
@@ -516,7 +618,7 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
           });
           throw new MedusaError(
             MedusaError.Types.NOT_ALLOWED,
-            `This shipping option isn’t available for ${zip || city || "this address"}. Please choose a different shipping option.`
+            `This shipping option isn’t available for ${zip || city || "this address"}. Please choose a different shipping option.`,
           );
         }
         for (let i = 0; i < zones.length; i++) {
@@ -547,15 +649,13 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
           ) {
             expeditedFallback = z;
             expeditedFallbackIsPercent =
-              z.Description &&
-              z.Description.toUpperCase().includes("PERCENT");
+              z.Description && z.Description.toUpperCase().includes("PERCENT");
           }
 
           if (validZone) {
             tierSet = z.ShippingZoneBreakpoints;
             zoneIsPercent =
-              z.Description &&
-              z.Description.toUpperCase().includes("PERCENT");
+              z.Description && z.Description.toUpperCase().includes("PERCENT");
             break;
           }
         }
@@ -571,7 +671,7 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
         let price: number | null = null;
         if (tierSet.length > 0) {
           tierSet.sort(
-            (a: any, b: any) => a.BreakpointPrice - b.BreakpointPrice
+            (a: any, b: any) => a.BreakpointPrice - b.BreakpointPrice,
           );
 
           let matchedTier: any = tierSet[0];
@@ -582,7 +682,8 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
           }
 
           const isUPSTier =
-            serviceCode === "GROUND" || EXPEDITED_UPS_SERVICE_CODES.has(serviceCode);
+            serviceCode === "GROUND" ||
+            EXPEDITED_UPS_SERVICE_CODES.has(serviceCode);
 
           if (zoneIsPercent) {
             price = (matchedTier.ShippingRate / 100) * eligibleSubtotal;
@@ -595,7 +696,7 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
 
         if (price === null) {
           this.logger_.warn(
-            `[fulfillment] no configured shipping rate tier matched service ${serviceCode || "unknown"} for ${zip || city || "unknown destination"}; surfacing NOT_ALLOWED`
+            `[fulfillment] no configured shipping rate tier matched service ${serviceCode || "unknown"} for ${zip || city || "unknown destination"}; surfacing NOT_ALLOWED`,
           );
           await emitOpsAlert({
             alertKind: "shipping_rate_tier_missing",
@@ -615,11 +716,11 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
           });
           throw new MedusaError(
             MedusaError.Types.NOT_ALLOWED,
-            `This shipping option isn’t available for ${zip || city || "this address"}. Please choose a different shipping option.`
+            `This shipping option isn’t available for ${zip || city || "this address"}. Please choose a different shipping option.`,
           );
         }
 
-        return price;
+        return packingPlan ? compose("cms_fallback", price) : price;
       },
       create: async () => ({
         external_id: "SHIP-123",
@@ -640,7 +741,8 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
   }
 
   private async calculateWwexShippingRate(
-    data: Record<string, unknown>
+    data: Record<string, unknown>,
+    packingPlan?: ShippingPackingPlan,
   ): Promise<number | null> {
     if (!this.wwexClient) return null;
 
@@ -649,17 +751,37 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
 
     const rateInput = wwexRateInputFromFulfillmentData(
       serviceCode,
-      data as Record<string, any>
+      data as Record<string, any>,
+      packingPlan,
     );
     if (!rateInput) return null;
 
     try {
       const quote = await this.wwexClient.quoteSmallpack(rateInput);
+      if (
+        packingPlan?.arrivalDate &&
+        ((quote.offer.transitDays != null &&
+          quote.offer.transitDays !== packingPlan.transitDays) ||
+          (quote.offer.estimatedDeliveryDate != null &&
+            quote.offer.estimatedDeliveryDate.slice(0, 10) !==
+              packingPlan.arrivalDate))
+      )
+        throw new FulfillmentCalendarError("carrier_promise_changed");
+      if (
+        quote.offer.price.currency.toLowerCase() !== "usd" ||
+        !Number.isFinite(quote.offer.price.value) ||
+        quote.offer.price.value < 0
+      )
+        throw new Error(
+          "Carrier returned an invalid currency or freight amount",
+        );
       return quote.offer.price.value;
     } catch (error) {
+      if (error instanceof FulfillmentCalendarError)
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, error.message);
       const message = error instanceof Error ? error.message : String(error);
       this.logger_.warn(
-        `[wwex] live UPS ${serviceCode} quote failed; falling back to Strapi shipping zones: ${message}`
+        `[wwex] live UPS ${serviceCode} quote failed; falling back to Strapi shipping zones: ${message}`,
       );
       const shippingAddress = (data.shipping_address || {}) as Record<
         string,
@@ -694,11 +816,12 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
     this.shippingForecastModelMtimeMs = forecastModelFileMtimeMs(result.path);
     if (result.error) {
       this.logger_.warn(
-        `[shipping-forecast] model unavailable (${result.error}); using WWEX/Strapi rates`
+        `[shipping-forecast] model unavailable (${result.error}); using WWEX/Strapi rates`,
       );
       void emitOpsAlert({
         alertKind: "shipping_forecast_model_unavailable",
-        title: "Shipping forecast model unavailable; checkout using WWEX/Strapi fallback",
+        title:
+          "Shipping forecast model unavailable; checkout using WWEX/Strapi fallback",
         path: "src/modules/fulfillment/service.ts",
         source: "medusa",
         severity: "page",
@@ -711,7 +834,7 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
       });
     } else if (shippingForecastEnabled(process.env) && !result.model) {
       this.logger_.warn(
-        "[shipping-forecast] enabled but no model path/model loaded; using WWEX/Strapi rates"
+        "[shipping-forecast] enabled but no model path/model loaded; using WWEX/Strapi rates",
       );
       void emitOpsAlert({
         alertKind: "shipping_forecast_model_missing",
@@ -727,7 +850,7 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
       });
     } else if (result.model) {
       this.logger_.info(
-        `[shipping-forecast] loaded ${result.model.schema_version} model from ${result.path}`
+        `[shipping-forecast] loaded ${result.model.schema_version} model from ${result.path}`,
       );
     }
   }
@@ -748,8 +871,8 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
 
   private calculateForecastShippingRate(
     data: Record<string, unknown>,
-    packagingConfig?: PackagingCostConfig
-  ): number | null {
+    packingPlan?: ShippingPackingPlan,
+  ): { amount: number; rawFreight: number } | null {
     const model = this.getForecastModel();
     if (!model) return null;
 
@@ -758,7 +881,8 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
 
     const input = shippingForecastInputFromFulfillmentData(
       serviceCode,
-      data as Record<string, any>
+      data as Record<string, any>,
+      { resolvedWeights: packingPlan?.weights },
     );
     if (!input) return null;
 
@@ -767,7 +891,8 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
       if (!forecast) {
         void emitOpsAlert({
           alertKind: "shipping_forecast_fallthrough",
-          title: "Shipping forecast returned no prediction; checkout using WWEX/Strapi fallback",
+          title:
+            "Shipping forecast returned no prediction; checkout using WWEX/Strapi fallback",
           path: "src/modules/fulfillment/service.ts",
           source: "medusa",
           severity: "warn",
@@ -786,7 +911,8 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
       if (freightCharge === null) {
         void emitOpsAlert({
           alertKind: "shipping_forecast_fallthrough",
-          title: "Shipping forecast outside confidence rails; checkout using WWEX/Strapi fallback",
+          title:
+            "Shipping forecast outside confidence rails; checkout using WWEX/Strapi fallback",
           path: "src/modules/fulfillment/service.ts",
           source: "medusa",
           severity: "warn",
@@ -797,7 +923,9 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
             destination_province: input.ship_state,
             point_estimate: forecast.amount,
             residual_p75: forecast.confidence.residual_p75,
-            min_usd: envNumber(process.env.GRILLERS_SHIPPING_FORECAST_MIN_USD) ?? DEFAULT_MIN_FORECAST_USD,
+            min_usd:
+              envNumber(process.env.GRILLERS_SHIPPING_FORECAST_MIN_USD) ??
+              DEFAULT_MIN_FORECAST_USD,
             max_usd: forecastMaxUsd(process.env),
             fallback: "wwex_or_strapi",
             reason: "outside_confidence_rails",
@@ -805,36 +933,9 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
         });
       }
 
-      // Add dry-ice + shipper-box cost (Peter, 2026-06-16) as an additive
-      // component on top of the freight forecast. Gated OFF by default — it
-      // roughly doubles the charge, so enabling is a pricing decision (review
-      // the free-shipping-threshold impact with Peter first). Only applies when
-      // the freight forecast is confident; a null freight charge still falls
-      // through to WWEX/Strapi unchanged.
-      const includePackaging = packagingCostEnabled(process.env);
-      let charge = freightCharge;
-      let packaging: ReturnType<typeof estimatePackagingCost> | null = null;
-      if (freightCharge !== null && includePackaging) {
-        packaging = estimatePackagingCost(
-          {
-            estimatedProductWeightLb: input.estimated_product_weight_lb,
-            service: input.service,
-            shipPostalCode: input.ship_postal_code,
-          },
-          // Strapi-layered config from the caller; fall back to env-only if the
-          // method is invoked without one.
-          packagingConfig ?? packagingConfigFromEnv(process.env)
-        );
-        const withPackaging =
-          Math.round((freightCharge + packaging.total + Number.EPSILON) * 100) / 100;
-        // Re-apply the operator's MAX_USD ceiling to the FINAL customer charge,
-        // not just the freight component — otherwise packaging could push the
-        // charge past a cap the operator set as a hard sanity rail. Exceeding it
-        // falls through to WWEX/Strapi, matching resolveForecastCharge's contract.
-        const maxUsd = forecastMaxUsd(process.env);
-        charge =
-          maxUsd != null && maxUsd > 0 && withPackaging > maxUsd ? null : withPackaging;
-      }
+      // Only freight here. Packaging is composed once after source selection.
+      const charge = freightCharge;
+      const packaging = packingPlan;
 
       // Structured feedback log: pairs the predicted charge with order identity so
       // it can be reconciled against the eventual Unishippers actual cost (drift).
@@ -848,32 +949,37 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
           packaging: packaging
             ? {
                 boxes: packaging.boxes,
-                box_tier: packaging.boxTier,
+                box_tier: packaging.packages[0].boxTier,
+                packing_plan_id: packaging.id,
+                policy_version: packaging.policyVersion,
                 dry_ice_lb: packaging.dryIceLb,
                 box_usd: packaging.boxCost,
                 dry_ice_usd: packaging.dryIceCost,
               }
             : null,
-          charged: charge,
+          freight_basis: charge,
           confident: charge !== null,
           ref:
             (data as any)?.cart_id ||
             (data as any)?.id ||
             (data as any)?.shipping_address?.postal_code ||
             null,
-        })}`
+        })}`,
       );
       // A non-confident forecast (degenerate / out-of-band) falls through to the
       // WWEX live quote and then the conservative Strapi tier table.
-      return charge;
+      return charge === null
+        ? null
+        : { amount: charge, rawFreight: forecast.amount };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger_.warn(
-        `[shipping-forecast] checkout shipping forecast failed; falling back to WWEX/Strapi rates: ${message}`
+        `[shipping-forecast] checkout shipping forecast failed; falling back to WWEX/Strapi rates: ${message}`,
       );
       void emitOpsAlert({
         alertKind: "shipping_forecast_fallthrough",
-        title: "Shipping forecast threw during checkout; using WWEX/Strapi fallback",
+        title:
+          "Shipping forecast threw during checkout; using WWEX/Strapi fallback",
         path: "src/modules/fulfillment/service.ts",
         source: "medusa",
         severity: "page",
@@ -903,16 +1009,44 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
   async validateFulfillmentData(
     optionData: any,
     data: any,
-    context: any
+    context: any,
   ): Promise<any> {
-    // assuming your client retrieves an ID from the
-    // third-party service
-    const externalId = 123; //await this.client.getId();
-
-    return {
-      ...data,
-      externalId,
-    };
+    const service = normalizeServiceCode(optionData?.service_code);
+    const result = { ...data, service_code: service, externalId: 123 };
+    delete result[SHIPPING_PACKING_PLAN_KEY];
+    delete result.packages;
+    if (isUpsServiceCode(service)) {
+      try {
+        const items = await loadShippingCatalogLines(
+          this.shippingContainer_.query,
+          context?.items ?? [],
+        );
+        const dates = await calendarPackingContextForRate(
+          this.shippingContainer_.query,
+          context?.id || context?.cart_id,
+          service,
+        );
+        result[SHIPPING_PACKING_PLAN_KEY] = createShippingPackingPlan(
+          items,
+          dates,
+          await getPackagingConfig(process.env),
+        );
+        readShippingPriceToken(
+          data[SHIPPING_PRICE_TOKEN_KEY],
+          { ...context, items },
+          result[SHIPPING_PACKING_PLAN_KEY],
+          await getShippingPricePolicy(),
+        );
+      } catch (error) {
+        if (
+          error instanceof ShippingInputError ||
+          error instanceof FulfillmentCalendarError
+        )
+          throw new MedusaError(MedusaError.Types.NOT_ALLOWED, error.message);
+        throw error;
+      }
+    }
+    return result;
   }
 
   /**
@@ -931,13 +1065,33 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
   async calculatePrice(
     optionData: CalculateShippingOptionPriceDTO["optionData"],
     data: CalculateShippingOptionPriceDTO["data"],
-    context: CalculateShippingOptionPriceDTO["context"]
+    context: CalculateShippingOptionPriceDTO["context"],
   ): Promise<CalculatedShippingOptionPrice> {
-    const amount = await this.client.calculate({
-      ...optionData,
-      ...data,
-      ...context,
-    });
+    const calculation = await this.client
+      .calculate({
+        ...optionData,
+        ...data,
+        ...context,
+        // Service identity belongs to the configured option, never method data.
+        service_code: (optionData as any)?.service_code,
+      })
+      .catch((error) => {
+        if (error instanceof ShippingInputError)
+          throw new MedusaError(MedusaError.Types.NOT_ALLOWED, error.message);
+        throw error;
+      });
+    const amount =
+      typeof calculation === "number"
+        ? calculation
+        : calculation.quote.customerShippingBeforePromotions;
+    const priceToken =
+      typeof calculation === "number"
+        ? null
+        : issueShippingPriceToken(
+            { ...optionData, ...data, ...context },
+            calculation.plan,
+            calculation.quote,
+          );
     if (amount === -10) {
       // #251: the legacy sentinel means shipping failed open.
       await emitOpsAlert({
@@ -959,6 +1113,7 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
     return {
       calculated_amount: amount,
       is_calculated_price_tax_inclusive: true,
+      ...(priceToken ? { [SHIPPING_PRICE_TOKEN_KEY]: priceToken } : {}),
     };
   }
 
@@ -970,7 +1125,9 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
     data: Record<string, unknown>,
     items: Partial<Omit<FulfillmentItemDTO, "fulfillment">>[],
     order: Partial<FulfillmentOrderDTO> | undefined,
-    fulfillment: Partial<Omit<FulfillmentDTO, "provider_id" | "data" | "items">>
+    fulfillment: Partial<
+      Omit<FulfillmentDTO, "provider_id" | "data" | "items">
+    >,
   ): Promise<CreateFulfillmentResult> {
     const externalData = await this.client.create(fulfillment, items);
 
@@ -990,7 +1147,7 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
    * Create a return fulfillment (RMA label, etc.)
    */
   async createReturnFulfillment(
-    fulfillment: Record<string, unknown>
+    fulfillment: Record<string, unknown>,
   ): Promise<CreateFulfillmentResult> {
     const externalData = await this.client.createReturn(fulfillment);
     return {
@@ -1009,7 +1166,7 @@ export default class GrillersFulfillmentProviderService extends AbstractFulfillm
       await this.client.cancel(external_id);
     } else {
       this.logger_.warn(
-        "[grillers] cancelFulfillment called without external_id"
+        "[grillers] cancelFulfillment called without external_id",
       );
     }
   }

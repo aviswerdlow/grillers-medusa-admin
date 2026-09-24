@@ -1,8 +1,13 @@
+const mockShippingQuote = jest.fn(async () => ({ status: "blocked" }))
+jest.mock("../../../../../../../../lib/wwex-finalization-shipment", () => ({
+  quoteWwexFinalizationShipping: () => mockShippingQuote(),
+}))
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { emitOpsAlert } from "../../../../../../../../lib/ops-alert"
 
 const mockApproveFinalization = jest.fn()
 const mockInvoiceArOrderMetadata = jest.fn((_input: any) => ({
+  ..._input.order.metadata,
   payment_workflow: "invoice_ar",
   catch_weight_final_lines: [{ line_item_id: "ordli_1" }],
   catch_weight_packages: [{ shipper_qbd_list_id: "SHIPPER-LIST-ID" }],
@@ -14,6 +19,11 @@ jest.mock("../../../../../../../../lib/catch-weight-finalization", () => ({
   FINALIZATION_PACKED_PENDING_CHARGE: "packed_pending_charge",
   appendStaffAudit: jest.fn((metadata) => metadata),
   approveFinalization: (...args: any[]) => mockApproveFinalization(...args),
+  orderRequiresPackageCapture: (order: any) =>
+    order.package_capture_required === true,
+  previewFinalization: jest.fn(async () => ({
+    package_capture_required: true,
+  })),
   invoiceArOrderMetadata: (input: any) => mockInvoiceArOrderMetadata(input),
   isInvoiceOrder: (order: any) => mockIsInvoiceOrder(order),
   metadataObject: jest.fn((metadata) => metadata || {}),
@@ -122,14 +132,22 @@ describe("approve finalization route", () => {
       metadata: expect.objectContaining({
         payment_workflow: "invoice_ar",
         catch_weight_final_lines: [{ line_item_id: "ordli_1" }],
-        catch_weight_packages: [
-          { shipper_qbd_list_id: "SHIPPER-LIST-ID" },
-        ],
+        catch_weight_packages: [{ shipper_qbd_list_id: "SHIPPER-LIST-ID" }],
       }),
     })
     // Invoice approval releases to A/R. It never emits the card auto-charge event.
     expect(eventBus.emit).not.toHaveBeenCalled()
     expect(res.status).toHaveBeenCalledWith(200)
+  })
+
+  it.each([false, true])("only triggers the optional auto-charge for a verified charge grant: %s", async charge => {
+    mockApproveFinalization.mockResolvedValueOnce({ finalization: { id: "fin_123", status: "packed_pending_charge" }, totals: {}, lines: [], packages: [] })
+    const { eventBus, scope } = makeScope()
+    const res = makeRes()
+    await POST({ params: { id: "order_123" }, body: {}, scope,
+      gp_staff_principal: { id: "cus_packer", kind: "customer", capabilities: new Set(charge ? ["charge"] : []) } } as any, res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(eventBus.emit).toHaveBeenCalledTimes(charge ? 1 : 0)
   })
 
   it("alerts when approval fails after the order is loaded", async () => {
@@ -167,4 +185,42 @@ describe("approve finalization route", () => {
       })
     )
   })
+})
+
+it("holds an invoice shipment before approval and A/R release when pricing is incomplete", async () => {
+  mockIsInvoiceOrder.mockReturnValue(true)
+  mockApproveFinalization.mockClear()
+  const { scope, query, orderModule } = makeScope()
+  query.graph.mockResolvedValueOnce({
+    data: [{ id: "order_123", metadata: {}, package_capture_required: true }],
+  } as any)
+  const res = makeRes()
+  await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
+  expect(res.status).toHaveBeenCalledWith(409)
+  expect(mockApproveFinalization).not.toHaveBeenCalled()
+  expect(orderModule.updateOrders).not.toHaveBeenCalled()
+})
+
+it("preserves the accepted shipping cost in the released invoice metadata", async () => {
+  mockIsInvoiceOrder.mockReturnValue(true)
+  mockShippingQuote.mockResolvedValueOnce({ status: "quoted", metadata: { shipping_cost_actual: 18.75 } } as any)
+  mockApproveFinalization.mockResolvedValueOnce({
+    finalization: { id: "fin_123", status: "released_to_fulfillment" },
+    totals: {}, lines: [], packages: [],
+  })
+  const { scope, query, orderModule, eventBus } = makeScope()
+  query.graph.mockResolvedValueOnce({
+    data: [{ id: "order_123", metadata: { shipping_quote_revision: "accepted-1" }, package_capture_required: true }],
+  } as any)
+  const res = makeRes()
+  await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
+  expect(res.status).toHaveBeenCalledWith(200)
+  expect(orderModule.updateOrders).toHaveBeenCalledWith("order_123", {
+    metadata: expect.objectContaining({
+      shipping_cost_actual: 18.75,
+      shipping_quote_revision: "accepted-1",
+      payment_workflow: "invoice_ar",
+    }),
+  })
+  expect(eventBus.emit).not.toHaveBeenCalled()
 })

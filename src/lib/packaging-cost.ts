@@ -20,6 +20,7 @@
  * 345-large mix. Keep the constants here in sync with that script.
  */
 import { UPS_GROUND_TRANSIT_DAYS_BY_PREFIX } from "./ups-ground-transit-days";
+import { carrierPackageWeightLimit } from "./shipping-carrier-limits";
 
 export type PackagingCostInput = {
   /** Estimated PRODUCT weight (lb), excluding dry ice/packaging. */
@@ -41,6 +42,12 @@ export type ContinuousPackagingBoxRule = {
   maxTransitDays: number | null;
   maxTotalWeightLb: number;
   tareWeightLb: number;
+  lengthIn?: number | null;
+  widthIn?: number | null;
+  heightIn?: number | null;
+  maxFitUnits?: number | null;
+  fitRuleId?: string | null;
+  dryIceFitUnitsPerLb?: number | null;
 };
 
 export type ContinuousPackagingConfig = {
@@ -49,6 +56,12 @@ export type ContinuousPackagingConfig = {
 };
 
 export type PackagingCostConfig = {
+  enabled?: boolean;
+  seasonalPolicies?: unknown;
+  minimumDryIceAmountLb?: number | null;
+  dryIceBlockWeightLb?: number | null;
+  carrierMaxPackageWeightLb?: number;
+  policyVersion?: string | null;
   model: PackagingCostModel;
   continuous: ContinuousPackagingConfig | null;
   dryIceUsdPerLb: number;
@@ -120,6 +133,9 @@ export function transitDaysForOrder(
 /** Reads optional env overrides so costs can be tuned without a redeploy. */
 /** Editable overrides sourced from Strapi cold-chain-setting (the costs that drift). */
 export type PackagingCostOverrides = {
+  enabled?: boolean;
+  seasonalPolicies?: unknown;
+  policyVersion?: string | null;
   model?: string | null;
   dryIceUsdPerLb?: number | string | null;
   boxCost?: {
@@ -128,6 +144,7 @@ export type PackagingCostOverrides = {
     l345?: number | string | null;
   };
   minimumDryIceAmountLb?: number | string | null;
+  dryIceBlockWeightLb?: number | string | null;
   transitDayThresholds?: Array<{
     transitDays?: number | string | null;
     dryIceMultiplier?: number | string | null;
@@ -141,6 +158,12 @@ export type PackagingCostOverrides = {
     maxTotalWeightLb?: number | string | null;
     tareWeightLb?: number | string | null;
     active?: boolean | null;
+    lengthIn?: number | string | null;
+    widthIn?: number | string | null;
+    heightIn?: number | string | null;
+    maxFitUnits?: number | string | null;
+    fitRuleId?: string | null;
+    dryIceFitUnitsPerLb?: number | string | null;
   }>;
 };
 
@@ -160,8 +183,11 @@ function continuousConfigFromOverrides(
   const baseDryIceLb = positive(overrides.minimumDryIceAmountLb);
   if (baseDryIceLb == null) return null;
 
-  const rawThresholds = overrides.transitDayThresholds;
-  if (!Array.isArray(rawThresholds) || rawThresholds.length < 3) return null;
+  // Seasonal policies replace the legacy transit-day table for new plans.
+  // Keep the old estimator's table contract only for legacy analysis callers.
+  const seasonal = overrides.seasonalPolicies !== undefined;
+  const rawThresholds = seasonal ? [] : overrides.transitDayThresholds;
+  if (!Array.isArray(rawThresholds) || (!seasonal && rawThresholds.length < 3)) return null;
   const thresholds: ContinuousPackagingConfig["dryIceByTransitDays"] = [];
   for (const row of rawThresholds) {
     const transitDays = positive(row?.transitDays);
@@ -172,19 +198,19 @@ function continuousConfigFromOverrides(
     thresholds.push({ transitDays, dryIceLbPerBox: baseDryIceLb * multiplier });
   }
   const thresholdDays = new Set(thresholds.map((row) => row.transitDays));
-  if (thresholdDays.size !== thresholds.length || ![1, 2, 3].every((day) => thresholdDays.has(day))) {
+  if (thresholdDays.size !== thresholds.length || (!seasonal && ![1, 2, 3].every((day) => thresholdDays.has(day)))) {
     return null;
   }
   thresholds.sort((a, b) => a.transitDays - b.transitDays);
 
   const rawBoxes = (overrides.packagingBoxes ?? []).filter((row) => row?.active !== false);
-  if (rawBoxes.length < 2) return null;
+  if (rawBoxes.length < (seasonal ? 1 : 2)) return null;
   const boxes: ContinuousPackagingBoxRule[] = [];
   for (const row of rawBoxes) {
     const boxTier = row?.boxTier;
     const unitCost = positive(row?.unitCost);
     const maxTotalWeightLb = positive(row?.maxTotalWeightLb);
-    const tareWeightLb = nonNegative(row?.tareWeightLb ?? 0);
+    const tareWeightLb = nonNegative(row?.tareWeightLb ?? (seasonal ? NaN : 0));
     const maxProductWeightLb =
       row?.maxProductWeightLb == null ? null : positive(row.maxProductWeightLb);
     const maxTransitDays =
@@ -202,12 +228,18 @@ function continuousConfigFromOverrides(
     }
     boxes.push({
       boxTier: boxTier as PackagingBoxTier,
-      name: String(row?.name || boxTier),
+      name: String(row?.name || (seasonal ? "" : boxTier)),
       unitCost,
       maxProductWeightLb,
       maxTransitDays,
       maxTotalWeightLb,
       tareWeightLb,
+      ...(row.lengthIn !== undefined ? { lengthIn: positive(row.lengthIn) } : {}),
+      ...(row.widthIn !== undefined ? { widthIn: positive(row.widthIn) } : {}),
+      ...(row.heightIn !== undefined ? { heightIn: positive(row.heightIn) } : {}),
+      ...(row.maxFitUnits !== undefined ? { maxFitUnits: positive(row.maxFitUnits) } : {}),
+      ...(row.fitRuleId !== undefined ? { fitRuleId: row.fitRuleId } : {}),
+      ...(row.dryIceFitUnitsPerLb !== undefined ? { dryIceFitUnitsPerLb: positive(row.dryIceFitUnitsPerLb) } : {}),
     });
   }
   const tiers = new Set(boxes.map((box) => box.boxTier));
@@ -217,7 +249,7 @@ function continuousConfigFromOverrides(
   const hasFallbackRule = boxes.some(
     (box) => box.maxProductWeightLb == null && box.maxTransitDays == null
   );
-  if (tiers.size !== boxes.length || !hasLimitedRule || !hasFallbackRule) return null;
+  if (tiers.size !== boxes.length || (!seasonal && (!hasLimitedRule || !hasFallbackRule))) return null;
 
   return { dryIceByTransitDays: thresholds, boxRules: boxes };
 }
@@ -264,9 +296,20 @@ export function resolvePackagingConfig(
       ? "continuous_weight"
       : "legacy_tiered";
   return {
+    ...(s.enabled !== undefined ? { enabled: s.enabled } : {}),
+    ...(s.seasonalPolicies !== undefined ? {
+      seasonalPolicies: s.seasonalPolicies,
+      minimumDryIceAmountLb: positive(s.minimumDryIceAmountLb),
+      dryIceBlockWeightLb: positive(s.dryIceBlockWeightLb),
+      carrierMaxPackageWeightLb: carrierPackageWeightLimit(env),
+    } : {}),
+    ...(s.policyVersion !== undefined ? { policyVersion: s.policyVersion } : {}),
     model,
     continuous: model === "continuous_weight" ? continuous : null,
-    dryIceUsdPerLb: pick("GRILLERS_DRY_ICE_USD_PER_LB", s.dryIceUsdPerLb, d.dryIceUsdPerLb),
+    // An approved seasonal plan cannot inherit an unstated legacy ice price.
+    dryIceUsdPerLb: s.seasonalPolicies !== undefined
+      ? (positive(env.GRILLERS_DRY_ICE_USD_PER_LB ?? s.dryIceUsdPerLb) ?? NaN)
+      : pick("GRILLERS_DRY_ICE_USD_PER_LB", s.dryIceUsdPerLb, d.dryIceUsdPerLb),
     boxCost: {
       micro: pick("GRILLERS_BOX_COST_MICRO", s.boxCost?.micro, d.boxCost.micro),
       m330: pick("GRILLERS_BOX_COST_330", s.boxCost?.m330, d.boxCost.m330),

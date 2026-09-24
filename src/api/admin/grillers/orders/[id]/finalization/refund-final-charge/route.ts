@@ -1,3 +1,4 @@
+import { verifiedStaffActorId } from "../../../../../../../lib/staff-principal"
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { randomUUID } from "node:crypto"
@@ -284,7 +285,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   const orderModule = req.scope.resolve(Modules.ORDER)
   const eventBus = req.scope.resolve(Modules.EVENT_BUS)
   const db = req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION)
-  const actorId = (req as any).auth_context?.actor_id
+  const actorId = verifiedStaffActorId(req) || undefined
   let stage = "retrieve_order"
   let paymentIntentId: string | null = null
   let logger: any

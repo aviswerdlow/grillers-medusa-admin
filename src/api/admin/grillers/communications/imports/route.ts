@@ -1,3 +1,4 @@
+import { verifiedStaffActorId } from "../../../../../lib/staff-principal"
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { importConstantContactPayload } from "../../../../../lib/communications/imports"
 import { emitAdminCommunicationsRouteFailureAlert } from "../_shared/alerts"
@@ -12,7 +13,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   try {
     const result = await importConstantContactPayload(req.scope, rows, {
-      uploaded_by: (req as any).auth_context?.actor_id || null,
+      uploaded_by: verifiedStaffActorId(req) || null,
       filename: body.filename || null,
     })
     res.status(202).json({ ok: true, ...result })

@@ -13,15 +13,16 @@ jobs:
     permissions:
       contents: read
     services:
-      postgres:
+      accounting-postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: gp_catalog_test
-          POSTGRES_PASSWORD: fixture
-          POSTGRES_DB: gp_catalog
-        ports: [5432:5432]
+          POSTGRES_USER: gp_launch_test
+          POSTGRES_PASSWORD: isolated_fixture
+          POSTGRES_DB: gp_launch
+        ports:
+          - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U gp_catalog_test -d gp_catalog"
+          --health-cmd "pg_isready -U gp_launch_test -d gp_launch"
           --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - name: Mark start
@@ -36,10 +37,22 @@ jobs:
         run: yarn test:unit
       - name: Public catalog database and guard tests
         env:
-          CATALOG_TEST_DATABASE_URL: postgres://gp_catalog_test:fixture@localhost:5432/gp_catalog
+          CATALOG_TEST_DATABASE_URL: postgres://gp_launch_test:isolated_fixture@127.0.0.1:5432/gp_launch
         run: yarn test:catalog
       - name: TypeScript
         run: npx tsc --noEmit
+      - name: Accounting transaction and delivery tests
+        run: yarn test:accounting
+        env:
+          QBD_TEST_DATABASE_URL: postgres://gp_launch_test:isolated_fixture@127.0.0.1:5432/gp_launch
+      - name: Confirmed incoming-stock transactions
+        run: yarn test:incoming-stock
+        env:
+          INCOMING_TEST_DATABASE_URL: postgres://gp_launch_test:isolated_fixture@127.0.0.1:5432/gp_launch
+      - name: Receipt email transactions and immutable recipients
+        run: TEST_TYPE=integration:receipt-email yarn jest --runInBand
+        env:
+          RECEIPT_TEST_DATABASE_URL: postgres://gp_launch_test:isolated_fixture@127.0.0.1:5432/gp_launch
       - name: Emit ops.ci
         if: always()
         env:

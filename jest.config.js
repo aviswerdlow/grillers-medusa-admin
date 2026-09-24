@@ -27,4 +27,12 @@ if (process.env.TEST_TYPE === "integration:catalog") {
   module.exports.testMatch = ["**/src/modules/*/__tests__/**/*.[jt]s"];
 } else if (process.env.TEST_TYPE === "unit") {
   module.exports.testMatch = ["**/src/**/__tests__/**/*.unit.spec.[jt]s"];
+} else if (process.env.TEST_TYPE === "integration:receipt-email") {
+  module.exports.testMatch = ["**/integration-tests/receipt-email/*.spec.[jt]s"];
+} else if (process.env.TEST_TYPE === "integration:accounting") {
+  module.exports.testMatch = ["**/integration-tests/accounting/*.spec.[jt]s"];
+}
+
+if (process.env.TEST_TYPE === "integration:incoming-stock") {
+  module.exports.testMatch = ["**/integration-tests/incoming-stock/*.spec.[jt]s"];
 }

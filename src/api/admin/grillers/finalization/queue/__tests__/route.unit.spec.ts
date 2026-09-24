@@ -154,3 +154,98 @@ describe("finalization queue route alerts", () => {
     expect(JSON.stringify(meta)).not.toContain("customer@example.com")
   })
 })
+
+describe("dispatch-based finalization queue", () => {
+  async function queue(queryParams: Record<string, string> = {}) {
+    const metadata = [
+      {
+        fulfillmentType: "ups_shipping",
+        requestedDeliveryDate: "2026-10-09",
+        fulfillmentDispatchDate: "2026-10-07",
+        qbdDueDate: "2026-10-06",
+        fulfillmentPickDate: "2026-10-05",
+      },
+      { fulfillmentType: "ups_shipping", requestedDeliveryDate: "2026-10-07" },
+      { fulfillmentType: "plant_pickup", scheduledDate: "10/7/2026" },
+      {
+        fulfillmentType: "southeast_pickup",
+        scheduledDate: "2026-10-09",
+        fulfillmentDispatchDate: "2026-10-07",
+        fulfillmentPickDate: "2026-10-06",
+      },
+    ];
+    const rows = metadata.map((_, index) => ({
+      order_id: `order_${index}`,
+      status: "pending_pick",
+    }));
+    const builder: Record<string, jest.Mock> = {};
+    for (const name of [
+      "select",
+      "whereNull",
+      "whereIn",
+      "orderByRaw",
+      "orderBy",
+    ])
+      builder[name] = jest.fn(() => builder);
+    builder.limit = jest.fn(async () => rows);
+    const deps = {
+      [ContainerRegistrationKeys.PG_CONNECTION]: jest.fn(() => builder),
+      [ContainerRegistrationKeys.QUERY]: {
+        graph: jest.fn(async () => ({
+          data: metadata.map((meta, index) => ({
+            id: `order_${index}`,
+            metadata: meta,
+          })),
+        })),
+      },
+      [ContainerRegistrationKeys.LOGGER]: {
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+      },
+    };
+    const res = makeRes();
+    await GET(
+      {
+        query: queryParams,
+        scope: { resolve: (key: string) => deps[key] },
+      } as any,
+      res,
+    );
+    expect(res.status).toHaveBeenCalledWith(200);
+    return res.json.mock.calls[0][0].finalizations;
+  }
+
+  it("filters ship day by dispatch while preserving preparation and customer dates", async () => {
+    const rows = await queue({
+      date_from: "2026-10-07",
+      date_to: "2026-10-07",
+    });
+    expect(rows.map((row: any) => row.order_id)).toEqual([
+      "order_0",
+      "order_2",
+      "order_3",
+    ]);
+    expect(rows[0]).toMatchObject({
+      fulfillment_date: "2026-10-07",
+      fulfillment_date_key: "2026-10-07",
+      dispatch_date: "2026-10-07",
+      pick_date: "2026-10-05",
+      arrival_date: "2026-10-09",
+    });
+    expect(rows[2]).toMatchObject({
+      dispatch_date: "2026-10-07",
+      pick_date: "2026-10-06",
+      arrival_date: "2026-10-09",
+    });
+  });
+
+  it("keeps a legacy UPS order visible without calling its arrival a dispatch date", async () => {
+    expect((await queue())[1]).toMatchObject({
+      order_id: "order_1",
+      fulfillment_date: null,
+      dispatch_date: null,
+      arrival_date: "2026-10-07",
+    });
+  });
+});

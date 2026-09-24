@@ -788,7 +788,9 @@ export async function recordCommunicationEvent(
       session_id: input.session_id,
       cart_id: input.cart_id,
       medusa_customer_id: input.medusa_customer_id,
-      email: input.email,
+      // A delivered receipt address is a message destination, not a new login/marketing identity.
+      email: input.event_name.startsWith("email_") && profile.medusa_customer_id
+        ? profile.email : input.email,
     })
   }
 
@@ -989,8 +991,15 @@ export async function sendTrackedEmail(
     input.metadata,
     input.template_model
   )
+  const identityCustomer = input.medusa_customer_id
+    // Historical service notices retain the account identity even after soft deletion.
+    ? await db("customer").where({ id: input.medusa_customer_id }).first()
+    : null
+  if (input.medusa_customer_id && !identityCustomer) {
+    return { ok: false, error: "missing_customer_identity" }
+  }
   const profile = await upsertCustomerProfile(db, {
-    email: input.to,
+    email: identityCustomer?.email || input.to,
     medusa_customer_id: input.medusa_customer_id || undefined,
   })
 
@@ -1001,7 +1010,7 @@ export async function sendTrackedEmail(
   if (
     !input.staff_test &&
     requiresMarketingConsent(purpose) &&
-    (!profile?.email_consent || !profile?.email_consent_at)
+    (normalizeEmail(profile?.email) !== emailLower || !profile?.email_consent || !profile?.email_consent_at)
   ) {
     await recordCommunicationEvent(db, {
       event_name: "email_suppressed",

@@ -1,3 +1,4 @@
+import { verifiedStaffActorId } from "../../../../../lib/staff-principal"
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { emitOpsAlert } from "../../../../../lib/ops-alert"
@@ -31,7 +32,7 @@ export async function emitAdminCommunicationsRouteFailureAlert(input: {
     logger,
     meta: {
       action: input.action,
-      actor_id: (input.req as any).auth_context?.actor_id || null,
+      actor_id: verifiedStaffActorId(input.req) || null,
       route_status: input.status || 500,
       error_message: redactedErrorMessage(input.error),
       ...(input.meta || {}),

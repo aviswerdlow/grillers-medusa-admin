@@ -1,5 +1,9 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
+import {
+  fulfillmentDateKey,
+  fulfillmentDates,
+} from "../../../../../lib/fulfillment-dates";
 import { emitOpsAlert } from "../../../../../lib/ops-alert";
 import { emitStaleQbdPostingAlertForOrders } from "../../../../../lib/qbd-pending-posting-alerts";
 
@@ -56,43 +60,10 @@ const metadataObject = (value: unknown): Record<string, any> => {
     : {};
 };
 
-const dateKey = (value: unknown) => {
-  const raw = textValue(value);
-  if (!raw) return "";
-  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
-  const us = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (us) {
-    return `${us[3]}-${us[1].padStart(2, "0")}-${us[2].padStart(2, "0")}`;
-  }
-  const parsed = new Date(raw);
-  if (Number.isNaN(parsed.getTime())) return "";
-  return parsed.toISOString().slice(0, 10);
-};
+const dateKey = (value: unknown) => fulfillmentDateKey(value) || "";
 
 const orderFulfillmentType = (metadata: Record<string, any>) =>
   textValue(metadata.fulfillmentType) || textValue(metadata.fulfillment_type);
-
-const orderFulfillmentDate = (metadata: Record<string, any>) => {
-  const fulfillmentType = orderFulfillmentType(metadata);
-  if (fulfillmentType === "ups_shipping") {
-    return (
-      textValue(metadata.requestedDeliveryDate) ||
-      textValue(metadata.scheduledDate) ||
-      textValue(metadata.requested_fulfillment_date) ||
-      textValue(metadata.fulfillment_date) ||
-      textValue(metadata.inventory_requested_fulfillment_date)
-    );
-  }
-
-  return (
-    textValue(metadata.scheduledDate) ||
-    textValue(metadata.requestedDeliveryDate) ||
-    textValue(metadata.requested_fulfillment_date) ||
-    textValue(metadata.fulfillment_date) ||
-    textValue(metadata.inventory_requested_fulfillment_date)
-  );
-};
 
 const routeErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error || "Unknown error");
@@ -274,7 +245,8 @@ export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
         const order = orders.get(row.order_id);
         const metadata = metadataObject(order?.metadata);
         const fulfillment_type = orderFulfillmentType(metadata);
-        const fulfillment_date = orderFulfillmentDate(metadata);
+        const dates = fulfillmentDates(metadata);
+        const fulfillment_date = dates.dispatchDate;
         const fulfillment_date_key = dateKey(fulfillment_date);
         return {
           ...(OPEN_STATUSES_WITHOUT_FINAL_TOTALS.has(row.status)
@@ -292,6 +264,9 @@ export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
           fulfillment_type: fulfillment_type || null,
           fulfillment_date: fulfillment_date || null,
           fulfillment_date_key: fulfillment_date_key || null,
+          arrival_date: dates.arrivalDate,
+          pick_date: dates.pickDate,
+          dispatch_date: dates.dispatchDate,
         };
       })
       .filter((row: Record<string, any>) => {

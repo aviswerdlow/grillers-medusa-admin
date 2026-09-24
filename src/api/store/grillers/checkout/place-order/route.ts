@@ -1,3 +1,4 @@
+import { prepareReceiptSnapshot } from "../../../../../lib/receipt-email-orders";
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http";
 import {
   ContainerRegistrationKeys,
@@ -41,6 +42,11 @@ import {
   creditHoldMetadata,
 } from "../../../../../lib/gp-credit-limit";
 import { sanitizeOrderSmsConsentMetadata } from "../../../../../lib/communications/transactional-sms";
+
+import { prepareShippingAcceptance } from "../../../../../lib/shipping-acceptance";
+import { ShippingInputError } from "../../../../../lib/shipping-weights";
+import { prepareCalendarAcceptance } from "../../../../../lib/fulfillment-calendar-runtime";
+import { FulfillmentCalendarError } from "../../../../../lib/fulfillment-calendar";
 
 const PLACE_ORDER_PATH = "store/grillers/checkout/place-order";
 
@@ -583,6 +589,8 @@ async function placeInvoiceOrder(
 
   // A no-amount SYSTEM payment session is still required for completeCartWorkflow to produce an
   // order; it carries no Stripe data and authorizes no charge.
+  await prepareCalendarAcceptance(req.scope, cartId);
+  await prepareShippingAcceptance(req.scope, cartId);
   const paymentCollection = await ensurePaymentCollection(req, cartId);
   await createPaymentSessionsWorkflow(req.scope).run({
     input: {
@@ -593,6 +601,7 @@ async function placeInvoiceOrder(
     },
   });
 
+  await prepareReceiptSnapshot(req.scope, cartId);
   const { errors, result } = await completeCartWorkflow(req.scope).run({
     input: { id: cartId },
     context: { transactionId: cartId },
@@ -781,6 +790,8 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       metadata: checkoutMetadata,
     });
 
+    await prepareCalendarAcceptance(req.scope, cartId);
+    await prepareShippingAcceptance(req.scope, cartId);
     const paymentCollection = await ensurePaymentCollection(req, cartId);
 
     await createPaymentSessionsWorkflow(req.scope).run({
@@ -797,6 +808,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       },
     });
 
+    await prepareReceiptSnapshot(req.scope, cartId);
     const { errors, result } = await completeCartWorkflow(req.scope).run({
       input: { id: cartId },
       context: { transactionId: cartId },
@@ -893,6 +905,14 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       order,
     });
   } catch (error) {
+    if (error instanceof FulfillmentCalendarError) {
+      res.status(error.status).json({ type: "fulfillment_date_review_required", message: error.message });
+      return;
+    }
+    if (error instanceof ShippingInputError) {
+      res.status(409).json({ type: "shipping_review_required", message: error.message });
+      return;
+    }
     const logger = req.scope.resolve(ContainerRegistrationKeys.LOGGER);
     const err = error as { name?: string; message?: string } | undefined;
     const message = error instanceof Error ? error.message : String(error);

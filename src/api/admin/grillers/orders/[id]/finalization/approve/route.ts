@@ -1,14 +1,18 @@
+import { quoteWwexFinalizationShipping } from "../../../../../../../lib/wwex-finalization-shipment"
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import {
   FINALIZATION_PACKED_PENDING_CHARGE,
   appendStaffAudit,
   approveFinalization,
+  previewFinalization,
+  orderRequiresPackageCapture,
   invoiceArOrderMetadata,
   isInvoiceOrder,
   metadataObject,
 } from "../../../../../../../lib/catch-weight-finalization"
 import { FINALIZATION_PACKED_PENDING_CHARGE_EVENT } from "../../../../../../../lib/auto-finalize-charge"
+import { requestStaffPrincipal } from "../../../../../../../lib/staff-principal"
 import {
   emitFinalizationRouteFailureAlert,
   jsonError,
@@ -29,6 +33,20 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     const orderModule = req.scope.resolve(Modules.ORDER)
     const body = (req.body || {}) as Record<string, any>
     const staffAudit = staffAuditFields(req, body)
+    let shippingCostMetadata = {}
+    if (isInvoiceOrder(order) && orderRequiresPackageCapture(order)) {
+      const preview = await previewFinalization(db, order)
+      const quoted = await quoteWwexFinalizationShipping({
+        order,
+        preview,
+        logger: req.scope.resolve(ContainerRegistrationKeys.LOGGER),
+      })
+      if (!quoted || quoted.status !== "quoted")
+        throw new Error(
+          "Shipping needs review before this invoice order can be released."
+        )
+      shippingCostMetadata = quoted.metadata
+    }
     const approved = await approveFinalization(
       db,
       order,
@@ -42,7 +60,10 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     // in A/R (no card charge, no ReceivePayment).
     const metadata = isInvoiceOrder(order)
       ? invoiceArOrderMetadata({
-          order,
+          order: {
+            ...order,
+            metadata: { ...metadataObject(order.metadata), ...shippingCostMetadata },
+          },
           finalization: approved.finalization,
           lines: approved.lines,
           packages: approved.packages,
@@ -71,7 +92,9 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     // straight to fulfillment. Best-effort: a failed emit must NOT fail the human approve — the
     // order simply waits for a manual charge. The subscriber is flag-gated (default OFF) and
     // fails safe, so emitting is a harmless no-op when auto-charge is disabled.
-    if (approvedStatus === FINALIZATION_PACKED_PENDING_CHARGE) {
+    const principal = requestStaffPrincipal(req)
+    const canTriggerCharge = principal?.kind === "operator" || principal?.capabilities.has("charge") === true
+    if (approvedStatus === FINALIZATION_PACKED_PENDING_CHARGE && canTriggerCharge) {
       try {
         const eventBus = req.scope.resolve(Modules.EVENT_BUS)
         await eventBus.emit({

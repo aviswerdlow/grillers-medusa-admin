@@ -1,3 +1,11 @@
+import {
+  isUpsServiceCode,
+  normalizeGrillersUpsServiceCode,
+} from "../modules/fulfillment/wwex-speedship"
+import {
+  readAcceptedShippingPrice,
+  SHIPPING_PRICE_ACCEPTED_KEY,
+} from "./shipping-price-contract"
 import { randomUUID } from "crypto"
 
 export const PAYMENT_WORKFLOW_SETUP_THEN_FINAL_CHARGE =
@@ -146,6 +154,9 @@ export type FinalizationPackageInput = {
   count?: number | string | null
   packed_weight_lb?: number | string | null
   dry_ice_lb?: number | string | null
+  length_in?: number | string | null
+  width_in?: number | string | null
+  height_in?: number | string | null
   note?: string | null
 }
 
@@ -253,16 +264,35 @@ export const orderRequiresPackageCapture = (order: Record<string, any>) => {
   const shippingMethods = Array.isArray(order?.shipping_methods)
     ? order.shipping_methods
     : []
+  const serviceCodes = shippingMethods
+    .map((method) =>
+      normalizeGrillersUpsServiceCode(
+        metadataObject(method.data).service_code ||
+          metadataObject(method.shipping_option?.data).service_code
+      )
+    )
+    .filter(Boolean)
+  if (serviceCodes.some(isUpsServiceCode)) return true
+  if (
+    serviceCodes.length === shippingMethods.length &&
+    serviceCodes.length &&
+    serviceCodes.every((code) =>
+      ["PICKUP", "ATLANTA_DELIVERY", "SCHEDULED_DELIVERY"].includes(code)
+    )
+  )
+    return false
+  // Inspect values, never serialized object keys such as shipping_option_id:
+  // those made every pickup method look like carrier shipping.
   const fulfillmentText = textBlob([
+    metadata.fulfillmentType,
     metadata.fulfillment_type,
     metadata.shipping_type,
     metadata.shipping_method_type,
     metadata.service_code,
     metadata.service_name,
     metadata.fulfillment_method,
-    shippingMethods,
+    ...shippingMethods.map((method) => method.name),
   ])
-
   return (
     fulfillmentText.includes("ups") ||
     fulfillmentText.includes("shippo") ||
@@ -291,6 +321,15 @@ const normalizeFinalizationPackages = (
       count: 1,
       packed_weight_lb: positiveNumber(pkg.packed_weight_lb),
       dry_ice_lb: nullableNumber(pkg.dry_ice_lb),
+      ...([pkg.length_in, pkg.width_in, pkg.height_in].some(
+        (v) => v !== undefined && v !== null
+      )
+        ? {
+            length_in: nullableNumber(pkg.length_in),
+            width_in: nullableNumber(pkg.width_in),
+            height_in: nullableNumber(pkg.height_in),
+          }
+        : {}),
       note: String(pkg.note || "").trim() || null,
     }))
     .filter(
@@ -326,6 +365,18 @@ export const packageCaptureErrors = (
     }
     if (!positiveNumber(pkg.packed_weight_lb)) {
       errors.push({ message: `Package ${index + 1} needs packed weight.` })
+    }
+    if (
+      [pkg.length_in, pkg.width_in, pkg.height_in].some(
+        (v) => v !== undefined
+      ) &&
+      ![pkg.length_in, pkg.width_in, pkg.height_in].every((v) =>
+        positiveNumber(v)
+      )
+    ) {
+      errors.push({
+        message: `Package ${index + 1} needs all three positive measured dimensions, or none when using an approved box type.`,
+      })
     }
     const packedWeight = nullableNumber(pkg.packed_weight_lb)
     if (packedWeight !== null && packedWeight > 50) {
@@ -389,7 +440,8 @@ export const finalizationReadyStatus = (order: Record<string, any>) =>
 
 export const finalChargeSucceeded = (orderOrMetadata: Record<string, any>) => {
   const metadata =
-    "payment_workflow" in orderOrMetadata || "final_charge_status" in orderOrMetadata
+    "payment_workflow" in orderOrMetadata ||
+    "final_charge_status" in orderOrMetadata
       ? orderOrMetadata
       : metadataObject(orderOrMetadata.metadata)
 
@@ -424,14 +476,17 @@ export const orderPlacedFinalizationMetadata = (
     payment_setup_status:
       metadata.payment_setup_status ||
       (hasSavedCard ? "saved" : "missing_saved_card"),
-    catch_weight_status: metadata.catch_weight_status || FINALIZATION_PENDING_PICK,
+    catch_weight_status:
+      metadata.catch_weight_status || FINALIZATION_PENDING_PICK,
     finalization_id: finalization.id,
     finalization_status: finalization.status,
     final_charge_status: metadata.final_charge_status || "not_started",
     fulfillment_gate_status:
       metadata.fulfillment_gate_status || "blocked_until_final_charge",
     estimated_total:
-      metadata.estimated_total ?? finalization.estimated_order_total ?? order.total,
+      metadata.estimated_total ??
+      finalization.estimated_order_total ??
+      order.total,
   }
 }
 
@@ -465,10 +520,7 @@ const stripEmbeddedPrice = (value: string): string =>
       /\s*@\s*\$?\d+(?:\.\d+)?\s*\/?\s*(?:lb|lbs|oz|kg|g|each|ea)\.?/gi,
       ""
     )
-    .replace(
-      /\s*\$\s?\d+(?:\.\d+)?\s*\/\s*(?:lb|lbs|oz|kg|g|each|ea)\.?/gi,
-      ""
-    )
+    .replace(/\s*\$\s?\d+(?:\.\d+)?\s*\/\s*(?:lb|lbs|oz|kg|g|each|ea)\.?/gi, "")
     .replace(/\s+@\s*$/g, "")
 
 const titleCaseLegacyWords = (value: string): string =>
@@ -507,7 +559,10 @@ const shortenLegacyDescriptionTitle = (value: string): string => {
   if (commaIndex <= 3) return value
 
   const head = value.slice(0, commaIndex).trim()
-  const tail = value.slice(commaIndex + 1).trim().toLowerCase()
+  const tail = value
+    .slice(commaIndex + 1)
+    .trim()
+    .toLowerCase()
 
   if (
     head.length >= 4 &&
@@ -640,11 +695,11 @@ const normalizeUnitWeights = (value: unknown): number[] => {
   const raw = Array.isArray(value)
     ? value
     : typeof value === "string"
-    ? value
-        .split(/[,\n]/)
-        .map((item) => item.trim())
-        .filter(Boolean)
-    : []
+      ? value
+          .split(/[,\n]/)
+          .map((item) => item.trim())
+          .filter(Boolean)
+      : []
 
   return raw
     .map((item) => nullableNumber(item))
@@ -660,9 +715,10 @@ const unitWeightsFromLine = (line: Record<string, any>): number[] => {
 const lineWeightTotal = (line: Record<string, any>): number | null => {
   const unitWeights = unitWeightsFromLine(line)
   if (unitWeights.length) {
-    return Math.round(
-      unitWeights.reduce((sum, weight) => sum + weight, 0) * 1000
-    ) / 1000
+    return (
+      Math.round(unitWeights.reduce((sum, weight) => sum + weight, 0) * 1000) /
+      1000
+    )
   }
 
   return nullableNumber(line.actual_weight_total)
@@ -876,7 +932,11 @@ const finalUnitPriceForLine = (
   const textRate = pricePerPoundFromText(itemSearchText(item))
   if (textRate !== null) return textRate
 
-  if (estimatedWeightTotal && estimatedWeightTotal > 0 && estimate.subtotal > 0) {
+  if (
+    estimatedWeightTotal &&
+    estimatedWeightTotal > 0 &&
+    estimate.subtotal > 0
+  ) {
     return roundMoney(estimate.subtotal / estimatedWeightTotal)
   }
 
@@ -933,8 +993,7 @@ const lineEstimate = (item: Record<string, any>) => {
       "raw_subtotal",
       "detail.subtotal",
       "detail.raw_subtotal",
-    ]) ||
-    roundMoney(unitPrice * quantity)
+    ]) || roundMoney(unitPrice * quantity)
   const total =
     fieldAmount(item, [
       "total",
@@ -1109,7 +1168,10 @@ const existingLineRepairPatch = (
     patch.actual_piece_count = snapshot.actual_piece_count
   }
 
-  if (snapshot.pricing_mode === "per_lb" && existing.pricing_mode !== "per_lb") {
+  if (
+    snapshot.pricing_mode === "per_lb" &&
+    existing.pricing_mode !== "per_lb"
+  ) {
     patch.pricing_mode = "per_lb"
     patch.final_line_subtotal = null
     patch.final_line_total = null
@@ -1482,20 +1544,28 @@ export async function ensureFinalizationForOrder(
         return { ...line, ...patch }
       }
 
-      const snapshot = buildFinalizationLineSnapshot(order, item, finalization.id)
+      const snapshot = buildFinalizationLineSnapshot(
+        order,
+        item,
+        finalization.id
+      )
       const patch = canSyncPrePickOrderEdits
         ? prePickOrderEditRepairPatch(line, snapshot)
         : repairableStatuses.has(finalization.status)
-        ? existingLineRepairPatch(line, snapshot, finalization.status)
-        : customerTitleRepairPatch(line, snapshot)
+          ? existingLineRepairPatch(line, snapshot, finalization.status)
+          : customerTitleRepairPatch(line, snapshot)
       if (!Object.keys(patch).length) return line
 
-      await db("gp_order_finalization_line").where({ id: line.id }).update(patch)
+      await db("gp_order_finalization_line")
+        .where({ id: line.id })
+        .update(patch)
       return { ...line, ...patch }
     })
   )
   const newLines = orderItems
-    .filter((item: Record<string, any>) => item?.id && !existingLineIds.has(item.id))
+    .filter(
+      (item: Record<string, any>) => item?.id && !existingLineIds.has(item.id)
+    )
     .map((item: Record<string, any>) =>
       buildFinalizationLineSnapshot(order, item, finalization.id)
     )
@@ -1757,7 +1827,9 @@ const normalizedLinePatch = (body: FinalizationLinePatch) => {
     if (field in body) {
       const value = (body as Record<string, any>)[field]
       patch[field] =
-        value === undefined || value === null || value === "" ? null : String(value)
+        value === undefined || value === null || value === ""
+          ? null
+          : String(value)
     }
   }
 
@@ -1800,7 +1872,9 @@ const pickedQuantityFromLine = (line: Record<string, any>) => {
 
 const packingLineStatusForReset = (line: Record<string, any>) => {
   if (line.status === "substituted") return "substituted"
-  return line.pricing_mode === "per_lb" ? "needs_weight" : FINALIZATION_LINE_NEEDS_PICK
+  return line.pricing_mode === "per_lb"
+    ? "needs_weight"
+    : FINALIZATION_LINE_NEEDS_PICK
 }
 
 export async function prepareFinalizationLinesForPacking(
@@ -1849,7 +1923,9 @@ export async function prepareFinalizationLinesForPacking(
         updated_at: now,
       }
 
-      await db("gp_order_finalization_line").where({ id: line.id }).update(patch)
+      await db("gp_order_finalization_line")
+        .where({ id: line.id })
+        .update(patch)
       return { ...line, ...patch }
     })
   )
@@ -2026,10 +2102,12 @@ export async function addFinalizationLine(
   const nextStatus = pickingStatuses.has(currentStatus)
     ? FINALIZATION_PICKING
     : FINALIZATION_PACKED_PENDING_REVIEW
-  await db("gp_order_finalization").where({ id: detail.finalization.id }).update({
-    status: nextStatus,
-    updated_at: new Date(),
-  })
+  await db("gp_order_finalization")
+    .where({ id: detail.finalization.id })
+    .update({
+      status: nextStatus,
+      updated_at: new Date(),
+    })
 
   return line
 }
@@ -2142,7 +2220,9 @@ const calculateLine = (line: Record<string, any>) => {
     }
   } else if (status === "substituted") {
     if (!line.replacement_variant_id || !line.replacement_qbd_list_id) {
-      errors.push("Substituted line requires replacement variant and QBD ListID.")
+      errors.push(
+        "Substituted line requires replacement variant and QBD ListID."
+      )
     }
     if (actualQuantity <= 0) {
       errors.push("Fulfilled quantity must be greater than zero.")
@@ -2210,7 +2290,10 @@ const calculateLine = (line: Record<string, any>) => {
   const delta =
     finalTotal !== null ? roundMoney(finalTotal - estimatedTotal) : null
 
-  if (delta !== null && Math.abs(delta) >= Math.max(15, estimatedTotal * 0.25)) {
+  if (
+    delta !== null &&
+    Math.abs(delta) >= Math.max(15, estimatedTotal * 0.25)
+  ) {
     warnings.push("Large final price change needs staff review.")
   }
 
@@ -2314,7 +2397,9 @@ export async function previewFinalization(
     ? Math.max(0, roundMoney(breakdown.estimated_tax_total - estimatedLineTax))
     : null
   const finalTaxTotal = totalsComplete
-    ? roundMoney(numberOrZero(recalculatedLineTax) + numberOrZero(fixedNonLineTax))
+    ? roundMoney(
+        numberOrZero(recalculatedLineTax) + numberOrZero(fixedNonLineTax)
+      )
     : null
   const estimatedNonItemTotal = totalsComplete
     ? roundMoney(
@@ -2323,11 +2408,22 @@ export async function previewFinalization(
           breakdown.estimated_tax_total
       )
     : null
+  const shippingContract = metadataObject(order.metadata)[
+    SHIPPING_PRICE_ACCEPTED_KEY
+  ]
+    ? readAcceptedShippingPrice(order)
+    : null
   const finalShippingTotal = totalsComplete
-    ? Math.max(0, numberOrZero(estimatedNonItemTotal))
+    ? shippingContract
+      ? roundMoney(
+          shippingContract.customerShipping - shippingContract.shippingTax
+        )
+      : Math.max(0, numberOrZero(estimatedNonItemTotal))
     : null
   const finalDiscountTotal = totalsComplete
-    ? Math.max(0, -numberOrZero(estimatedNonItemTotal))
+    ? shippingContract
+      ? shippingContract.nonShippingCredit
+      : Math.max(0, -numberOrZero(estimatedNonItemTotal))
     : null
   const finalOrderTotal = totalsComplete
     ? roundMoney(
@@ -2419,10 +2515,13 @@ export async function approveFinalization(
   order: Record<string, any>,
   actorId?: string | null
 ) {
+  if (orderRequiresPackageCapture(order)) readAcceptedShippingPrice(order)
   const preview = await previewFinalization(db, order, { persist: true })
 
   if (preview.errors.length) {
-    throw new Error("Finalization cannot be approved until all line errors are fixed.")
+    throw new Error(
+      "Finalization cannot be approved until all line errors are fixed."
+    )
   }
 
   // #283: invoice orders have no card charge — approval releases them straight to fulfillment.
@@ -2520,7 +2619,9 @@ export async function claimFinalChargeAttempt(
 ): Promise<{ attempt: Record<string, any>; claimed: boolean }> {
   const knex = db as any
   if (typeof knex.transaction !== "function") {
-    throw new Error("Final charge attempt claims require database transactions.")
+    throw new Error(
+      "Final charge attempt claims require database transactions."
+    )
   }
 
   return knex.transaction(async (trx: any) => {
@@ -2562,10 +2663,7 @@ export async function claimFinalChargeAttempt(
       // lands, a duplicate request must not treat that just-confirmed decline
       // as staff's next retry. Once the row is stale, replay/recovery is safe.
       const failedAt = new Date(
-        latest.updated_at ||
-          latest.requested_at ||
-          latest.created_at ||
-          0
+        latest.updated_at || latest.requested_at || latest.created_at || 0
       ).getTime()
       const failureIsFresh =
         Number.isFinite(failedAt) &&
@@ -2612,7 +2710,9 @@ export async function claimFinalChargeAttempt(
         },
         updated_at: now,
       }
-      await trx("gp_final_charge_attempt").where({ id: latest.id }).update(patch)
+      await trx("gp_final_charge_attempt")
+        .where({ id: latest.id })
+        .update(patch)
       return {
         attempt: { ...latest, ...patch },
         claimed: true,
@@ -2622,7 +2722,9 @@ export async function claimFinalChargeAttempt(
     const confirmedDeclineKeys = new Set(
       attempts
         .filter(isConfirmedFinalChargeDeclineAttempt)
-        .map((entry: Record<string, any>) => String(entry.idempotency_key || ""))
+        .map((entry: Record<string, any>) =>
+          String(entry.idempotency_key || "")
+        )
         .filter(Boolean)
     )
     const confirmedDeclineCount = confirmedDeclineKeys.size
@@ -2966,7 +3068,9 @@ const CARD_PAYMENT_METADATA_KEYS = [
 ] as const
 
 /** Remove saved-card and final-charge state before a cart/order enters the no-card A/R lane. */
-export function withoutCardPaymentMetadata(value: unknown): Record<string, any> {
+export function withoutCardPaymentMetadata(
+  value: unknown
+): Record<string, any> {
   const metadata = metadataObject(value)
   for (const key of CARD_PAYMENT_METADATA_KEYS) {
     delete metadata[key]
@@ -3020,9 +3124,7 @@ export function finalizedCatchWeightOrderMetadata(input: {
         metadataObject(line.metadata).staff_added_line === true || false,
     })),
     catch_weight_packages: packages,
-    ...(instructions
-      ? { customer_order_instructions: instructions }
-      : {}),
+    ...(instructions ? { customer_order_instructions: instructions } : {}),
   }
 }
 
