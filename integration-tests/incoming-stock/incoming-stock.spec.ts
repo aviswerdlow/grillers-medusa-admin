@@ -491,6 +491,60 @@ it("stages a short receipt once, flags demand and refuses any claim that native 
     stageIncomingReceipt(db, { ...input, request_id: randomUUID() })
   ).rejects.toThrow("current confirmed batch");
 });
+it("replays a zero final receipt after an unknown response without claiming stock", async () => {
+  const b = await batch(8);
+  const d = demand(8);
+  await reserveIncomingStock(db, d);
+  const input = {
+    ...cmd(), batch_id: b.id, expected_revision: 1,
+    source_system: "receiving_fixture", source_ref: "zero-final",
+    quantity: 0, usable_at,
+  };
+  // The first response is intentionally discarded, as after a caller timeout.
+  await stageIncomingReceipt(db, input);
+  const replay = await stageIncomingReceipt(db, input);
+  expect(replay).toMatchObject({
+    inventory_applied: false,
+    affected_demand_ids: [d.demand_id],
+    receipt: { quantity: 0, status: "pending_adapter" },
+  });
+  expect(await db("gp_incoming_receipt").count("*").first()).toEqual({ count: "1" });
+  expect(await db("gp_incoming_event").where({ event_type: "receipt_staged" }).count("*").first()).toEqual({ count: "1" });
+  expect((await db("gp_incoming_demand").where({ id: d.demand_id }).first()).exception_reason).toBe("incoming_short");
+});
+it("allows only one of two independent consumers to stage the same source", async () => {
+  const firstBatch = await batch(3), secondBatch = await batch(3);
+  const input = {
+    source_system: "receiving_fixture", source_ref: "shared-source",
+    quantity: 3, usable_at,
+  };
+  const attempts = await Promise.allSettled([
+    stageIncomingReceipt(db, { ...cmd(), ...input, batch_id: firstBatch.id, expected_revision: 1 }),
+    stageIncomingReceipt(db, { ...cmd(), ...input, batch_id: secondBatch.id, expected_revision: 1 }),
+  ]);
+  expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+  expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
+  expect(await db("gp_incoming_receipt").count("*").first()).toEqual({ count: "1" });
+  expect((await db("gp_incoming_batch").where({ status: "receipt_pending" })).length).toBe(1);
+});
+it("keeps rolling partial receipts blocked at the current final-only staging boundary", async () => {
+  const b = await batch(5);
+  const d = demand(4);
+  await reserveIncomingStock(db, d);
+  await stageIncomingReceipt(db, {
+    ...cmd(), batch_id: b.id, expected_revision: 1,
+    source_system: "receiving_fixture", source_ref: "part-one",
+    quantity: 3, usable_at,
+  });
+  await expect(stageIncomingReceipt(db, {
+    ...cmd(), batch_id: b.id, expected_revision: 2,
+    source_system: "receiving_fixture", source_ref: "part-two",
+    quantity: 2, usable_at,
+  })).rejects.toThrow("current confirmed batch");
+  expect(await db("gp_incoming_receipt").count("*").first()).toEqual({ count: "1" });
+  expect((await db("gp_incoming_batch").where({ id: b.id }).first()).status).toBe("receipt_pending");
+  expect((await db("gp_incoming_demand").where({ id: d.demand_id }).first()).exception_reason).toBe("incoming_short");
+});
 it("prevents the same receipt source being recorded for a second batch", async () => {
   const a = await batch(),
     b = await batch();
