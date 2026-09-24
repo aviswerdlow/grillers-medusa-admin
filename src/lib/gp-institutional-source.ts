@@ -3,16 +3,21 @@ import type {
   InstitutionalQbdSnapshot,
 } from "./gp-institutional-terms-authority"
 import type { InstitutionalInvoice } from "./gp-institutional-exposure"
+import {
+  parseInstitutionalBridgeReadbacks,
+  type InstitutionalBridgeReadbacks,
+} from "./gp-institutional-bridge-readback"
 
 export type InstitutionalBridgeRead = {
   sourceStatus: "success" | "unavailable"
   link: InstitutionalAccountLink | null
   snapshot: InstitutionalQbdSnapshot | null
   invoices: InstitutionalInvoice[]
+  readbacks: InstitutionalBridgeReadbacks | null
 }
 
 const unavailable = (): InstitutionalBridgeRead => ({
-  sourceStatus: "unavailable", link: null, snapshot: null, invoices: [],
+  sourceStatus: "unavailable", link: null, snapshot: null, invoices: [], readbacks: null,
 })
 
 function id(value: unknown): string | null {
@@ -51,7 +56,7 @@ export async function readInstitutionalBridgeAccount(customerId: string): Promis
       signal: abort.signal,
     })
     if (response.status === 404) {
-      return { sourceStatus: "success", link: null, snapshot: null, invoices: [] }
+      return { sourceStatus: "success", link: null, snapshot: null, invoices: [], readbacks: null }
     }
     if (!response.ok) return unavailable()
     const body = await response.json() as Record<string, any>
@@ -80,6 +85,13 @@ export async function readInstitutionalBridgeAccount(customerId: string): Promis
     if (raw.credit_limit_cents !== null && creditLimitCents === null) return unavailable()
     const invoiceTotal = invoices.reduce((sum, row) => sum + row.remainingCents, 0)
     if (!Number.isSafeInteger(invoiceTotal) || invoiceTotal !== raw.open_invoice_cents) return unavailable()
+    const readbacks = parseInstitutionalBridgeReadbacks({
+      invoiceRows: raw.invoice_readbacks,
+      paymentRows: raw.payment_readbacks,
+      companyKey,
+      customerListId,
+      openInvoices: invoices,
+    })
 
     return {
       sourceStatus: "success",
@@ -98,6 +110,7 @@ export async function readInstitutionalBridgeAccount(customerId: string): Promis
         onHold: raw.on_hold === false ? false : raw.on_hold === true ? true : null,
       },
       invoices,
+      readbacks,
     }
   } catch {
     return unavailable()
