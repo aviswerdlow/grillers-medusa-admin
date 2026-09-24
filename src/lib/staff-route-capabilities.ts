@@ -12,6 +12,7 @@ export function adminRouteCapability(path: string, method: string, body: any = {
   if (/^\/admin\/grillers\/communications(?:\/|$)/.test(p)) return "communications"
   if (/^\/admin\/grillers\/quickbooks-sync(?:\/|$)/.test(p) || /^\/admin\/grillers\/orders\/[^/]+\/accounting-action$/.test(p)) return "accounting"
   if (/^\/admin\/grillers\/inventory\/(availability|allocations)$/.test(p)) return "inventory.read"
+  if (p === "/admin/grillers/inventory/incoming") return read ? "inventory.read" : method === "POST" ? "inventory.manage" : null
   if (p === "/admin/grillers/finalization/queue") return read ? "pick" : null
   const finalization = p.match(/^\/admin\/grillers\/orders\/[^/]+\/finalization(?:\/(.*))?$/)
   if (finalization) {

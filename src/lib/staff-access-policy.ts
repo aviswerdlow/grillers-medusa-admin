@@ -40,7 +40,7 @@ const legacyOfficeRoles = new Set([
 export const STAFF_ROLES = ["customer", "staff", "office", "picker", "packer", "manager", "merchandising_reviewer", "super_admin"] as const
 export type StaffRole = typeof STAFF_ROLES[number]
 export type StaffCustomer = { id?: string; email?: string | null; first_name?: string | null; last_name?: string | null; metadata?: Record<string, unknown> | null }
-export type StaffCapability = "catalog.read" | "inventory.read" | "orders.read" | "orders.support" | "customers.read" | "customers.write" | "communications" | "accounting" | "pick" | "pack" | "finalize" | "charge" | "fulfill" | "team.manage"
+export type StaffCapability = "catalog.read" | "inventory.read" | "inventory.manage" | "orders.read" | "orders.support" | "customers.read" | "customers.write" | "communications" | "accounting" | "pick" | "pack" | "finalize" | "charge" | "fulfill" | "team.manage"
 
 export function configuredIds(name: string): Set<string> {
   return new Set(String(process.env[name] || "").split(",").map(id => id.trim()).filter(Boolean))
@@ -83,7 +83,7 @@ export function staffCapabilities(customer: StaffCustomer | null): Set<StaffCapa
   if (caps.has("pick")) { caps.add("finalize"); caps.add("fulfill") }
   const m = customer?.metadata || {}
   if (role === "super_admin" || (caps.has("pick") && [m.final_charge_enabled, m.can_charge_final_orders, m.staff_final_charge_enabled, m.catch_weight_charge_enabled].some(staffFlagEnabled))) caps.add("charge")
-  if (role === "super_admin") caps.add("team.manage")
+  if (role === "super_admin") { caps.add("team.manage"); caps.add("inventory.manage") }
   return caps
 }
 
