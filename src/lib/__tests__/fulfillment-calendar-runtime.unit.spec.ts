@@ -1,3 +1,6 @@
+import { composeShippingPrice, issueShippingPriceToken, readAcceptedShippingPrice, SHIPPING_PRICE_TOKEN_KEY, SHIPPING_PRICE_ACCEPTED_KEY } from "../shipping-price-contract";
+import { pricePolicy } from "./__fixtures__/shipping-inputs";
+jest.mock("../shipping-price-policy-strapi",()=>({getShippingPricePolicy:jest.fn(async()=>require("./__fixtures__/shipping-inputs").pricePolicy())}));
 import {
   fulfillmentCalendarAction,
   currentCalendarSelection,
@@ -46,6 +49,7 @@ jest.mock("../../modules/fulfillment/wwex-speedship", () => ({
 const now = new Date("2026-10-05T18:00:00Z"),
   key = "synthetic-fixture-only-calendar-key-32";
 const savedKey = process.env.GRILLERS_CALENDAR_SIGNING_KEY;
+const savedPriceKeys = { active:process.env.GP_SHIPPING_PRICE_ACTIVE_KEY_ID, keys:process.env.GP_SHIPPING_PRICE_KEYS_JSON };
 const savedEnforcement = process.env.GP_CALENDAR_ENFORCEMENT;
 const env = {
   GRILLERS_CALENDAR_SIGNING_KEY: key,
@@ -141,6 +145,8 @@ beforeEach(() => {
   jest.useFakeTimers().setSystemTime(now);
   jest.clearAllMocks();
   process.env.GRILLERS_CALENDAR_SIGNING_KEY = key;
+  process.env.GP_SHIPPING_PRICE_ACTIVE_KEY_ID="fixture";
+  process.env.GP_SHIPPING_PRICE_KEYS_JSON=JSON.stringify({fixture:"synthetic-shipping-price-test-secret-32-characters"});
   process.env.GP_CALENDAR_ENFORCEMENT = "required";
   (loadCalendarSource as jest.Mock).mockResolvedValue(source());
   (getPackagingConfig as jest.Mock).mockResolvedValue(packingConfig());
@@ -148,6 +154,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   jest.useRealTimers();
+  if(savedPriceKeys.active===undefined) delete process.env.GP_SHIPPING_PRICE_ACTIVE_KEY_ID; else process.env.GP_SHIPPING_PRICE_ACTIVE_KEY_ID=savedPriceKeys.active;
+  if(savedPriceKeys.keys===undefined) delete process.env.GP_SHIPPING_PRICE_KEYS_JSON; else process.env.GP_SHIPPING_PRICE_KEYS_JSON=savedPriceKeys.keys;
   if (savedKey === undefined) delete process.env.GRILLERS_CALENDAR_SIGNING_KEY;
   else process.env.GRILLERS_CALENDAR_SIGNING_KEY = savedKey;
   if (savedEnforcement === undefined)
@@ -283,6 +291,10 @@ test("real calendar, packing and acceptance functions preserve one signed choice
     packingConfig()
   );
   h.cart.shipping_methods[0].data[SHIPPING_PACKING_PLAN_KEY] = plan;
+  const quote=composeShippingPrice({source:"wwex",rate:20,currency:"usd",plan,policy:pricePolicy()});
+  Object.assign(h.cart,{shipping_total:34,shipping_discount_total:0,shipping_tax_total:0,item_subtotal:10,tax_total:0,total:44,promotions:[]});
+  h.cart.shipping_methods[0].amount=34;
+  h.cart.shipping_methods[0].data[SHIPPING_PRICE_TOKEN_KEY]=issueShippingPriceToken(h.cart,plan,quote);
   await prepareCalendarAcceptance(h.scope, h.cart.id);
   await prepareShippingAcceptance(h.scope, h.cart.id);
   const loaded = clone(h.cart);
@@ -301,6 +313,8 @@ test("real calendar, packing and acceptance functions preserve one signed choice
   expect(
     publicShippingProjection(loaded).metadata[CALENDAR_ACCEPTED_KEY]
   ).toBeUndefined();
+  expect(readAcceptedShippingPrice({...loaded,cart_id:loaded.id})).toMatchObject({customerShipping:34,shippingDiscount:0,quote:{packingPlanId:plan.id,packagingCost:14}});
+  expect(publicShippingProjection(loaded).metadata[SHIPPING_PRICE_ACCEPTED_KEY]).toBeUndefined();
   loaded.items[0].quantity = 2;
   await expect(
     validateCalendarAcceptance(h.scope, loaded)

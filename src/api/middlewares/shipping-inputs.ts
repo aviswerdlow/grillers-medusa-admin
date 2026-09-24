@@ -1,3 +1,4 @@
+import { SHIPPING_PRICE_ACCEPTED_KEY } from "../../lib/shipping-price-contract";
 import type {
   MedusaRequest,
   MedusaResponse,
@@ -17,6 +18,8 @@ import {
 import { prepareCalendarAcceptance } from "../../lib/fulfillment-calendar-runtime";
 
 const privateKeys = new Set([
+  SHIPPING_PRICE_ACCEPTED_KEY,
+  "shipping_final_cost_v1",
   SHIPPING_WEIGHT_KEY,
   SHIPPING_WEIGHT_SNAPSHOT_KEY,
   SHIPPING_PACKING_PLAN_KEY,
@@ -53,12 +56,10 @@ export async function prepareNativeShippingAcceptance(
     return next();
   } catch (error) {
     if (error instanceof FulfillmentCalendarError)
-      return res
-        .status(error.status)
-        .json({
-          type: "fulfillment_date_review_required",
-          message: error.message,
-        });
+      return res.status(error.status).json({
+        type: "fulfillment_date_review_required",
+        message: error.message,
+      });
     if (error instanceof ShippingInputError)
       return res
         .status(409)

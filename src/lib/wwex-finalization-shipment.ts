@@ -1,4 +1,9 @@
 import {
+  readAcceptedShippingPrice,
+  priceCents,
+} from "./shipping-price-contract"
+import { SHIPPING_PACKING_PLAN_KEY } from "./shipping-packing-plan"
+import {
   createWwexSpeedshipClientFromEnv,
   isUpsServiceCode,
   normalizeGrillersUpsServiceCode,
@@ -24,7 +29,8 @@ type FinalizationPreview = {
 }
 
 export type WwexFinalizationQuote = {
-  status: "quoted"
+  status: "quoted" | "blocked"
+  reason?: string
   quote: WwexQuoteResult
   offer: WwexOffer
   totals: Record<string, any>
@@ -152,7 +158,8 @@ function shippingServiceCode(order: Record<string, any>): string {
   if (blob.includes("2nd day") || blob.includes("second day")) {
     return "2ND_DAY_AIR"
   }
-  if (blob.includes("overnight") || blob.includes("next day")) return "OVERNIGHT"
+  if (blob.includes("overnight") || blob.includes("next day"))
+    return "OVERNIGHT"
   if (blob.includes("ups") || blob.includes("shipping")) return "GROUND"
   return normalized
 }
@@ -161,6 +168,7 @@ function shipmentDate(order: Record<string, any>): string | null {
   const metadata = metadataObject(order.metadata)
   return (
     firstText(
+      metadata.fulfillmentDispatchDate,
       metadata.shipmentDate,
       metadata.shipment_date,
       metadata.requestedShipDate,
@@ -177,6 +185,9 @@ function packageInputs(preview: FinalizationPreview) {
       package_type: pkg.package_type,
       packed_weight_lb: pkg.packed_weight_lb,
       dry_ice_lb: pkg.dry_ice_lb,
+      length_in: pkg.length_in,
+      width_in: pkg.width_in,
+      height_in: pkg.height_in,
       note: pkg.note,
     }))
 }
@@ -196,28 +207,6 @@ function quoteMetadata(offer: WwexOffer) {
   }
 }
 
-function recalculateTotalsWithShipping(
-  preview: FinalizationPreview,
-  shippingAmount: number
-) {
-  const totals = preview.totals || {}
-  const finalOrderTotal = roundMoney(
-    numberOrZero(totals.final_item_total) +
-      numberOrZero(shippingAmount) +
-      numberOrZero(totals.final_tax_total) -
-      numberOrZero(totals.final_discount_total)
-  )
-
-  return {
-    ...totals,
-    final_shipping_total: roundMoney(shippingAmount),
-    final_order_total: finalOrderTotal,
-    delta_total: roundMoney(
-      finalOrderTotal - numberOrZero(preview.finalization.estimated_order_total)
-    ),
-  }
-}
-
 export async function quoteWwexFinalizationShipping(input: {
   order: Record<string, any>
   preview: FinalizationPreview
@@ -225,16 +214,31 @@ export async function quoteWwexFinalizationShipping(input: {
 }): Promise<WwexFinalizationQuote | null> {
   if (!input.preview.package_capture_required) return null
 
-  const client = createWwexSpeedshipClientFromEnv(process.env, input.logger)
-  if (!client) return null
-
   const serviceCode = shippingServiceCode(input.order)
-  if (!isUpsServiceCode(serviceCode)) return null
-
   const packages = packageInputs(input.preview)
-  if (!packages.length) return null
-
   try {
+    const accepted = readAcceptedShippingPrice(input.order)
+    const plan = metadataObject(input.order.metadata)[SHIPPING_PACKING_PLAN_KEY]
+    if (
+      !plan ||
+      plan.id !== accepted.quote.packingPlanId ||
+      serviceCode !== plan.service
+    )
+      throw new Error("Accepted shipping price and packing plan need review.")
+    const client = createWwexSpeedshipClientFromEnv(process.env, input.logger)
+    if (!client || !isUpsServiceCode(serviceCode) || !packages.length)
+      throw new Error(
+        "Final shipping quote is unavailable. Keep the order on hold."
+      )
+    if (
+      priceCents(input.preview.totals.final_shipping_total) !==
+        priceCents(accepted.customerShipping - accepted.shippingTax) ||
+      priceCents(input.preview.totals.final_discount_total) !==
+        priceCents(accepted.nonShippingCredit)
+    )
+      throw new Error(
+        "Final shipping totals differ from the accepted price contract."
+      )
     const quote = await client.quoteSmallpack({
       serviceCode,
       shippingAddress: input.order.shipping_address || {},
@@ -245,17 +249,42 @@ export async function quoteWwexFinalizationShipping(input: {
       orderId: input.order.id,
       residentialDelivery: true,
     })
+    if (
+      quote.offer.price.currency.toLowerCase() !==
+      accepted.quote.policy.currency
+    )
+      throw new Error("Final carrier currency mismatch.")
+    const freight = priceCents(quote.offer.price.value) / 100
     return {
       status: "quoted",
       quote,
       offer: quote.offer,
-      totals: recalculateTotalsWithShipping(input.preview, quote.offer.price.value),
-      metadata: quoteMetadata(quote.offer),
+      // Cost changes never replace the customer contract. A changed service,
+      // address or basket needs the separate approved amendment workflow.
+      totals: input.preview.totals,
+      metadata: {
+        ...quoteMetadata(quote.offer),
+        shipping_final_cost_v1: {
+          price_policy_revision: accepted.quote.policy.revision,
+          packing_plan_id: plan.id,
+          carrier_freight: freight,
+          customer_shipping: accepted.customerShipping,
+          shipping_discount: accepted.shippingDiscount,
+          estimated_box_cost: accepted.quote.boxCost,
+          estimated_dry_ice_cost: accepted.quote.dryIceCost,
+          actual_packages: packages,
+          // Actual box procurement costs/carrier bills belong to #369. Missing
+          // observations are unknown, never reconstructed as zero.
+          actual_box_cost: null,
+          actual_dry_ice_cost: null,
+          carrier_bill: null,
+        },
+      },
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     input.logger?.warn?.(
-      `[wwex] final packed-box quote failed for order ${input.order.id}; preserving existing shipping total: ${message}`
+      `[wwex] final packed-box quote failed for order ${input.order.id}; finalization blocked: ${redactedErrorMessage(error)}`
     )
     emitWwexFinalizationFailureAlert({
       alertKind: "wwex_finalization_quote_failed",
@@ -267,14 +296,15 @@ export async function quoteWwexFinalizationShipping(input: {
       packageCount: packages.length,
     })
     return {
-      status: "quoted",
+      status: "blocked",
+      reason: "shipping_price_review_required",
       quote: null as any,
       offer: null as any,
-      totals: input.preview.totals,
+      totals: {},
       metadata: {
         wwex_quote_status: "failed",
         wwex_quote_failed_at: new Date().toISOString(),
-        wwex_quote_error: message,
+        wwex_quote_error: redactedErrorMessage(error),
       },
     }
   }
