@@ -7,6 +7,11 @@ import {
 import { emitOpsAlert } from "../ops-alert"
 import { isInSendBlackout } from "./hebrew-calendar"
 import { instrumentEmailHtml } from "./links"
+import {
+  approvedEssentialEmailDuringBlackout,
+  ESSENTIAL_EMAIL_BLACKOUT_POLICY_VERSION,
+  observanceSendPolicyEnabled,
+} from "./observance-send-policy"
 
 type KnexLike = any
 
@@ -1084,20 +1089,22 @@ export async function sendTrackedEmail(
     }
   }
 
-  // PLATFORM RULE — no operator override: marketing and lifecycle email
-  // never sends during Shabbat/Yom Tov (business clock, Atlanta).
-  // Transactional receipts are customer-triggered and stay unblocked.
+  // During the approved observance policy, only the reviewed, necessary
+  // account/order templates may cross the blackout. The switch defaults off
+  // until the durable deferral paths and production send owners are ready.
   // Deferred is NOT a failure: callers reschedule at deferUntil; nothing
   // is logged to gp_message_log so the retry sends cleanly.
   // Gated on PURPOSE as well as stream: cart-recovery flows ride the
   // transactional Postmark stream for inbox placement but are still
   // marketing (marketing_1to1) — stream is a deliverability choice, not
   // a semantic classification.
-  if (
+  const observancePolicy = observanceSendPolicyEnabled()
+  const blackoutApplies =
     input.stream === "broadcast" ||
     input.stream === "lifecycle" ||
-    requiresMarketingConsent(purpose)
-  ) {
+    requiresMarketingConsent(purpose) ||
+    (observancePolicy && !approvedEssentialEmailDuringBlackout(input, purpose))
+  if (blackoutApplies) {
     const blackout = isInSendBlackout(now)
     if (blackout.blocked) {
       await recordCommunicationEvent(db, {
@@ -1115,6 +1122,9 @@ export async function sendTrackedEmail(
           topic: input.topic,
           reason: blackout.reason || "shabbat_blackout",
           defer_until: blackout.until ? blackout.until.toISOString() : null,
+          policy_version: observancePolicy
+            ? ESSENTIAL_EMAIL_BLACKOUT_POLICY_VERSION
+            : null,
         },
         context: experimentContext
           ? { experiment_context: experimentContext }

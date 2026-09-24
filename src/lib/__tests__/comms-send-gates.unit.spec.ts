@@ -126,12 +126,22 @@ function baseInput(overrides: Record<string, any> = {}) {
 
 describe("sendTrackedEmail gates", () => {
   let notification: { createNotifications: jest.Mock }
+  const originalPolicyFlag = process.env.GP_OBSERVANCE_SEND_POLICY_ENABLED
 
   beforeEach(() => {
     jest.clearAllMocks()
+    delete process.env.GP_OBSERVANCE_SEND_POLICY_ENABLED
     ;(isInSendBlackout as jest.Mock).mockReturnValue({ blocked: false })
     notification = {
       createNotifications: jest.fn(async () => [{ provider_id: "pm_msg_1" }]),
+    }
+  })
+
+  afterAll(() => {
+    if (originalPolicyFlag === undefined) {
+      delete process.env.GP_OBSERVANCE_SEND_POLICY_ENABLED
+    } else {
+      process.env.GP_OBSERVANCE_SEND_POLICY_ENABLED = originalPolicyFlag
     }
   })
 
@@ -318,6 +328,116 @@ describe("sendTrackedEmail gates", () => {
     expect(result.ok).toBe(true)
     expect(result.skipped).toBeUndefined()
     expect(notification.createNotifications).toHaveBeenCalledTimes(1)
+  })
+
+  it("allows an approved order notice under the enabled policy", async () => {
+    process.env.GP_OBSERVANCE_SEND_POLICY_ENABLED = "true"
+    ;(isInSendBlackout as jest.Mock).mockReturnValue({
+      blocked: true,
+      reason: "shabbat",
+      until: new Date("2026-07-11T02:00:00Z"),
+    })
+    const { db, state } = fakeDb()
+    state.gp_customer_profile = [consentedProfile({ email_consent: false })]
+    const result = await sendTrackedEmail(
+      fakeContainer(db, notification),
+      baseInput({
+        stream: "transactional",
+        purpose: "transactional",
+        template_key: "order-placed",
+        topic: "order_updates",
+        order_id: "order_123",
+      })
+    )
+    expect(result.ok).toBe(true)
+    expect(notification.createNotifications).toHaveBeenCalledTimes(1)
+  })
+
+  it("defers unapproved service email under the enabled policy", async () => {
+    process.env.GP_OBSERVANCE_SEND_POLICY_ENABLED = "true"
+    ;(isInSendBlackout as jest.Mock).mockReturnValue({
+      blocked: true,
+      reason: "shabbat",
+      until: new Date("2026-07-11T02:00:00Z"),
+    })
+    const { db, state } = fakeDb()
+    state.gp_customer_profile = [consentedProfile({ email_consent: false })]
+    const result = await sendTrackedEmail(
+      fakeContainer(db, notification),
+      baseInput({
+        stream: "transactional",
+        purpose: "service",
+        template_key: "customer-welcome",
+        topic: "account",
+      })
+    )
+    expect(result).toMatchObject({ ok: false, deferred: true })
+    expect(notification.createNotifications).not.toHaveBeenCalled()
+  })
+
+  it("uses Atlanta Friday and Saturday boundaries for approved and refused email", async () => {
+    process.env.GP_OBSERVANCE_SEND_POLICY_ENABLED = "true"
+    const calendar = jest.requireActual("../communications/hebrew-calendar") as typeof import("../communications/hebrew-calendar")
+    const [shabbat] = calendar.getSendBlackoutWindows(
+      new Date("2026-07-10T00:00:00Z"),
+      new Date("2026-07-12T12:00:00Z")
+    )
+    expect(shabbat).toBeDefined()
+    const atlantaDay = (at: Date) =>
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York",
+        weekday: "long",
+      }).format(at)
+    expect(atlantaDay(shabbat.start)).toBe("Friday")
+    expect(atlantaDay(shabbat.end)).toBe("Saturday")
+    ;(isInSendBlackout as jest.Mock).mockImplementation(
+      calendar.isInSendBlackout
+    )
+
+    jest.useFakeTimers()
+    try {
+      for (const [label, at, blocked] of [
+        ["Friday before", new Date(shabbat.start.getTime() - 1000), false],
+        ["Friday after", new Date(shabbat.start.getTime() + 1000), true],
+        ["Saturday before", new Date(shabbat.end.getTime() - 1000), true],
+        ["Saturday after", new Date(shabbat.end.getTime() + 1000), false],
+      ] as const) {
+        jest.setSystemTime(at)
+        expect(calendar.isInSendBlackout(at).blocked).toBe(blocked)
+        notification.createNotifications.mockClear()
+        const { db, state } = fakeDb()
+        state.gp_customer_profile = [consentedProfile()]
+        const container = fakeContainer(db, notification)
+
+        const approved = await sendTrackedEmail(
+          container,
+          baseInput({
+            stream: "transactional",
+            purpose: "transactional",
+            template_key: "order-placed",
+            topic: "order_updates",
+            order_id: `order_${label.replace(/\s/g, "_")}`,
+          })
+        )
+        const refused = await sendTrackedEmail(
+          container,
+          baseInput({
+            stream: "transactional",
+            purpose: "service",
+            template_key: "customer-welcome",
+            topic: "account",
+          })
+        )
+
+        expect(approved.ok).toBe(true)
+        expect(Boolean(refused.deferred)).toBe(blocked)
+        expect(notification.createNotifications).toHaveBeenCalledTimes(
+          blocked ? 1 : 2
+        )
+      }
+    } finally {
+      jest.useRealTimers()
+    }
   })
 
   it("staff_test still defers during the send blackout", async () => {

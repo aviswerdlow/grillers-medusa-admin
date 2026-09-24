@@ -3,6 +3,9 @@ import type { MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { emitOpsAlert } from "../ops-alert"
 import { recordCommunicationEvent } from "./core"
+import { fetchOrderForEmail } from "../emails/order-fetch"
+import { isInSendBlackout, nextAllowedSendTime } from "./hebrew-calendar"
+import { observanceSendPolicyEnabled } from "./observance-send-policy"
 import { toE164 } from "./sms"
 
 type KnexLike = any
@@ -481,6 +484,8 @@ export function orderShippedSmsFulfillmentEligibility(
 export type SendTransactionalSmsResult = {
   ok: boolean
   skipped?: boolean
+  deferred?: boolean
+  deferUntil?: Date
   messageSid?: string
   error?: string
 }
@@ -579,6 +584,7 @@ async function sendOrderTransactionalSms(
 
   type Claim =
     | { kind: "claimed"; messageId: string }
+    | { kind: "deferred"; deferUntil: Date }
     | { kind: "duplicate"; messageSid?: string }
     | { kind: "suppressed"; reason: string }
 
@@ -614,19 +620,26 @@ async function sendOrderTransactionalSms(
       }
     }
 
-    const countRows = await trx("gp_message_log")
+    let countQuery = trx("gp_message_log")
       .whereNull("deleted_at")
       .where("channel", "sms")
       .where("order_id", orderId)
       .whereRaw("metadata->>'program' = ?", [ORDER_SMS_PROGRAM])
       .whereRaw("metadata->>'purpose' = ?", [ORDER_SMS_CONSENT_PURPOSE])
-      .count("id as count")
+    if (existing?.id) countQuery = countQuery.whereNot("id", existing.id)
+    const countRows = await countQuery.count("id as count")
     if (Number(countRows?.[0]?.count || 0) >= ORDER_SMS_MAX_PER_ORDER) {
       return { kind: "suppressed", reason: "per_order_frequency_cap" }
     }
 
     const messageId =
       existing?.id || `gpmsg_${crypto.randomBytes(8).toString("hex")}`
+    const blackout = observanceSendPolicyEnabled()
+      ? isInSendBlackout(new Date())
+      : { blocked: false }
+    const deferUntil = blackout.blocked
+      ? blackout.until || nextAllowedSendTime(new Date())
+      : null
     const row = {
       id: messageId,
       idempotency_key: idempotencyKey,
@@ -641,7 +654,7 @@ async function sendOrderTransactionalSms(
       template_key: templateKey,
       order_id: orderId,
       subject: body.slice(0, 120),
-      status: "queued",
+      status: deferUntil ? "deferred" : "queued",
       metadata: {
         phone,
         body_length: body.length,
@@ -657,6 +670,7 @@ async function sendOrderTransactionalSms(
         tracking_number: enrollmentConfirmation
           ? null
           : cleanTrackingNumber(input.trackingNumber) || null,
+        ...(deferUntil ? { defer_until: deferUntil.toISOString() } : {}),
       },
       queued_at: now,
       created_at: existing?.created_at || now,
@@ -679,13 +693,35 @@ async function sendOrderTransactionalSms(
     } else {
       await trx("gp_message_log").insert(row)
     }
-    return { kind: "claimed", messageId }
+    return deferUntil
+      ? { kind: "deferred", deferUntil }
+      : { kind: "claimed", messageId }
   })) as Claim
 
   if (claim.kind === "duplicate") {
     return { ok: true, skipped: true, messageSid: claim.messageSid }
   }
   if (claim.kind === "suppressed") return suppress(claim.reason, phone)
+  if (claim.kind === "deferred") {
+    await recordCommunicationEvent(db, {
+      event_name: "transactional_sms_deferred_blackout",
+      email: input.order?.email || null,
+      order_id: orderId,
+      template_key: templateKey,
+      properties: {
+        channel: "sms",
+        purpose: ORDER_SMS_CONSENT_PURPOSE,
+        phone_last4: phone.slice(-4),
+        defer_until: claim.deferUntil.toISOString(),
+      },
+    })
+    return {
+      ok: false,
+      deferred: true,
+      deferUntil: claim.deferUntil,
+      error: "shabbat_blackout",
+    }
+  }
 
   let providerAcceptedSid: string | null = null
   let providerErrorCode: string | null = null
@@ -703,6 +739,32 @@ async function sendOrderTransactionalSms(
       return suppress("transactional_sms_program_suppressed", phone, {
         after_claim: true,
       })
+    }
+
+    // A window can begin after the durable claim. Recheck at the last safe
+    // point before provider I/O, leaving the same row available for replay.
+    if (observanceSendPolicyEnabled()) {
+      const blackout = isInSendBlackout(new Date())
+      if (blackout.blocked) {
+        const deferUntil = blackout.until || nextAllowedSendTime(new Date())
+        await db("gp_message_log").where("id", claim.messageId).update({
+          status: "deferred",
+          metadata: {
+            ...objectValue(
+              (await db("gp_message_log").where("id", claim.messageId).first())
+                ?.metadata
+            ),
+            defer_until: deferUntil.toISOString(),
+          },
+          updated_at: new Date(),
+        })
+        return {
+          ok: false,
+          deferred: true,
+          deferUntil,
+          error: "shabbat_blackout",
+        }
+      }
     }
 
     const statusCallback = transactionalSmsStatusCallbackUrlForMessage(
@@ -911,6 +973,129 @@ export async function sendOrderShippedSms(
     input,
     ORDER_SMS_TEMPLATE_SHIPPED
   )
+}
+
+/** Replay only blackout-deferred order SMS against the current order/consent. */
+export async function resumeBlackoutDeferredOrderSms(
+  container: MedusaContainer,
+  limit = 50
+): Promise<{
+  processed: number
+  sent: number
+  skipped: number
+  deferred: number
+  errors: number
+}> {
+  const summary = { processed: 0, sent: 0, skipped: 0, deferred: 0, errors: 0 }
+  if (!observanceSendPolicyEnabled()) return summary
+
+  const db = container.resolve(ContainerRegistrationKeys.PG_CONNECTION) as KnexLike
+  const logger = container.resolve("logger")
+  const dueRows = await db("gp_message_log")
+    .whereNull("deleted_at")
+    .where("channel", "sms")
+    .where("status", "deferred")
+    .whereRaw("metadata->>'program' = ?", [ORDER_SMS_PROGRAM])
+    .whereRaw("metadata->>'defer_until' <= ?", [new Date().toISOString()])
+    .orderBy("queued_at", "asc")
+    .limit(Math.min(Math.max(limit, 1), 50))
+
+  for (const row of dueRows) {
+    summary.processed += 1
+    const metadata = objectValue(row.metadata)
+    try {
+      if (
+        row.template_key !== ORDER_SMS_TEMPLATE_ENROLLMENT_CONFIRMATION &&
+        row.template_key !== ORDER_SMS_TEMPLATE_SHIPPED
+      ) {
+        throw new Error("unknown_deferred_order_sms_template")
+      }
+      const order = await fetchOrderForEmail(container, String(row.order_id || ""))
+      if (!order) throw new Error("deferred_order_not_found")
+
+      // A delayed message cannot move to a changed order phone. A new
+      // checkout/consent event must authorize any new destination.
+      if (
+        !metadata.phone ||
+        toE164(order.shipping_address?.phone) !== toE164(metadata.phone)
+      ) {
+        await db("gp_message_log").where("id", row.id).update({
+          status: "suppressed",
+          error_message: "deferred_destination_changed",
+          updated_at: new Date(),
+        })
+        summary.skipped += 1
+        continue
+      }
+
+      const result =
+        row.template_key === ORDER_SMS_TEMPLATE_ENROLLMENT_CONFIRMATION
+          ? await sendOrderSmsEnrollmentConfirmation(container, { order })
+          : await sendOrderShippedSms(container, {
+              order,
+              fulfillmentId: String(metadata.fulfillment_id || ""),
+              trackingNumber: metadata.tracking_number || null,
+            })
+      if (result.deferred) summary.deferred += 1
+      else if (result.ok && !result.skipped) summary.sent += 1
+      else if (result.ok && result.skipped) {
+        // A replay may have been denied by fresh consent/configuration, or
+        // another worker may already have claimed it. Only retire a row that
+        // is still deferred after the send routine returns.
+        const current = await db("gp_message_log")
+          .where("id", row.id)
+          .first()
+        if (current?.status === "deferred") {
+          await db("gp_message_log").where("id", row.id).update({
+            status: "suppressed",
+            error_message: "deferred_revalidation_failed",
+            updated_at: new Date(),
+          })
+        }
+        summary.skipped += 1
+      } else {
+        throw new Error(result.error || "deferred_order_sms_send_failed")
+      }
+    } catch (error) {
+      summary.errors += 1
+      const attempts = Number(metadata.defer_attempts || 0) + 1
+      const exhausted = attempts >= 3
+      const updated = await db("gp_message_log")
+        .where("id", row.id)
+        .where("status", "deferred")
+        .update({
+          status: exhausted ? "failed" : "deferred",
+          metadata: {
+            ...metadata,
+            defer_attempts: attempts,
+            defer_until: new Date(Date.now() + 5 * 60_000).toISOString(),
+          },
+          error_message: String(error instanceof Error ? error.message : error)
+            .slice(0, 200),
+          updated_at: new Date(),
+        })
+        .returning("id")
+      logger.warn(
+        `[transactional-sms] deferred replay failed id=${row.id} attempt=${attempts}`
+      )
+      if (exhausted && updated.length > 0) {
+        await emitOpsAlert({
+          alertKind: "communications_transactional_sms_replay_exhausted",
+          title: "Deferred order SMS replay exhausted",
+          path: "src/lib/communications/transactional-sms.ts:resumeBlackoutDeferredOrderSms",
+          severity: "warn",
+          fingerprint: "transactional_sms_replay_exhausted",
+          meta: {
+            message_log_id: row.id,
+            template_key: row.template_key,
+            attempts,
+          },
+          logger,
+        })
+      }
+    }
+  }
+  return summary
 }
 
 export type TransactionalInboundSmsDecision = {
