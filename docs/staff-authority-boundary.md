@@ -57,7 +57,9 @@ Source: `src/lib/staff-cart-authority.ts`, `src/api/middlewares/staff-cart-autho
 | Backend setting | Reviewed value |
 | --- | --- |
 | `GP_STAFF_GATEWAY_API_KEY_ID` | ID of the dedicated key used by storefront `MEDUSA_ADMIN_API_TOKEN`, never its secret token |
+| `GP_STAFF_GATEWAY_USER_ID` | ID of the dedicated native service user used as the staff gateway; its login credential stays in 1Password and still requires the signed customer JWT |
 | `GP_ADMIN_READ_ONLY_API_KEY_IDS` | IDs of approved GET-only integrations, including #316's reader and storefront background reader |
+| `GP_ADMIN_READ_ONLY_USER_IDS` | IDs of dedicated native service users limited to enumerated admin GET routes; no non-GET method or staff JWT |
 | `GP_PRIVILEGED_ADMIN_USER_IDS` | Existing native user IDs for separate privileged operations/recovery |
 | `GP_STAFF_BOOTSTRAP_CUSTOMER_IDS` | Approved existing customer IDs for initial owners after identity/grant review |
 | `GP_INVOICE_APPROVER_CUSTOMER_IDS` | Approved invoice approver customer IDs, alongside the existing email allowlist |
@@ -86,14 +88,20 @@ Frontend-first deployment preserves the original owner fallback only when the ba
 
 | Consumer / observed source | Backend ID class for enforcement | Allowed operation / activation constraint |
 |---|---|---|
-| Storefront staff admin helper, order entry and inventory checks (`staff/admin.ts`) | `GP_STAFF_GATEWAY_API_KEY_ID` + signed customer JWT | Explicit role capability map; no service fallback |
-| Back-in-stock discovery; strategy snapshot/customer-phone audit; backend inventory-baseline review; bridge `MEDUSA_ADMIN_READ_TOKEN` live-order read | `GP_ADMIN_READ_ONLY_API_KEY_IDS` | Enumerated GET/HEAD catalog, customers, orders, inventory and allocation reads |
+| Storefront staff admin helper, order entry and inventory checks (`staff/admin.ts`) | `GP_STAFF_GATEWAY_USER_ID` or legacy `GP_STAFF_GATEWAY_API_KEY_ID`, plus signed customer JWT | Explicit role capability map; no service fallback |
+| Back-in-stock discovery; strategy snapshot/customer-phone audit; backend inventory-baseline review; bridge `MEDUSA_ADMIN_READ_TOKEN` live-order read | `GP_ADMIN_READ_ONLY_USER_IDS` or legacy `GP_ADMIN_READ_ONLY_API_KEY_IDS` | Native service users: enumerated GET only. Legacy key IDs retain enumerated GET/HEAD catalog, customers, orders, inventory and allocation reads |
 | Review acquisition cron (`api/cron/review-acquisition`) | `GP_COMMUNICATIONS_ADMIN_API_KEY_IDS`; frontend prefers `MEDUSA_COMMUNICATIONS_API_TOKEN` | Read discovery plus POST order/customer metadata containing only the three send timestamps. Frontend no longer replays entire profile/order metadata snapshots. No other customer, money, grant or release fields |
 | QBD bridge `MedusaApi` product/inventory writer using `MEDUSA_TOKEN` | `GP_QBD_CATALOG_API_KEY_IDS` | Enumerated product POST create/update, inventory-item POST, product-variant inventory attachment and location-level POST. Read discovery as above. No delete, payment, customer or draft-order writes |
 | Dormant bridge customer/draft-order/pay/delete, sales-channel product membership, order-edit lifecycle and generic order update methods | Unclassified, denied under enforce | Keep writer absent/paths disabled pending their separate reviewed cutover; do not label the whole writer read-only or grant operator access |
 | QBD accounting metadata handoff `/api/qb-sync/...` | Existing dedicated signed sync token; outside admin API-key classification | Preserve accounting allowlist/idempotency. This staff rollout does not authorize production QBD connection or dormant writers |
 | Native Medusa dashboard/recovery user | `GP_PRIVILEGED_ADMIN_USER_IDS` in enforce | Current native authenticated user; separately verified recovery. Log mode retains existing dashboard login |
 | Unknown plugin, manual script or service key | Observe in log; denied in enforce | Reconcile live key IDs, owner, exact method/path and schedule before activation |
+
+The native-user settings classify an already authenticated Medusa user bearer or
+session. They do not create credentials or convert existing Basic API-key clients
+to bearer authentication. Client login/renewal and exact consumer readbacks are
+separate rollout gates before enforce mode. A user listed as both gateway and
+read-only is denied; read-only also takes precedence over operator listing.
 
 A key cannot belong to multiple service classes; gateway precedence is absolute. No service receives native user/operator privileges. This inventory covers the canonical source repositories; live key-ID/secret custody, historical scripts outside those sources and a real recovery login are still activation prerequisites. No credential was printed, provisioned, rotated or changed and no scheduled message ran.
 
