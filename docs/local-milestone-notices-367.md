@@ -5,7 +5,9 @@ enabled, it records one office alert for each failed-delivery or corrected
 milestone. Customer notices stay held until an explicit #359 notice policy is
 configured with a version, approval time, start time, and lists of milestones
 approved for email and SMS. The start time prevents stale preapproval events
-from sending later. No production environment setting is changed by this PR.
+from sending later. The worker checks the current milestone event before a
+customer notice, so an already corrected or superseded event cannot send a
+stale update. No production environment setting is changed by this PR.
 
 Email uses `sendTrackedEmail` with transactional purpose, `order_updates` topic,
 the **accepted order's email snapshot**, and a key derived from milestone event

@@ -33,6 +33,10 @@ async function pendingEvents(db: Db, channel: NoticeChannel, milestones: string[
     .limit(100)
     .select("event.event_id", "event.order_id", "event.milestone", "event.kind", "event.recorded_at",
       "ord.display_id", "ord.email", "ord.customer_id", "ord.metadata")
+  // A corrected or superseded event must not create a stale customer notice.
+  // Office alerts still see historical failures and corrections.
+  if (channel !== "office") query.join("gp_local_milestone_state as state", "state.order_id", "event.order_id")
+    .whereColumn("state.current_event_id", "event.event_id")
   if (startAt) query.where("event.recorded_at", ">=", startAt)
   if (channel === "office") query.where(function(this: any) {
     this.where("event.milestone", "local_failed").orWhere("event.kind", "correction")
