@@ -17,10 +17,11 @@ export async function enforceStaffCapabilities(req: MedusaRequest, res: MedusaRe
     const principal = await resolveStaffPrincipal(req)
 
     const capability = adminRouteCapability(req.path, req.method, req.body)
+    const nativeReadOnlyUser = principal.kind === "service" && principal.auth.actor_type === "user" && principal.service_role === "read_only"
     const allowed = principal.kind === "operator"
       || (principal.kind === "service" ? principal.service_scope === "parity"
         ? req.method === "GET" && req.path.replace(/\/+$/, "") === ORDER_PROMISE_READ_PATH
-        : isServiceRoute(principal.service_role, req.path, req.method, (req as any).validatedBody || req.body) : capability && principal.capabilities.has(capability))
+        : (!nativeReadOnlyUser || req.method === "GET") && isServiceRoute(principal.service_role, req.path, req.method, (req as any).validatedBody || req.body) : capability && principal.capabilities.has(capability))
     if (!allowed) throw new StaffAccessDenied("Your current staff permissions do not allow this action.")
     ;(req as any).gp_staff_principal = principal
     // Native order/payment workflows copy auth_context.actor_id into canceled_by,
