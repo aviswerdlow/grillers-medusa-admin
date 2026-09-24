@@ -31,6 +31,11 @@ const routes = [
 
 function harness(route: (typeof routes)[number], rows: unknown[] = [paidOrder]) {
   const graph = jest.fn().mockResolvedValue({ data: rows })
+  const finalizations = [{ status: "released_to_fulfillment", final_order_total: "500.00" }]
+  const commitments = [{ company_key: "TEST_COMPANY", customer_list_id: "TEST_LIST", amount_cents: "50000", state: "accepted" }]
+  const db = jest.fn((table: string) => ({
+    where: () => ({ whereNull: async () => table === "gp_order_finalization" ? finalizations : commitments }),
+  }))
   const logger = { warn: jest.fn(), error: jest.fn() }
   const req = {
     params: route.params,
@@ -39,6 +44,7 @@ function harness(route: (typeof routes)[number], rows: unknown[] = [paidOrder]) 
     scope: {
       resolve: (key: string) => {
         if (key === ContainerRegistrationKeys.QUERY) return { graph }
+        if (key === ContainerRegistrationKeys.PG_CONNECTION) return db
         if (key === ContainerRegistrationKeys.LOGGER) return logger
         throw new Error("Unexpected dependency")
       },
@@ -70,10 +76,87 @@ function harness(route: (typeof routes)[number], rows: unknown[] = [paidOrder]) 
     }
     await dispatch(0)
   }
-  return { req, res, graph, logger, createFulfillmentOrShipment, run }
+  return { req, res, graph, db, logger, createFulfillmentOrShipment, run }
 }
 
-beforeEach(() => jest.clearAllMocks())
+const priorInstitutionalFlag = process.env.GP_INSTITUTIONAL_TERMS_ENABLED
+beforeEach(() => {
+  jest.clearAllMocks()
+  delete process.env.GP_INSTITUTIONAL_TERMS_ENABLED
+})
+afterAll(() => {
+  if (priorInstitutionalFlag === undefined) delete process.env.GP_INSTITUTIONAL_TERMS_ENABLED
+  else process.env.GP_INSTITUTIONAL_TERMS_ENABLED = priorInstitutionalFlag
+})
+
+const releasedInvoice = {
+  id: orderId,
+  cart_id: "cart_guard_fixture",
+  metadata: {
+    payment_workflow: PAYMENT_WORKFLOW_INVOICE_AR,
+    gp_institutional_commitment_id: "cart:cart_guard_fixture",
+    finalization_status: "released_to_fulfillment",
+    fulfillment_gate_status: "released",
+    qbd_posting_action: "invoice_ar_accounting_record",
+    qbd_posting_request_key: `invoice_ar:${orderId}`,
+    qbd_posting_status: "pending_manual",
+    qbd_posting_amount: 50000,
+  },
+}
+
+describe.each(routes)("institutional invoice gate on $matcher", (route) => {
+  beforeEach(() => { process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true" })
+
+  it("allows a release only when the order, finalization and credit row agree", async () => {
+    const h = harness(route, [releasedInvoice])
+    await h.run()
+    expect(h.createFulfillmentOrShipment).toHaveBeenCalledTimes(1)
+    expect(h.db).toHaveBeenCalledWith("gp_order_finalization")
+    expect(h.db).toHaveBeenCalledWith("gp_institutional_credit_commitment")
+  })
+
+  it("blocks a forged metadata release with no durable credit row", async () => {
+    const h = harness(route, [releasedInvoice])
+    h.db.mockImplementation((table: string) => ({
+      where: () => ({ whereNull: async () => table === "gp_order_finalization"
+        ? [{ status: "released_to_fulfillment", final_order_total: "500.00" }] : [] }),
+    }))
+    await h.run()
+    expect(h.res.status).toHaveBeenCalledWith(409)
+    expect(h.createFulfillmentOrShipment).not.toHaveBeenCalled()
+  })
+
+  it("blocks a packed total that exceeds its durable commitment", async () => {
+    const h = harness(route, [releasedInvoice])
+    h.db.mockImplementation((table: string) => ({
+      where: () => ({ whereNull: async () => table === "gp_order_finalization"
+        ? [{ status: "released_to_fulfillment", final_order_total: "501.00" }]
+        : [{ company_key: "TEST_COMPANY", customer_list_id: "TEST_LIST", amount_cents: "50000", state: "accepted" }] }),
+    }))
+    await h.run()
+    expect(h.res.status).toHaveBeenCalledWith(409)
+    expect(h.createFulfillmentOrShipment).not.toHaveBeenCalled()
+  })
+
+  it("holds a failed QBD posting without reading the ledger", async () => {
+    const h = harness(route, [{
+      ...releasedInvoice,
+      metadata: { ...releasedInvoice.metadata, qbd_posting_status: "failed" },
+    }])
+    await h.run()
+    expect(h.res.status).toHaveBeenCalledWith(409)
+    expect(h.db).not.toHaveBeenCalled()
+    expect(h.createFulfillmentOrShipment).not.toHaveBeenCalled()
+  })
+
+  it("fails closed when the ledger read is unavailable", async () => {
+    const h = harness(route, [releasedInvoice])
+    h.db.mockImplementation(() => { throw new Error("ledger unavailable") })
+    await h.run()
+    expect(h.res.status).toHaveBeenCalledWith(503)
+    expect(h.createFulfillmentOrShipment).not.toHaveBeenCalled()
+  })
+})
 
 describe.each(routes)("final-charge gate on $matcher", (route) => {
   it("blocks repeated lookup failures and pages without reaching the handler", async () => {
@@ -136,8 +219,8 @@ describe.each(routes)("final-charge gate on $matcher", (route) => {
     expect(h.res.status).not.toHaveBeenCalled()
     expect(h.createFulfillmentOrShipment).toHaveBeenCalledTimes(1)
     expect(h.req.body.metadata).toMatchObject({ staff_actor_customer_id: "cus_fulfillment_fixture" })
-    expect(h.graph).toHaveBeenCalledWith({
-      entity: "order", fields: ["id", "metadata"], filters: { id: orderId },
+      expect(h.graph).toHaveBeenCalledWith({
+      entity: "order", fields: ["id", "cart_id", "metadata"], filters: { id: orderId },
     })
   })
 
