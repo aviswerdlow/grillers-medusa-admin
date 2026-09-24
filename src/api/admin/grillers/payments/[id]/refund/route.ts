@@ -1,7 +1,7 @@
 import { verifiedStaffActorId } from "../../../../../../lib/staff-principal"
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
-import { releaseAllocationLineQuantities } from "../../../../../../lib/inventory-allocation"
+import { releaseAllocationLineQuantities, validateAllocationLineReleases } from "../../../../../../lib/inventory-allocation"
 import { emitOpsAlert } from "../../../../../../lib/ops-alert"
 
 type RefundBody = {
@@ -274,6 +274,16 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       (before.refunds || []).map((refund: Record<string, any>) => refund.id)
     )
 
+    stage = "validate_allocation_releases"
+    if (allocationLines.length) {
+      orderId = await orderIdForPaymentCollection(query, before.payment_collection_id)
+      if (allocationOrderId && orderId && allocationOrderId !== orderId) {
+        throw new RefundValidationError("Allocation order does not match the refunded payment.")
+      }
+      const releaseOrderId = allocationOrderId || orderId
+      if (releaseOrderId) await validateAllocationLineReleases({ db, orderId: releaseOrderId, lines: allocationLines })
+    }
+
     stage = "refund_payment"
     const payment = await paymentModule.refundPayment({
       payment_id: paymentId,
@@ -291,10 +301,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     refundId = refund?.id || null
 
     stage = "order_link_lookup"
-    orderId = await orderIdForPaymentCollection(
-      query,
-      before.payment_collection_id || payment.payment_collection_id
-    )
+    if (!orderId) orderId = await orderIdForPaymentCollection(query, payment.payment_collection_id)
 
     if (orderId && refund?.id) {
       const resolvedRefundAmount = refundAmount(refund, amount)
@@ -348,15 +355,20 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
 
     const effectiveAllocationOrderId = allocationOrderId || orderId
     if (effectiveAllocationOrderId && allocationLines.length) {
+      if (!refundId) throw new Error("Refund identity is required before inventory release")
       stage = "release_inventory_allocation"
       await releaseAllocationLineQuantities({
         db,
+        inventory: req.scope.resolve(Modules.INVENTORY),
+        locking: req.scope.resolve(Modules.LOCKING),
         orderId: effectiveAllocationOrderId,
         lines: allocationLines,
         reason: "released_refund",
+        releaseKey: `refund:${refundId}`,
         actorType: "staff",
         actorId,
         note: body.note || null,
+        logger,
       })
     }
 
