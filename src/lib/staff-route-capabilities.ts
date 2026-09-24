@@ -4,6 +4,11 @@ import type { StaffCapability } from "./staff-access-policy"
 export function adminRouteCapability(path: string, method: string, body: any = {}): StaffCapability | null {
   const p = path.replace(/\/+$/, "").toLowerCase()
   const read = method === "GET" || method === "HEAD"
+  if (p === "/admin/grillers/local-milestones/orders" || /^\/admin\/grillers\/local-milestones\/orders\/[^/]+$/.test(p)) return read ? "milestones.drive" : null
+  if (p === "/admin/grillers/local-milestones/exceptions") return read ? "milestones.office" : null
+  if (/^\/admin\/grillers\/local-milestones\/orders\/[^/]+\/events$/.test(p)) return method === "POST" ? "milestones.drive" : null
+  if (/^\/admin\/grillers\/local-milestones\/orders\/[^/]+\/corrections$/.test(p)) return method === "POST" ? "milestones.correct" : null
+  if (/^\/admin\/grillers\/local-milestones\/orders\/[^/]+\/assign$/.test(p)) return method === "POST" ? "milestones.office" : null
   if (p === "/admin/grillers/staff-access") return read ? "customers.read" : null
   if (p === "/admin/grillers/staff-carts") return method === "POST" ? "customers.write" : null
   if (/^\/admin\/grillers\/staff-access\/customers\/[^/]+$/.test(p)) return method === "POST" ? "team.manage" : null
