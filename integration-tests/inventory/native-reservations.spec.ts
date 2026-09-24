@@ -23,6 +23,7 @@ let db: any, inventory: any, wrapper: any, shutdown: any
 let clients: Redis[] = [], locks: any[] = []
 let nativeReserve: any, nativeRollback: any, nativeCancel: any
 const variants = new Map<string, any>(), orders = new Map<string, any>(), carts = new Map<string, any>()
+const originalNativeFlag = process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED
 
 // Capture the installed step's actual handlers while preserving its normal
 // registration. Assertions below run them against the real inventory module,
@@ -74,8 +75,11 @@ afterAll(async () => {
   if (shutdown) await shutdown()
   if (wrapper?.orm) await wrapper.clearDatabase()
   if (db) await db.destroy()
+  if (originalNativeFlag === undefined) delete process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED
+  else process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED = originalNativeFlag
 })
 beforeEach(async () => {
+  process.env.GP_NATIVE_INVENTORY_CHECKOUT_ENABLED = "true"
   await db("gp_inventory_allocation_audit").delete()
   await db("gp_inventory_allocation").delete()
   await db("gp_inventory_availability_snapshot").delete()
