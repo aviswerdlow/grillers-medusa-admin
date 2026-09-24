@@ -1,4 +1,5 @@
 import { requiresOrderReview } from "./order-review-rollout";
+import { acceptedExperimentContext } from "./analytics/accepted-experiment-context";
 import { Modules, ContainerRegistrationKeys } from "@medusajs/framework/utils";
 import type { MedusaRequest } from "@medusajs/framework/http";
 import { z } from "zod";
@@ -154,53 +155,6 @@ function address(value: any) {
       "country_code",
     ].map((k) => [k, String(a[k] ?? "").trim()])
   );
-}
-
-function experimentAssignments(
-  items: any[]
-): OrderPromise["attribution"]["experiment_assignments"] {
-  const assignments = new Map<string, any>(),
-    conflicted = new Set<string>();
-  for (const item of items) {
-    let context = item.metadata?.experiment_context;
-    try {
-      if (typeof context === "string") context = JSON.parse(context);
-    } catch {
-      continue;
-    }
-    for (const [experiment_id, value] of Object.entries(record(context))) {
-      const v = record(value);
-      if (
-        ![experiment_id, v.variant_key, v.assignment_id].every(
-          (x) => typeof x === "string" && x.trim() && x.length <= 500
-        )
-      )
-        continue;
-      const candidate = {
-        experiment_id,
-        variant: v.variant_key,
-        assignment_id: v.assignment_id,
-        version:
-          typeof v.version === "string" &&
-          v.version.trim() &&
-          v.version.length <= 500
-            ? v.version
-            : null,
-      };
-      if (
-        assignments.has(experiment_id) &&
-        JSON.stringify(assignments.get(experiment_id)) !==
-          JSON.stringify(candidate)
-      )
-        conflicted.add(experiment_id);
-      assignments.set(experiment_id, candidate);
-    }
-  }
-  // An ambiguous or absent measurement must not block commerce or be presented
-  // as a verified experiment version. #335/#336 own assignment reconciliation.
-  return [...assignments.values()]
-    .filter((a) => !conflicted.has(a.experiment_id))
-    .slice(0, 100);
 }
 
 /** Derive every price/catalog/contact/terms field on the server. loadedCart is
@@ -389,7 +343,7 @@ export async function trustedOrderPromise(
       invoice_terms: invoiceTerms,
     },
     attribution: {
-      experiment_assignments: experimentAssignments(cart.items),
+      ...acceptedExperimentContext(cart.items),
       analytics_consent: analyticsConsent,
       test_order: /^sk_test_/.test(stripeKey)
         ? true

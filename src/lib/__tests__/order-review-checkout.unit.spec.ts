@@ -14,6 +14,7 @@ import {
 import { CALENDAR_ACCEPTED_KEY } from "../fulfillment-calendar";
 import { RECEIPT_SNAPSHOT_KEY } from "../receipt-email-orders";
 import { promiseFixture } from "./fixtures/order-promise";
+import experimentFixture from "./fixtures/experiment-evidence.json";
 import {
   publishedSaleTerms,
   FINAL_CHARGE_CONSENT_TEXT,
@@ -277,8 +278,10 @@ test("unknown experiment versions stay unknown and do not acquire PII", async ()
       variant: "b",
       assignment_id: "assignment-1",
       version: null,
+      evaluation_version: null,
     },
   ]);
+  expect(p.attribution.experiment_context_status).toBe("unverified");
 });
 test("missing or changed published terms stop review", async () => {
   const f = fixture();
@@ -288,6 +291,24 @@ test("missing or changed published terms stop review", async () => {
   await expect(
     trustedOrderPromise(f.scope, f.cart, "card", false)
   ).rejects.toMatchObject({ code: "order_review_terms_unavailable" });
+});
+test("trusted checkout snapshots issued experiment evidence without changing money or consent", async () => {
+  const priorKeys = process.env.GP_EXPERIMENT_EVIDENCE_KEYS;
+  try {
+    process.env.GP_EXPERIMENT_EVIDENCE_KEYS = JSON.stringify({ "fixture-key": experimentFixture.secret });
+    const f = fixture();
+    Object.assign(f.cart.items[0].metadata, clone(experimentFixture.metadata));
+    const known = await trustedOrderPromise(f.scope, f.cart, "card", true);
+    expect(known.attribution).toMatchObject({ analytics_consent: true, experiment_context_status: "complete", experiment_assignments: [{ version: experimentFixture.issued.version }] });
+    f.cart.items[0].metadata.experiment_context.synthetic_launch.version_signature = "tampered";
+    const unknown = await trustedOrderPromise(f.scope, f.cart, "card", false);
+    expect(unknown.attribution).toMatchObject({ analytics_consent: false, experiment_context_status: "unverified", experiment_assignments: [{ version: null }] });
+    expect(unknown.placement_total).toBe(known.placement_total);
+    expect(unknown.lines).toEqual(known.lines);
+    expect(unknown.fulfillment).toEqual(known.fulfillment);
+  } finally {
+    if (priorKeys === undefined) delete process.env.GP_EXPERIMENT_EVIDENCE_KEYS; else process.env.GP_EXPERIMENT_EVIDENCE_KEYS = priorKeys;
+  }
 });
 test("public review contains customer details but no internal evidence/costs/identities", () => {
   const view = publicOrderReview({

@@ -161,6 +161,7 @@ export const orderPromiseSchema = z
               .object({
                 experiment_id: text,
                 version: text.nullable(),
+                evaluation_version: text.nullable().optional(),
                 assignment_id: text.optional(),
                 variant: text,
               })
@@ -173,6 +174,8 @@ export const orderPromiseSchema = z
                 .size === assignments.length,
             "An experiment may have only one accepted assignment"
           ),
+        // Optional only for old immutable rows: absence is unknown, never complete.
+        experiment_context_status: z.enum(["complete", "unverified"]).optional(),
         analytics_consent: z.boolean().nullable(),
         test_order: z.boolean().nullable(),
       })
@@ -565,6 +568,7 @@ export function orderPromiseAnalytics(row: any) {
     experiment_assignments: row.promise.attribution.experiment_assignments.map(
       (assignment: any) => ({ ...assignment })
     ),
+    experiment_context_status: row.promise.attribution.experiment_context_status ?? null,
     analytics_consent: row.promise.attribution.analytics_consent,
     test_order: row.promise.attribution.test_order,
   };
