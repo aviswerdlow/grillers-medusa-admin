@@ -40,6 +40,22 @@ import { guardCustomerContactWrite, guardCustomerProvenanceCreate } from "./midd
 
 const MIDDLEWARES_PATH = "src/api/middlewares.ts"
 
+// Medusa authenticates invite acceptance with an unregistered user bearer in
+// its own route middleware. The global admin boundary must leave that one
+// bootstrap route to Medusa; every other admin request keeps both guards.
+function isNativeInviteAcceptance(req: MedusaRequest): boolean {
+  return req.method === "POST" && req.path === "/admin/invites/accept"
+}
+
+const authenticateAdminUser = authenticate("user", ["session", "bearer", "api-key"])
+function authenticateAdminExceptInvite(req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) {
+  return isNativeInviteAcceptance(req) ? next() : authenticateAdminUser(req, res, next)
+}
+
+function enforceStaffCapabilitiesExceptInvite(req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) {
+  return isNativeInviteAcceptance(req) ? next() : enforceStaffCapabilities(req, res, next)
+}
+
 /**
  * Medusa validates Stripe signatures inside its delayed payment-webhook
  * subscriber. This front-line guard also validates before the built-in route
@@ -681,8 +697,8 @@ export default defineMiddlewares({
     {
       matcher: "/admin/*",
       middlewares: [
-        authenticate("user", ["session", "bearer", "api-key"]),
-        enforceStaffCapabilities,
+        authenticateAdminExceptInvite,
+        enforceStaffCapabilitiesExceptInvite,
       ],
     },
     {

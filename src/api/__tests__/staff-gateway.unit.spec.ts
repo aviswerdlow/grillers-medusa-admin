@@ -14,6 +14,7 @@ const medusaRoot = path.dirname(require.resolve("@medusajs/medusa/package.json")
 const nativeCapture = require(path.join(medusaRoot, "dist/api/admin/payments/[id]/capture/route.js"))
 const nativeRefresh = require(path.join(medusaRoot, "dist/api/auth/token/refresh/route.js"))
 const nativeSession = require(path.join(medusaRoot, "dist/api/auth/session/route.js"))
+const nativeInviteMiddlewares = require(path.join(medusaRoot, "dist/api/admin/invites/middlewares.js")).adminInviteRoutesMiddlewares
 const { RoutesSorter } = require(path.join(path.dirname(require.resolve("@medusajs/framework/http")), "routes-sorter.js"))
 
 describe("Staff gateway (installed Medusa authentication and native handlers)", () => {
@@ -23,7 +24,8 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
   let customers: Record<string, any>
   const warn = jest.fn()
   const effects = jest.fn(), customerRead = jest.fn(), userRead = jest.fn()
-  const authRead = jest.fn(async () => ({ id: "auth_fixture", app_metadata: { customer_id: "cus_staff" } }))
+  const authRead = jest.fn(async (id: string) => id === "auth_unregistered"
+    ? { id, app_metadata: {} } : { id: "auth_fixture", app_metadata: { customer_id: "cus_staff" } })
   const now = () => Math.floor(Date.now() / 1000)
   const wrap = (fn: any) => (req: any, res: any, next: any) => Promise.resolve(fn(req, res, next)).catch(next)
 
@@ -50,6 +52,9 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     for (const route of new RoutesSorter(selected).sort()) {
       for (const method of route.methods || ["ALL"]) app[method.toLowerCase()](route.matcher, ...route.middlewares.map(wrap))
     }
+    const inviteAccept = nativeInviteMiddlewares.find((r: any) => r.matcher === "/admin/invites/accept" && r.method === "POST")
+    app.post(inviteAccept.matcher, ...inviteAccept.middlewares.map(wrap), (req: any, res: any) =>
+      res.json({ auth_identity_id: req.auth_context?.auth_identity_id, actor_id: req.auth_context?.actor_id || null }))
     app.post("/admin/payments/:id/capture", (req: any, _res: any, next: any) => { req.validatedBody = req.body; next() }, wrap(nativeCapture.POST))
     app.post("/auth/token/refresh", wrap(nativeRefresh.POST))
     app.post("/auth/session", wrap(nativeSession.POST))
@@ -167,6 +172,24 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     expect((await request("/admin/users", { authorization, token: null })).status).toBe(200)
     process.env.GP_PRIVILEGED_ADMIN_USER_IDS = ""
     expect((await request("/admin/users", { authorization, token: null })).status).toBe(403)
+  })
+  it("leaves exactly POST /admin/invites/accept to Medusa's unregistered-user middleware", async () => {
+    const authorization = `Bearer ${token({ actor_type: "user", actor_id: undefined, auth_identity_id: "auth_unregistered" })}`
+    const result = await request("/admin/invites/accept?token=fixture-invite", {
+      authorization, token: null, body: { email: "recovery@example.test" },
+    })
+    expect(result.status).toBe(200)
+    expect(result.body).toEqual({ auth_identity_id: "auth_unregistered", actor_id: null })
+    expect(effects).not.toHaveBeenCalled()
+  })
+  it.each([
+    ["GET", "/admin/invites/accept"], ["POST", "/admin/invites/accept/"],
+    ["POST", "/admin/invites"], ["GET", "/admin/users"],
+    ["GET", "/admin/orders"], ["POST", "/admin/grillers/staff-access/customers/cus_target"],
+  ])("still requires a registered user for %s %s", async (method, route) => {
+    const authorization = `Bearer ${token({ actor_type: "user", actor_id: undefined, auth_identity_id: "auth_unregistered" })}`
+    expect((await request(route, { method, authorization, token: null, body: { email: "recovery@example.test" } })).status).toBe(401)
+    expect(effects).not.toHaveBeenCalled()
   })
   it("denies when fresh grant lookup is unavailable", async () => {
     customerRead.mockRejectedValueOnce(new Error("isolated database outage"))
