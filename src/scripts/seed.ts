@@ -1,4 +1,5 @@
 import { CreateInventoryLevelInput, ExecArgs } from "@medusajs/framework/types";
+import { runCatalogSeedCli } from "./catalog-seed";
 import {
   ContainerRegistrationKeys,
   Modules,
@@ -864,4 +865,13 @@ export default async function seedDemoData({ container }: ExecArgs) {
   });
 
   logger.info("Finished seeding inventory levels data.");
+}
+
+// The protected P09 catalog path shares this seed entrypoint, but uses direct
+// read-only/source and rehearsal-only/target SQL rather than Medusa demo flows.
+if (require.main === module) {
+  runCatalogSeedCli().catch((error) => {
+    console.error(error instanceof Error ? error.message : "Catalog seed failed.")
+    process.exitCode = 1
+  })
 }
