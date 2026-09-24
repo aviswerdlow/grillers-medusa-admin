@@ -115,6 +115,8 @@ describe("Postmark webhook gates", () => {
 
   it("classifies soft and transient bounces without hard suppression", async () => {
     expect(isHardPostmarkBounce({ TypeCode: 1, Type: "HardBounce" })).toBe(true)
+    expect(isHardPostmarkBounce({ TypeCode: 100000, Type: "BadEmailAddress" })).toBe(true)
+    expect(isHardPostmarkBounce({ TypeCode: 100002, Type: "ManuallyDeactivated" })).toBe(true)
     expect(isHardPostmarkBounce({ TypeCode: 4096, Type: "SoftBounce" })).toBe(false)
     expect(isHardPostmarkBounce({ TypeCode: 2, Type: "Transient" })).toBe(false)
     expect(isHardPostmarkBounce({ Type: "HardBounce" })).toBe(true)
@@ -153,6 +155,21 @@ describe("Postmark webhook gates", () => {
     expect(hard.suppressions).toHaveLength(1)
     expect(hard.suppressions[0].scope).toBe("hard_bounce")
     expect(hard.events[0].properties.bounce_classification).toBe("hard")
+  })
+
+  it.each([
+    [100000, "BadEmailAddress"],
+    [100002, "ManuallyDeactivated"],
+  ])("suppresses permanent Postmark bounce %i (%s)", async (typeCode, type) => {
+    const result = webhookDb()
+    await updatePostmarkMessageState(result.db, {
+      RecordType: "Bounce", TypeCode: typeCode, Type: type,
+      MessageID: "pm-1", Email: "controlled@example.test",
+    }, `trace-${typeCode}`)
+    expect(result.message.status).toBe("bounced")
+    expect(result.suppressions).toHaveLength(1)
+    expect(result.suppressions[0].scope).toBe("hard_bounce")
+    expect(result.events[0].properties.bounce_classification).toBe("hard")
   })
 
   it("uses a stable payload fallback when Postmark omits the trace header", () => {
