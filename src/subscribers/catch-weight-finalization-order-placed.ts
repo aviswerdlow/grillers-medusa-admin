@@ -7,6 +7,7 @@ import {
   orderPlacedFinalizationMetadata,
 } from "../lib/catch-weight-finalization"
 import { emitOpsAlert } from "../lib/ops-alert"
+import { withInstitutionalFinalizationWrite } from "../lib/gp-institutional-finalization-lock"
 
 function errorMessage(error: unknown) {
   if (error instanceof Error) return error.message
@@ -91,10 +92,15 @@ export default async function catchWeightFinalizationOrderPlacedHandler({
         .first())
     )
       return
-    const { finalization, lines } = await ensureFinalizationForOrder(db, order)
-    const metadata = orderPlacedFinalizationMetadata(order, finalization)
-
-    await orderModule.updateOrders(order.id, { metadata })
+    const { finalization, lines } = await withInstitutionalFinalizationWrite(
+      db, order, async (workDb) => {
+        const detail = await ensureFinalizationForOrder(workDb, order)
+        const metadata = orderPlacedFinalizationMetadata(order, detail.finalization)
+        await orderModule.updateOrders(order.id, { metadata })
+        return detail
+      },
+      { readReleased: true }
+    )
 
     logger.info(
       `[catch-weight-finalization] order=${order.id} finalization=${finalization.id} lines=${lines.length} status=${finalization.status}`
