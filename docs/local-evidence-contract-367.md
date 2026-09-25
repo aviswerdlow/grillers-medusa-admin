@@ -42,7 +42,10 @@ worker updates their `retain_until` projections and drains all due rows in
 batches. It deletes each private object before marking its ledger row deleted.
 Pending uploads older than seven days are also swept, even without a photo
 retention policy. A row lock keeps that sweep from racing an in-flight retry;
-a failed object deletion leaves the row retryable on the next run. The ledger
+a 30-second abort bounds each S3 delete inside its transaction, and a failed
+object deletion leaves the row retryable on the next run. The job logs aggregate
+delete counts and error codes without order IDs or object keys. Set any
+retention value identically on the API and worker. The ledger
 keeps the order, actor, hash, size and timestamps. The retention job remains
 off with the master flag.
 The photo is order-associated; #359 still controls when a photo is required,

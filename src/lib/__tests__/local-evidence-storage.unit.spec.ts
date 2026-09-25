@@ -153,8 +153,11 @@ describe("#367 durable private evidence upload", () => {
     await expect(pruneExpiredEvidence(db, provider, now, { days: 119 }))
       .rejects.toThrow("invalid_evidence_retention")
     expect(provider.delete).not.toHaveBeenCalled()
-    expect(await pruneExpiredEvidence(db, provider, now, { days: 120 })).toBe(52)
+    const reports: any[] = []
+    expect(await pruneExpiredEvidence(db, provider, now, { days: 120 }, report => reports.push(report))).toBe(52)
+    expect(reports).toEqual([{ deleted: 52, pendingDeleted: 51, storedDeleted: 1, failed: 0, errorCodes: {} }])
     expect(provider.delete).toHaveBeenCalledTimes(52)
+    expect(provider.delete.mock.calls[0][1].abortSignal).toBeInstanceOf(AbortSignal)
     expect(rows.get(old.uploadId).retain_until).toBe("2026-11-29T00:00:00.000Z")
     expect(rows.get(old.uploadId).status).toBe("deleted")
     expect(rows.get(storedRecent.uploadId).retain_until).toBe("2027-03-31T00:00:00.000Z")
@@ -172,7 +175,11 @@ describe("#367 durable private evidence upload", () => {
         .prepare({ ...intent, uploadId })
       rows.get(uploadId).created_at = new Date("2026-10-01T00:00:00Z")
     }
-    await expect(pruneExpiredEvidence(db, provider, now, { days: null })).rejects.toThrow("evidence_prune_failed")
+    const reports: any[] = []
+    await expect(pruneExpiredEvidence(db, provider, now, { days: null }, report => reports.push(report)))
+      .rejects.toThrow("evidence_prune_failed")
+    expect(reports).toEqual([{ deleted: 1, pendingDeleted: 1, storedDeleted: 0, failed: 1, errorCodes: { Error: 1 } }])
+    expect(provider.delete.mock.calls[0][1].abortSignal).toBeInstanceOf(AbortSignal)
     expect([...rows.values()].filter(row => row.status === "deleted")).toHaveLength(1)
     expect(await pruneExpiredEvidence(db, provider, now, { days: null })).toBe(1)
     expect([...rows.values()].filter(row => row.status === "deleted")).toHaveLength(2)

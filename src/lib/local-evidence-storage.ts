@@ -12,7 +12,21 @@ const extension: Record<string, string> = {
 const DAY_MS = 24 * 60 * 60 * 1000
 const PENDING_GRACE_DAYS = 7
 const PRUNE_BATCH_SIZE = 100
-const S3_UPLOAD_TIMEOUT_MS = 30_000
+const S3_REQUEST_TIMEOUT_MS = 30_000
+
+export type EvidencePruneReport = {
+  deleted: number
+  pendingDeleted: number
+  storedDeleted: number
+  failed: number
+  errorCodes: Record<string, number>
+}
+
+function pruneErrorCode(error: unknown) {
+  const name = error instanceof LocalEvidenceError ? error.code
+    : error instanceof Error ? error.name : "unknown"
+  return /^[a-zA-Z0-9_]{1,64}$/.test(name) ? name : "unknown"
+}
 
 export function configuredEvidenceRetention(): EvidenceRetention {
   const raw = process.env.GP_LOCAL_EVIDENCE_RETENTION_DAYS?.trim()
@@ -77,7 +91,7 @@ export class PgLocalEvidenceStorage implements LocalEvidenceStorage {
       await this.provider.upload({
         filename: row.object_key, mimeType: row.content_type,
         content: Buffer.from(input.bytes).toString("binary"), access: "private",
-      }, { abortSignal: AbortSignal.timeout(S3_UPLOAD_TIMEOUT_MS) })
+      }, { abortSignal: AbortSignal.timeout(S3_REQUEST_TIMEOUT_MS) })
       const storedAt = new Date()
       const rows = await tx("gp_local_evidence")
         .where({ upload_id: input.uploadId, status: "pending" })
@@ -112,11 +126,15 @@ export class PgLocalEvidenceStorage implements LocalEvidenceStorage {
 export async function pruneExpiredEvidence(
   db: any, provider: GpLocalEvidenceFileService, now = new Date(),
   retention: EvidenceRetention = configuredEvidenceRetention(),
+  onReport?: (report: EvidencePruneReport) => void,
 ) {
   evidenceRetentionUntil(now, retention)
   const pendingCutoff = new Date(now.getTime() - PENDING_GRACE_DAYS * DAY_MS)
   let deleted = 0
   let failed = 0
+  let pendingDeleted = 0
+  let storedDeleted = 0
+  const errorCodes: Record<string, number> = {}
 
   async function sweep(status: "pending" | "stored_private") {
     let cursor = ""
@@ -151,14 +169,23 @@ export async function pruneExpiredEvidence(
                 })()
             if (!due) return false
             // S3 delete is idempotent, so an interrupted delete can be retried.
-            await provider.delete({ fileKey: locked.object_key })
+            await provider.delete(
+              { fileKey: locked.object_key },
+              { abortSignal: AbortSignal.timeout(S3_REQUEST_TIMEOUT_MS) },
+            )
             await tx("gp_local_evidence").where({ evidence_id: locked.evidence_id, status })
               .update({ status: "deleted", deleted_at: now, retain_until: retainUntil })
             return true
           })
-          if (removed) deleted++
-        } catch {
+          if (removed) {
+            deleted++
+            if (status === "pending") pendingDeleted++
+            else storedDeleted++
+          }
+        } catch (error) {
           failed++
+          const code = pruneErrorCode(error)
+          errorCodes[code] = (errorCodes[code] || 0) + 1
         }
       }
     }
@@ -168,6 +195,7 @@ export async function pruneExpiredEvidence(
   // configured photo-retention policy. Delete their deterministic object key.
   await sweep("pending")
   if (retention.days !== null) await sweep("stored_private")
+  onReport?.({ deleted, pendingDeleted, storedDeleted, failed, errorCodes })
   if (failed) throw new LocalEvidenceError("evidence_prune_failed")
   return deleted
 }
