@@ -52,4 +52,12 @@ describe("#367 staff capabilities on Medusa's app.use mount", () => {
     expect((await request("/admin/grillers/local-milestones/orders/order_fixture/corrections", "POST")).status).toBe(200)
     expect((await request("/admin/grillers/local-milestones/orders/%6Frder_fixture/events", "POST")).status).toBe(403)
   })
+
+  it("allows uppercase Medusa IDs and matches fixed route parts case-insensitively", async () => {
+    ;(resolveStaffPrincipal as jest.Mock).mockResolvedValue(actor(["milestones.drive"]))
+    const orderId = "order_01M3B31CA3FAWNE6SMC4VMMJFF"
+    expect((await request(`/ADMIN/GRILLERS/LOCAL-MILESTONES/ORDERS/${orderId}/EVENTS`, "POST")).status).toBe(200)
+    expect((await request(`/admin/grillers/local-milestones/orders/${orderId}/evidence/upload_123456`, "PUT")).status).toBe(200)
+    expect((await request(`/admin/grillers/local-milestones/orders/${orderId}/CORRECTIONS`, "POST")).status).toBe(403)
+  })
 })

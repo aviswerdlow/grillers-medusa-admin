@@ -1,6 +1,6 @@
 import path from "node:path"
-import type { Server } from "node:http"
-import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
+import { request as httpRequest, type Server } from "node:http"
+import { ContainerRegistrationKeys, Modules, generateEntityId } from "@medusajs/framework/utils"
 import middlewares from "../middlewares"
 import { verifiedStaffAuditFields } from "../../lib/staff-principal"
 import { staffBoundaryMode } from "../../lib/staff-boundary-rollout"
@@ -89,6 +89,20 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     const res = await fetch(baseUrl + route, { method: options.method || "POST", headers, ...(options.method === "GET" ? {} : { body: JSON.stringify(options.body || { staff_actor_customer_id: "forged_owner", staff_actor_email: "forged@example.test", staff_actor_name: "Forged" }) }) })
     return { status: res.status, body: await res.json().catch(() => ({})) as any }
   }
+  async function rawRequest(route: string, body: any = {}) {
+    return await new Promise<{ status: number; body: any }>((resolve, reject) => {
+      const payload = JSON.stringify(body)
+      const req = httpRequest({ hostname: "127.0.0.1", port: (server.address() as any).port, path: route,
+        method: "POST", headers: { authorization: `Basic ${Buffer.from("sk_unknown:").toString("base64")}`,
+          "content-type": "application/json", "content-length": Buffer.byteLength(payload) } }, res => {
+        let value = ""
+        res.on("data", chunk => { value += chunk })
+        res.on("end", () => resolve({ status: res.statusCode!, body: JSON.parse(value) }))
+      })
+      req.on("error", reject)
+      req.end(payload)
+    })
+  }
   const moneyAndIdentityRoutes = ["/admin/payments/pay_fixture/capture", "/admin/grillers/payments/pay_fixture/refund", "/admin/customers/cus_target",
     "/admin/grillers/staff-access/customers/cus_target", "/admin/grillers/orders/order_fixture/accounting-action", "/admin/grillers/orders/order_fixture/finalization/charge-and-release"]
 
@@ -156,10 +170,42 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     expect((await request("/admin/invites", { authorization, token: null, method: "GET" })).status).toBe(403)
     expect((await request("/admin/products", { authorization, token: null })).status).toBe(403)
   })
-  it.each(["/ADMIN/products", "/admin/%70roducts", "/admin//products", "/admin/products/"])("never grants a reader a nonliteral route %s", async route => {
+  it.each(["/admin/%70roducts", "/admin//products", "/admin/products/"])("never grants a reader an ambiguous route %s", async route => {
     const result = await request(route, { key: "sk_reader", token: null, method: "GET" })
     expect(result.status).not.toBe(200)
     expect(effects).not.toHaveBeenCalled()
+  })
+  it.each(["log", "enforce"])("keeps uppercase Medusa IDs usable for owner and service requests in %s mode", async mode => {
+    process.env.GP_STAFF_BOUNDARY_MODE = mode
+    const orderId = generateEntityId(undefined, "order")
+    const productId = generateEntityId(undefined, "prod")
+    const inventoryId = generateEntityId(undefined, "iitem")
+    const locationId = generateEntityId(undefined, "sloc")
+    expect(orderId).toMatch(/[A-Z]/)
+    expect((await request(`/ADMIN/ORDERS/${orderId}`, { method: "GET", token: null,
+      authorization: `Bearer ${token({ actor_type: "user", actor_id: "usr_recovery" })}` })).status).toBe(200)
+    expect((await request(`/admin/orders/${orderId}`, { key: "sk_reader", token: null, method: "GET" })).status).toBe(200)
+    expect((await request(`/admin/inventory-items/${inventoryId}/location-levels`, { key: "sk_reader", token: null, method: "GET" })).status).toBe(200)
+    process.env.GP_QBD_CATALOG_API_KEY_IDS = "apk_unknown"
+    expect((await request(`/ADMIN/PRODUCTS/${productId}`, { key: "sk_unknown", token: null, body: { title: "Fixture" } })).status).toBe(200)
+    expect((await request(`/admin/inventory-items/${inventoryId}/location-levels/${locationId}`, { key: "sk_unknown", token: null, body: {} })).status).toBe(200)
+    delete process.env.GP_QBD_CATALOG_API_KEY_IDS
+    process.env.GP_COMMUNICATIONS_ADMIN_API_KEY_IDS = "apk_unknown"
+    expect((await request(`/admin/orders/${orderId}`, { key: "sk_unknown", token: null,
+      body: { metadata: { review_request_sent_at: "2026-09-21T00:00:00.000Z" } } })).status).toBe(200)
+    delete process.env.GP_COMMUNICATIONS_ADMIN_API_KEY_IDS
+  })
+  it("rejects raw fragments before order-review and customer audit guards in log mode", async () => {
+    process.env.GP_STAFF_BOUNDARY_MODE = "log"
+    process.env.GP_ORDER_REVIEW_ENFORCEMENT = "required"
+    const draftId = generateEntityId(undefined, "draft")
+    expect((await request(`/ADMIN/DRAFT-ORDERS/${draftId}/CONVERT-TO-ORDER`, { key: "sk_unknown", token: null })).status).toBe(403)
+    for (const path of ["/admin/orders#x", "/admin/draft-orders#x", `/ADMIN/DRAFT-ORDERS/${draftId}/CONVERT-TO-ORDER#x`,
+      "/admin/customers/cus_target#/addresses"]) {
+      expect((await rawRequest(path)).status).toBe(403)
+    }
+    expect(effects).not.toHaveBeenCalled()
+    delete process.env.GP_ORDER_REVIEW_ENFORCEMENT
   })
   it("restricts a parity key to the original-order GET even when also listed as a broad reader", async () => {
     process.env.GP_ADMIN_READ_ONLY_API_KEY_IDS = "apk_reader,apk_parity"
