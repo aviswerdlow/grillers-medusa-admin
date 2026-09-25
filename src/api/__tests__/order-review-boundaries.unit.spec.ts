@@ -34,9 +34,12 @@ jest.mock("@medusajs/medusa/api/store/carts/[id]/complete/route", () => ({
   POST: jest.fn(),
 }));
 const priorMode = process.env.GP_ORDER_REVIEW_ENFORCEMENT;
+const priorInstitutional = process.env.GP_INSTITUTIONAL_TERMS_ENABLED;
 afterEach(() => {
   if (priorMode === undefined) delete process.env.GP_ORDER_REVIEW_ENFORCEMENT;
   else process.env.GP_ORDER_REVIEW_ENFORCEMENT = priorMode;
+  if (priorInstitutional === undefined) delete process.env.GP_INSTITUTIONAL_TERMS_ENABLED;
+  else process.env.GP_INSTITUTIONAL_TERMS_ENABLED = priorInstitutional;
 });
 const requestId = "a132a101-8f66-499f-89ca-aaff039fb523";
 function fixture() {
@@ -59,6 +62,7 @@ function fixture() {
 }
 beforeEach(() => {
   jest.resetAllMocks();
+  delete process.env.GP_INSTITUTIONAL_TERMS_ENABLED;
   process.env.GP_ORDER_REVIEW_ENFORCEMENT = "required";
   (reviewCart as jest.Mock).mockResolvedValue({
     id: "cart_fixture",
@@ -87,6 +91,19 @@ test("customer requests cannot choose staff immediate collection", async () => {
   await review(req, res);
   expect(res.status).toHaveBeenCalledWith(403);
   expect(issueCheckoutReview).not.toHaveBeenCalled();
+});
+test.each([undefined, "1", "TRUE", "yes"])("invoice review issuance and acceptance stay off for flag %s", async (flag) => {
+  if (flag === undefined) delete process.env.GP_INSTITUTIONAL_TERMS_ENABLED;
+  else process.env.GP_INSTITUTIONAL_TERMS_ENABLED = flag;
+  for (const action of ["review", "accept"]) {
+    const { req, res } = fixture();
+    req.body = { ...req.body, action, payment_mode: "invoice", review_id: action === "accept" ? "review_fixture" : undefined };
+    await review(req, res);
+    expect(res.status).toHaveBeenCalledWith(403);
+  }
+  expect(issueCheckoutReview).not.toHaveBeenCalled();
+  expect(acceptCheckoutReview).not.toHaveBeenCalled();
+  expect(reviewCart).not.toHaveBeenCalled();
 });
 test("staff browser analytics consent is not attributed to the customer", async () => {
   const { req, res } = fixture();
@@ -188,12 +205,31 @@ test("owner rejection never becomes the fallback 404", async () => {
   expect(res.status).toHaveBeenCalledWith(403);
   expect(issueCheckoutReview).not.toHaveBeenCalled();
 });
-test("default-off native completion preserves the original handler and envelope", async () => {
+test("default-off native customer completion never reaches Medusa", async () => {
   delete process.env.GP_ORDER_REVIEW_ENFORCEMENT;
   const { req, res } = fixture();
+  await complete(req, res);
+  expect(res.status).toHaveBeenCalledWith(403);
+  expect(nativeComplete).not.toHaveBeenCalled();
+});
+test("verified staff card completion preserves the native handler and envelope", async () => {
+  delete process.env.GP_ORDER_REVIEW_ENFORCEMENT;
+  const { req, res } = fixture();
+  req.gp_staff_cart = { payment_mode: "collect_card_now" };
   (nativeComplete as jest.Mock).mockResolvedValue("native-fixture-response");
   expect(await complete(req, res)).toBe("native-fixture-response");
   expect(nativeComplete).toHaveBeenCalledWith(req, res);
+  expect(completeReviewedCart).not.toHaveBeenCalled();
+});
+test("a failed review accept cannot be followed by native customer completion", async () => {
+  const { req, res } = fixture();
+  req.body = { ...req.body, action: "accept", review_id: "review_fixture" };
+  (acceptCheckoutReview as jest.Mock).mockRejectedValue(new OrderPromiseError("review_rejected", 409));
+  await review(req, res);
+  expect(res.status).toHaveBeenCalledWith(409);
+  await complete(req, res);
+  expect(res.status).toHaveBeenCalledWith(403);
+  expect(nativeComplete).not.toHaveBeenCalled();
   expect(completeReviewedCart).not.toHaveBeenCalled();
 });
 test("rolling back cannot downgrade an accepted promise or an explicit review request", async () => {
