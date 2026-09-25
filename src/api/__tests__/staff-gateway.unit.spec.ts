@@ -170,6 +170,17 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     expect((await request("/admin/invites", { authorization, token: null, method: "GET" })).status).toBe(403)
     expect((await request("/admin/products", { authorization, token: null })).status).toBe(403)
   })
+  it.each(["log", "enforce"])("blocks native draft conversion while institutional terms are off in %s mode", async mode => {
+    process.env.GP_STAFF_BOUNDARY_MODE = mode
+    delete process.env.GP_INSTITUTIONAL_TERMS_ENABLED
+    const draftId = generateEntityId(undefined, "draft")
+    expect(draftId).toMatch(/[A-Z]/)
+    for (const route of [`/admin/draft-orders/${draftId}/convert-to-order`, `/ADMIN/DRAFT-ORDERS/${draftId}/CONVERT-TO-ORDER`]) {
+      expect((await request(route)).status).toBe(403)
+      expect((await rawRequest(`${route}#x`)).status).toBe(403)
+    }
+    expect(effects).not.toHaveBeenCalled()
+  })
   it.each(["/admin/%70roducts", "/admin//products", "/admin/products/"])("never grants a reader an ambiguous route %s", async route => {
     const result = await request(route, { key: "sk_reader", token: null, method: "GET" })
     expect(result.status).not.toBe(200)

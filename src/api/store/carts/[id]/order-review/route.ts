@@ -45,6 +45,8 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     const body = bodySchema.safeParse(req.body);
     if (!body.success)
       throw new OrderPromiseError("order_review_invalid_request", 422);
+    if (body.data.payment_mode === "invoice" && process.env.GP_INSTITUTIONAL_TERMS_ENABLED !== "true")
+      throw new OrderPromiseError("order_review_payment_mode_unavailable", 403);
     const cart = await reviewCart(req.scope, req.params.id);
     const owner = await assertReviewOwner(req, cart);
     if (owner.staff) body.data.analytics_consent = null;
