@@ -6,6 +6,7 @@ import {
   metadataObject,
   updateFinalizationLine,
 } from "../../../../../../../../lib/catch-weight-finalization"
+import { withInstitutionalFinalizationWrite } from "../../../../../../../../lib/gp-institutional-finalization-lock"
 import {
   emitFinalizationRouteFailureAlert,
   jsonError,
@@ -26,32 +27,30 @@ export const PATCH = async (req: MedusaRequest, res: MedusaResponse) => {
   const staffAudit = staffAuditFields(req, body)
 
   try {
-    await ensureFinalizationForOrder(db, order)
-    const line = await updateFinalizationLine(
-      db,
-      order.id,
-      req.params.lineId,
-      body
-    )
-    const finalization = await db("gp_order_finalization")
-      .where({ id: line.finalization_id })
-      .whereNull("deleted_at")
-      .first()
-    const finalizationStatus = finalization?.status || "picking"
-    const metadata = appendStaffAudit(
-      {
-        ...metadataObject(order.metadata),
-        finalization_status: finalizationStatus,
-        catch_weight_status: finalizationStatus,
-      },
-      {
-        action: "catch_weight_line_updated",
-        status: finalizationStatus,
-        line_item_id: req.params.lineId,
-        ...staffAudit,
-      }
-    )
-    await orderModule.updateOrders(order.id, { metadata })
+    const line = await withInstitutionalFinalizationWrite(db, order, async (workDb) => {
+      await ensureFinalizationForOrder(workDb, order)
+      const line = await updateFinalizationLine(workDb, order.id, req.params.lineId, body)
+      const finalization = await workDb("gp_order_finalization")
+        .where({ id: line.finalization_id })
+        .whereNull("deleted_at")
+        .first()
+      const finalizationStatus = finalization?.status || "picking"
+      const metadata = appendStaffAudit(
+        {
+          ...metadataObject(order.metadata),
+          finalization_status: finalizationStatus,
+          catch_weight_status: finalizationStatus,
+        },
+        {
+          action: "catch_weight_line_updated",
+          status: finalizationStatus,
+          line_item_id: req.params.lineId,
+          ...staffAudit,
+        }
+      )
+      await orderModule.updateOrders(order.id, { metadata })
+      return line
+    })
 
     res.status(200).json({ line })
   } catch (error) {

@@ -6,6 +6,7 @@ import { checkInventoryAvailability } from "../../../../../../lib/inventory-allo
 import { ensurePaymentSetup, SYSTEM_PAYMENT_PROVIDER_ID } from "../../../../../../lib/catch-weight-finalization";
 import { assertPaymentMethodBelongsToCustomer } from "../../../../payment-methods/utils";
 import { STAFF_CART_AUTHORITY } from "../../../../../../lib/staff-cart-authority";
+import { institutionalCheckoutAuthority, reserveInstitutionalCheckout } from "../../../../../../lib/gp-institutional-checkout";
 import { POST } from "../route";
 
 // Real payment-context authentication, cart ownership and locking adapter. Only
@@ -37,6 +38,11 @@ jest.mock("../../../../../../lib/order-review-checkout", () => ({
   ...jest.requireActual("../../../../../../lib/order-review-checkout"),
   acceptCheckoutReview: jest.fn(),
 }));
+jest.mock("../../../../../../lib/gp-institutional-checkout", () => ({
+  institutionalCheckoutAuthority: jest.fn(),
+  institutionalDollarsToCents: jest.requireActual("../../../../../../lib/gp-institutional-checkout").institutionalDollarsToCents,
+  reserveInstitutionalCheckout: jest.fn(),
+}));
 
 const clone = (value: any) => JSON.parse(JSON.stringify(value));
 const prior = { review: process.env.GP_ORDER_REVIEW_ENFORCEMENT, staff: process.env.GP_STAFF_BOUNDARY_MODE, institutional: process.env.GP_INSTITUTIONAL_TERMS_ENABLED };
@@ -44,9 +50,15 @@ beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.GP_ORDER_REVIEW_ENFORCEMENT;
   delete process.env.GP_STAFF_BOUNDARY_MODE;
-  // These tests exercise the pre-existing invoice path and staff/cart guards.
-  // The separate #370 route test proves invoice denial with this flag unset.
+  // Invoice success uses a synthetic source-backed account; the default-off
+  // assertion lives in the separate #370 route test.
   process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true";
+  (institutionalCheckoutAuthority as jest.Mock).mockResolvedValue({ status: "allow", account: {
+    companyKey: "test_company_sha", customerListId: "QBD-LIST-1", creditLimitCents: 100000,
+    termsName: "Net 10", termsListId: "QBD-TERMS-1", sourceRevision: "rev-1",
+    lastSuccess: "2026-09-24T00:00:00Z", invoices: [],
+  } });
+  (reserveInstitutionalCheckout as jest.Mock).mockResolvedValue({ status: "reserved", projectedCents: 3000, exposure: { totalCents: 0 } });
   (assertPaymentMethodBelongsToCustomer as jest.Mock).mockResolvedValue(true);
   (checkInventoryAvailability as jest.Mock).mockResolvedValue([{ variant_id: "variant_fixture", decision: "available" }]);
   (acceptCheckoutReview as jest.Mock).mockResolvedValue({ completed: false, snapshot: { promise: { terms: {
@@ -85,6 +97,12 @@ function fixture(lane: "card" | "invoice" = "card") {
   const locking = { execute: jest.fn(async (_key, fn) => { beforeLock?.(); return fn(); }) };
   const sessions = jest.fn(async (_input: any) => ({ result: {} }));
   const complete = jest.fn(async () => ({ errors: [], result: { id: "order_fixture" } }));
+  const trx: any = jest.fn(() => ({
+    where: () => ({ whereNull: () => ({ first: async () => null }) }),
+  }));
+  trx.raw = jest.fn(async () => ({ rows: [] }));
+  const db: any = jest.fn();
+  db.transaction = jest.fn(async (run) => run(trx));
   (createPaymentSessionsWorkflow as unknown as jest.Mock).mockReturnValue({ run: sessions });
   (completeCartWorkflow as unknown as jest.Mock).mockReturnValue({ run: complete });
   const req: any = {
@@ -96,7 +114,7 @@ function fixture(lane: "card" | "invoice" = "card") {
       if (key === Modules.CART) return cartModule;
       if (key === Modules.ORDER) return orderModule;
       if (key === Modules.LOCKING) return locking;
-      if (key === ContainerRegistrationKeys.PG_CONNECTION) return {};
+      if (key === ContainerRegistrationKeys.PG_CONNECTION) return db;
       if (key === ContainerRegistrationKeys.REMOTE_QUERY) return async () => [{ payment_collection: { id: "paycol_fixture" } }];
       if (key === ContainerRegistrationKeys.LOGGER) return { error: jest.fn(), warn: jest.fn() };
       throw new Error(`Unexpected service ${key}`);
@@ -141,8 +159,9 @@ it.each(["card", "invoice"] as const)("explicit off preserves a %s retry already
   expect(f.res.status).toHaveBeenCalledWith(200);
   expect(f.complete).toHaveBeenCalledTimes(1);
 });
-it("still requires the selected customer's invoice approval", async () => {
-  const f = fixture("invoice"); f.customer.metadata.gp_offline_payment_approved = false;
+it("requires current source-backed invoice approval even when local metadata says approved", async () => {
+  const f = fixture("invoice");
+  (institutionalCheckoutAuthority as jest.Mock).mockResolvedValueOnce({ status: "deny", reason: "qbd_flag_not_approved" });
   await POST(f.req, f.res);
   expect(f.res.status).toHaveBeenCalledWith(403); noOrderEffects(f);
 });

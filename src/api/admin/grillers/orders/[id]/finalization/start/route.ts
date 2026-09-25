@@ -9,6 +9,7 @@ import {
   metadataObject,
   prepareFinalizationLinesForPacking,
 } from "../../../../../../../lib/catch-weight-finalization"
+import { withInstitutionalFinalizationWrite } from "../../../../../../../lib/gp-institutional-finalization-lock"
 import {
   emitFinalizationRouteFailureAlert,
   jsonError,
@@ -34,60 +35,46 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   const orderModule = req.scope.resolve(Modules.ORDER)
 
   try {
-    const detail = await ensureFinalizationForOrder(db, order, nextStatus)
-
-    if (
-      phase === "pack" &&
-      ![
+    const { detail, lines } = await withInstitutionalFinalizationWrite(db, order, async (workDb) => {
+      const detail = await ensureFinalizationForOrder(workDb, order, nextStatus)
+      if (phase === "pack" && ![
         FINALIZATION_READY_FOR_PACKING,
         FINALIZATION_PACKING,
         "packed_pending_review",
         "packed_pending_charge",
         "charge_failed_hold",
-      ].includes(detail.finalization.status)
-    ) {
-      return jsonError(
-        res,
-        409,
-        "This order must be marked ready for packing before a packer starts."
-      )
-    }
-
-    const lines =
-      phase === "pack"
-        ? await prepareFinalizationLinesForPacking(db, detail.lines, actor)
-        : detail.lines
-
-    await db("gp_order_finalization")
-      .where({ id: detail.finalization.id })
-      .update({
-        status: nextStatus,
-        started_at: detail.finalization.started_at || new Date(),
-        started_by: detail.finalization.started_by || actor,
-        packed_at:
-          phase === "pack" ? detail.finalization.packed_at || new Date() : null,
-        packed_by:
-          phase === "pack" ? detail.finalization.packed_by || actor : null,
-        updated_at: new Date(),
-      })
-
-    const metadata = appendStaffAudit(
-      {
-        ...metadataObject(order.metadata),
-        finalization_id: detail.finalization.id,
-        finalization_status: nextStatus,
-        catch_weight_status: nextStatus,
-      },
-      {
-        action:
-          phase === "pack"
-            ? "catch_weight_packing_started"
-            : "catch_weight_picking_started",
-        status: nextStatus,
-        ...staffAudit,
+      ].includes(detail.finalization.status)) {
+        throw new Error("This order must be marked ready for packing before a packer starts.")
       }
-    )
-    await orderModule.updateOrders(order.id, { metadata })
+      const lines = phase === "pack"
+        ? await prepareFinalizationLinesForPacking(workDb, detail.lines, actor)
+        : detail.lines
+      await workDb("gp_order_finalization")
+        .where({ id: detail.finalization.id })
+        .update({
+          status: nextStatus,
+          started_at: detail.finalization.started_at || new Date(),
+          started_by: detail.finalization.started_by || actor,
+          packed_at: phase === "pack" ? detail.finalization.packed_at || new Date() : null,
+          packed_by: phase === "pack" ? detail.finalization.packed_by || actor : null,
+          updated_at: new Date(),
+        })
+      const metadata = appendStaffAudit(
+        {
+          ...metadataObject(order.metadata),
+          finalization_id: detail.finalization.id,
+          finalization_status: nextStatus,
+          catch_weight_status: nextStatus,
+        },
+        {
+          action: phase === "pack" ? "catch_weight_packing_started" : "catch_weight_picking_started",
+          status: nextStatus,
+          ...staffAudit,
+        }
+      )
+      await orderModule.updateOrders(order.id, { metadata })
+      return { detail, lines }
+    })
 
     res.status(200).json({
       order,
