@@ -1,6 +1,7 @@
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { reconcileInstitutionalReleaseIntent } from "../gp-institutional-release-intent"
 import { reconcileInstitutionalPostingHandoff } from "../gp-institutional-posting-handoff"
+import { quarantineStaleInstitutionalReservations } from "../gp-institutional-stale-reservations"
 import { emitOpsAlert } from "../ops-alert"
 import run from "../../jobs/gp-institutional-release-reconcile"
 
@@ -9,6 +10,9 @@ jest.mock("../gp-institutional-release-intent", () => ({
 }))
 jest.mock("../gp-institutional-posting-handoff", () => ({
   reconcileInstitutionalPostingHandoff: jest.fn(),
+}))
+jest.mock("../gp-institutional-stale-reservations", () => ({
+  quarantineStaleInstitutionalReservations: jest.fn(),
 }))
 jest.mock("../ops-alert", () => ({
   emitOpsAlert: jest.fn(async () => ({ ok: true })),
@@ -19,7 +23,10 @@ afterAll(() => {
   if (prior === undefined) delete process.env.GP_INSTITUTIONAL_TERMS_ENABLED
   else process.env.GP_INSTITUTIONAL_TERMS_ENABLED = prior
 })
-beforeEach(() => { jest.clearAllMocks() })
+beforeEach(() => {
+  jest.clearAllMocks()
+  ;(quarantineStaleInstitutionalReservations as jest.Mock).mockResolvedValue(0)
+})
 
 function container(rows = [{ order_id: "order_fixture" }], dueRows: Array<Record<string, string>> = []) {
   const scan: any = {
@@ -51,6 +58,7 @@ it("does no reconciliation or database read while the feature is off", async () 
   await run({ resolve: fixture.resolve } as any)
   expect(fixture.resolve).not.toHaveBeenCalled()
   expect(reconcileInstitutionalReleaseIntent).not.toHaveBeenCalled()
+  expect(quarantineStaleInstitutionalReservations).not.toHaveBeenCalled()
 })
 
 it("polls posted institutional orders and binds exact QBD invoice evidence", async () => {
@@ -67,6 +75,31 @@ it("polls posted institutional orders and binds exact QBD invoice evidence", asy
     db: fixture.db, order: { id: "TEST_ORDER_C" },
   })
   expect(fixture.scan.update).toHaveBeenCalledWith({ updated_at: expect.any(Date) })
+  expect(quarantineStaleInstitutionalReservations).toHaveBeenCalledWith(fixture.db)
+})
+
+it("pages once with a count when stale unlinked reservations are quarantined", async () => {
+  process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+  ;(quarantineStaleInstitutionalReservations as jest.Mock).mockResolvedValue(2)
+  const fixture = container([])
+  await run({ resolve: fixture.resolve } as any)
+  expect(emitOpsAlert).toHaveBeenCalledWith(expect.objectContaining({
+    alertKind: "institutional_checkout_reservation_quarantined",
+    severity: "page",
+    meta: { quarantined_count: 2 },
+  }))
+})
+
+it("pages when reservation reconciliation cannot read its source", async () => {
+  process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+  ;(quarantineStaleInstitutionalReservations as jest.Mock).mockRejectedValue(new Error("source unavailable"))
+  const fixture = container([])
+  await run({ resolve: fixture.resolve } as any)
+  expect(emitOpsAlert).toHaveBeenCalledWith(expect.objectContaining({
+    alertKind: "institutional_checkout_reservation_reconciliation_failed",
+    severity: "page",
+  }))
+  expect(fixture.logger.error).toHaveBeenCalled()
 })
 
 it("reconciles prepared intents and pages on an unresolved outcome", async () => {

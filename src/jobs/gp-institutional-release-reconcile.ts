@@ -3,6 +3,7 @@ import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { emitOpsAlert } from "../lib/ops-alert"
 import { reconcileInstitutionalReleaseIntent } from "../lib/gp-institutional-release-intent"
 import { reconcileInstitutionalPostingHandoff } from "../lib/gp-institutional-posting-handoff"
+import { quarantineStaleInstitutionalReservations } from "../lib/gp-institutional-stale-reservations"
 
 /** Read canonical order state before retrying an uncertain release. The job is
  * dormant until the institutional flag is explicitly enabled.
@@ -98,6 +99,29 @@ export default async function gpInstitutionalReleaseReconcile(container: MedusaC
       await db("gp_institutional_credit_commitment")
         .where({ id: row.commitment_id }).update({ updated_at: new Date() })
     }
+  }
+
+  try {
+    const quarantinedCount = await quarantineStaleInstitutionalReservations(db)
+    if (quarantinedCount === 0) return
+    await emitOpsAlert({
+      alertKind: "institutional_checkout_reservation_quarantined",
+      severity: "page",
+      path: "src/jobs/gp-institutional-release-reconcile.ts",
+      title: "Stale institutional checkout reservations need review",
+      fingerprint: "institutional_checkout_reservation_quarantined",
+      meta: { quarantined_count: quarantinedCount },
+      logger,
+    })
+  } catch {
+    logger.error("[institutional-reservation] stale reservation reconciliation failed")
+    await emitOpsAlert({
+      alertKind: "institutional_checkout_reservation_reconciliation_failed",
+      severity: "page",
+      path: "src/jobs/gp-institutional-release-reconcile.ts",
+      title: "Institutional checkout reservation reconciliation failed",
+      logger,
+    })
   }
 }
 
