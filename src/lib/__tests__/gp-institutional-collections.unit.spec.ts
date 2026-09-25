@@ -141,7 +141,7 @@ describe("institutional collections (#370 synthetic fixtures)", () => {
     expect(view(apply(requested, { ...receipt, appliedCents: 10000 })).quarantineReasons).toContain("collection_amount_mismatch")
     expect(view(apply(requested, { ...receipt, invoiceTxnId: "TEST_OTHER_INVOICE" })).quarantineReasons).toContain("collection_identity_mismatch")
     const confirmed = apply(requested, receipt)
-    expect(view(apply(confirmed, { ...receipt, eventId: "TEST_RECEIPT_CONFLICT", appliedCents: 10000 })).quarantineReasons).toContain("conflicting_payment_txn_id")
+    expect(view(apply(confirmed, { ...receipt, eventId: "TEST_RECEIPT_CONFLICT", requestKey: null, appliedCents: 10000 })).quarantineReasons).toContain("conflicting_payment_txn_id")
     expect(view(confirmed)).toMatchObject({ confirmedCollectedCents: 20000, expectedRemainingCents: 30000 })
   })
 
@@ -152,7 +152,7 @@ describe("institutional collections (#370 synthetic fixtures)", () => {
     expect(view(apply(requested, { ...credit, appliedCents: 10000 })).quarantineReasons).toContain("credit_amount_mismatch")
     expect(view(apply(requested, { ...credit, invoiceTxnId: "TEST_OTHER_INVOICE" })).quarantineReasons).toContain("credit_identity_mismatch")
     const confirmed = apply(requested, credit)
-    expect(view(apply(confirmed, { ...credit, eventId: "TEST_CREDIT_CONFLICT", appliedCents: 10000 })).quarantineReasons).toContain("conflicting_credit_txn_id")
+    expect(view(apply(confirmed, { ...credit, eventId: "TEST_CREDIT_CONFLICT", requestKey: null, appliedCents: 10000 })).quarantineReasons).toContain("conflicting_credit_txn_id")
     expect(view(apply(confirmed, { type: "invoice_readback", eventId: "TEST_OTHER_READ", invoiceTxnId: "TEST_OTHER_INVOICE", remainingCents: 30000, sourceRevision: "TEST_REV_3" })).quarantineReasons).toContain("invoice_readback_identity_mismatch")
     expect(view(confirmed)).toMatchObject({ confirmedCreditCents: 20000, expectedRemainingCents: 30000 })
   })
