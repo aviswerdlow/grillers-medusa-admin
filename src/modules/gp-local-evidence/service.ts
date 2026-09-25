@@ -87,10 +87,16 @@ export default class GpLocalEvidenceFileService extends AbstractFileProviderServ
     return getSignedUrl(client, command, { expiresIn })
   }
 
-  async delete(files: FileTypes.ProviderDeleteFileDTO | FileTypes.ProviderDeleteFileDTO[]): Promise<void> {
+  async delete(
+    files: FileTypes.ProviderDeleteFileDTO | FileTypes.ProviderDeleteFileDTO[],
+    options?: { abortSignal?: AbortSignal },
+  ): Promise<void> {
     const { client, bucket } = this.configured()
     for (const file of Array.isArray(files) ? files : [files])
-      await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: evidenceKey(file.fileKey) }))
+      await client.send(
+        new DeleteObjectCommand({ Bucket: bucket, Key: evidenceKey(file.fileKey) }),
+        options?.abortSignal ? { abortSignal: options.abortSignal } : {},
+      )
   }
 
   async getDownloadStream(file: FileTypes.ProviderGetFileDTO): Promise<Readable> {

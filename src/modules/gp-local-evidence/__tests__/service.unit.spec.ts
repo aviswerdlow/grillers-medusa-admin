@@ -1,4 +1,4 @@
-import { PutObjectCommand } from "@aws-sdk/client-s3"
+import { DeleteObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3"
 import GpLocalEvidenceFileService from "../service"
 
 const key = `local-evidence/order_fixture/upload_private_01/${"a".repeat(64)}.jpg`
@@ -67,6 +67,17 @@ describe("#367 private Medusa file provider", () => {
       content: Buffer.alloc(10 * 1024 * 1024 + 1).toString("binary"), access: "private",
     })).rejects.toThrow("invalid_evidence_upload")
     expect(send).not.toHaveBeenCalled()
+  })
+
+  it("forwards the prune deadline to S3 delete", async () => {
+    const provider = new GpLocalEvidenceFileService({}, options)
+    const send = jest.fn(async (_command: unknown) => ({}))
+    ;(provider as any).client_ = { send }
+    const abortSignal = AbortSignal.timeout(30_000)
+    await provider.delete({ fileKey: key }, { abortSignal })
+    const command = send.mock.calls[0][0] as DeleteObjectCommand
+    expect(command.input).toMatchObject({ Bucket: options.bucket, Key: key })
+    expect(send).toHaveBeenCalledWith(command, { abortSignal })
   })
 
   it("uses virtual-hosted URLs for Railway and accepts an explicit path-style override", async () => {
