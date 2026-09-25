@@ -5,36 +5,46 @@ import { isDeepStrictEqual } from "node:util"
 import { Modules } from "@medusajs/framework/utils"
 import { configuredIds, isBootstrapStaffIdentity, isStaffGrantMetadataKey, staffAccessStatus, staffRole, staffSessionIsCurrent } from "../../lib/staff-access-policy"
 import { currentStaffCustomer, requestStaffPrincipal, resolveStaffPrincipal, StaffAccessDenied, verifiedStaffAuditFields } from "../../lib/staff-principal"
-import { adminRouteCapability, isServiceRoute } from "../../lib/staff-route-capabilities"
+import { adminRouteCapability, isReadOnlyServiceRoute, isServiceRoute } from "../../lib/staff-route-capabilities"
 import { ORDER_PROMISE_READ_PATH } from "../../lib/order-promise-reader"
+import { isCanonicalStaffPath, staffRequestPath } from "../../lib/staff-request-path"
 
 export async function enforceStaffCapabilities(req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) {
+  const path = staffRequestPath(req)
+  if (!isCanonicalStaffPath(path)) return res.status(403).json({ message: "This admin route is unavailable." })
   // A designated native reader is read-only even while the wider staff boundary
   // observes other callers in log mode during rollout.
   const transport = (req as any).auth_context
-  if (transport?.actor_type === "user" && configuredIds("GP_ADMIN_READ_ONLY_USER_IDS").has(String(transport.actor_id || "")) && req.method !== "GET") {
-    return res.status(403).json({ message: "This read-only account cannot perform admin writes." })
+  const transportId = String(transport?.actor_id || "")
+  const parityReader = transport?.actor_type === "api-key" && configuredIds("GP_PARITY_READ_API_KEY_IDS").has(transportId)
+  const readOnlyUser = transport?.actor_type === "user" && configuredIds("GP_ADMIN_READ_ONLY_USER_IDS").has(transportId)
+  const readOnlyKey = transport?.actor_type === "api-key" && configuredIds("GP_ADMIN_READ_ONLY_API_KEY_IDS").has(transportId)
+  // These dedicated credentials have no legacy traffic to preserve. Apply the
+  // narrow GET list before log mode can turn a would-deny into an admission.
+  if (parityReader ? req.method !== "GET" || path !== ORDER_PROMISE_READ_PATH
+    : (readOnlyUser || readOnlyKey) && !isReadOnlyServiceRoute(path, req.method)) {
+    return res.status(403).json({ message: "This read-only account cannot access this admin route." })
   }
   // Checkout enforcement is independent of the staff observation switch.
-  if (orderReviewEnforcementMode() === "required" && req.method === "POST" && (/^\/admin\/draft-orders(?:\/[^/]+\/convert-to-order)?\/?$/.test(req.path) || /^\/admin\/orders\/?$/.test(req.path))) {
+  if (orderReviewEnforcementMode() === "required" && req.method === "POST" && (/^\/admin\/draft-orders(?:\/[^/]+\/convert-to-order)?$/.test(path) || /^\/admin\/orders$/.test(path))) {
     return res.status(403).json({ message: "Create orders through the reviewed customer or staff checkout. Native draft conversion has no accepted-order review." })
   }
   try {
     const principal = await resolveStaffPrincipal(req)
 
-    const capability = adminRouteCapability(req.path, req.method, req.body)
+    const capability = adminRouteCapability(path, req.method, req.body)
     const nativeReadOnlyUser = principal.kind === "service" && principal.auth.actor_type === "user" && principal.service_role === "read_only"
     const allowed = principal.kind === "operator"
       || (principal.kind === "service" ? principal.service_scope === "parity"
-        ? req.method === "GET" && req.path.replace(/\/+$/, "") === ORDER_PROMISE_READ_PATH
-        : (!nativeReadOnlyUser || req.method === "GET") && isServiceRoute(principal.service_role, req.path, req.method, (req as any).validatedBody || req.body) : capability && principal.capabilities.has(capability))
+        ? req.method === "GET" && path === ORDER_PROMISE_READ_PATH
+        : (!nativeReadOnlyUser || req.method === "GET") && isServiceRoute(principal.service_role, path, req.method, (req as any).validatedBody || req.body) : capability && principal.capabilities.has(capability))
     if (!allowed) throw new StaffAccessDenied("Your current staff permissions do not allow this action.")
     ;(req as any).gp_staff_principal = principal
     // Native order/payment workflows copy auth_context.actor_id into canceled_by,
     // captured_by and created_by. Supply the verified person only after Medusa
     // authenticated the transport and the capability check passed. Custom routes
     // retain transport context and use verifiedStaffAuditFields explicitly.
-    if (principal.kind === "customer" && /^\/admin\/(orders|order-edits|payments|fulfillments)(\/|$)/i.test(req.path)) {
+    if (principal.kind === "customer" && /^\/admin\/(orders|order-edits|payments|fulfillments)(\/|$)/.test(path)) {
       ;(req as any).auth_context = { ...(req as any).auth_context, actor_id: principal.id }
     }
     return next()
@@ -118,7 +128,7 @@ export async function protectAdminCustomerAuthority(req: MedusaRequest, res: Med
       for (const [key, value] of Object.entries({ created_by_staff_customer_id: actor.staff_actor_customer_id, created_by_staff_email: actor.staff_actor_email, created_by_staff_name: actor.staff_actor_name })) {
         if (Object.prototype.hasOwnProperty.call(metadata, key)) metadata[key] = current?.metadata?.[key] ?? value
       }
-      if (req.path.includes("/addresses")) {
+      if (staffRequestPath(req).includes("/addresses")) {
         Object.assign(metadata, actor, { staff_action_at: new Date().toISOString() })
       } else {
         metadata.staff_audit_log = JSON.stringify([...auditRows(metadata.staff_audit_log ?? current?.metadata?.staff_audit_log), {

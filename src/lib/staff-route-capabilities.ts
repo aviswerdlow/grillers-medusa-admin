@@ -1,8 +1,10 @@
 import type { StaffCapability } from "./staff-access-policy"
+import { isCanonicalStaffPath } from "./staff-request-path"
 
 /** Unknown routes are denied to gateway users, including owners. */
 export function adminRouteCapability(path: string, method: string, body: any = {}): StaffCapability | null {
-  const p = path.replace(/\/+$/, "").toLowerCase()
+  if (!isCanonicalStaffPath(path)) return null
+  const p = path
   const read = method === "GET" || method === "HEAD"
   if (p === "/admin/grillers/local-milestones/orders" || /^\/admin\/grillers\/local-milestones\/orders\/[^/]+$/.test(p)) return read ? "milestones.drive" : null
   if (p === "/admin/grillers/local-milestones/exceptions") return read ? "milestones.office" : null
@@ -45,8 +47,8 @@ export function adminRouteCapability(path: string, method: string, body: any = {
 
 /** Actual GET-only discovery used by the QBD reader and catalog/baseline tools. */
 export function isReadOnlyServiceRoute(path: string, method: string): boolean {
-  if (method !== "GET" && method !== "HEAD") return false
-  const p = path.replace(/\/+$/, "").toLowerCase()
+  if (method !== "GET" || !isCanonicalStaffPath(path)) return false
+  const p = path
   return /^\/admin\/(products|product-variants|inventory-items|stock-locations|reservations|orders|customers)(?:\/[^/]+)?$/.test(p)
     || /^\/admin\/inventory-items\/[^/]+\/location-levels$/.test(p)
     || p === "/admin/grillers/inventory/allocations"
@@ -54,8 +56,9 @@ export function isReadOnlyServiceRoute(path: string, method: string): boolean {
 
 /** Separate IDs own catalog sync and the cron's three receipt markers. Neither is an operator. */
 export function isServiceRoute(role: string | undefined, path: string, method: string, body: any = {}): boolean {
+  if (!isCanonicalStaffPath(path)) return false
   if (role === "read_only" || !role) return isReadOnlyServiceRoute(path, method)
-  const p = path.replace(/\/+$/, "").toLowerCase()
+  const p = path
   if (role === "qbd_catalog") {
     if (isReadOnlyServiceRoute(p, method) || ((method === "GET" || method === "HEAD") && p === "/admin/sales-channels")) return true
     if (method !== "POST") return false
