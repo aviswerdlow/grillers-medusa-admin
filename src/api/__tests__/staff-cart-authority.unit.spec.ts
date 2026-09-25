@@ -115,11 +115,12 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     const response = await fetch(baseUrl + url, { method: options.method || "POST", headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
     return { status: response.status, body: await response.json() as any }
   }
-  async function rawRequest(url: string, body: any) {
+  async function rawRequest(url: string, body: any, staff = false) {
     return await new Promise<{ status: number; body: any }>((resolve, reject) => {
       const payload = JSON.stringify(body)
       const req = httpRequest({ hostname: "127.0.0.1", port: (server.address() as any).port, path: url,
-        method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } }, res => {
+        method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload),
+          ...(staff ? { "x-gp-staff-authorization": `Bearer ${token()}` } : {}) } }, res => {
         let value = ""
         res.on("data", chunk => { value += chunk })
         res.on("end", () => resolve({ status: res.statusCode!, body: JSON.parse(value) }))
@@ -150,14 +151,14 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
       const cart = { ...input, id: cartId, customer_id: input.customer_id || "cus_target", items: [], completed_at: null }
       carts[cart.id] = cart; return { result: cart }
     })
-    await prepared()
+    await prepared("collect_card_now")
     expect((await request(`/STORE/CARTS/${cartId}`, undefined, true, { method: "GET" })).status).toBe(200)
     expect((await request(`/STORE/CARTS/${cartId}/LINE-ITEMS`, { variant_id: "variant_1", quantity: 2 }, true)).status).toBe(200)
-    expect((await request(`/STORE/PAYMENT-COLLECTIONS/${paymentCollectionId}/PAYMENT-SESSIONS`, { provider_id: "pp_stripe_stripe" })).status).toBe(200)
+    expect((await request(`/STORE/PAYMENT-COLLECTIONS/${paymentCollectionId}/PAYMENT-SESSIONS`, { provider_id: "pp_stripe_stripe" }, true)).status).toBe(200)
     customers.cus_staff.metadata.staff_access_revoked = true
-    expect((await request(`/STORE/CARTS/${cartId}/COMPLETE`, {})).status).toBe(403)
+    expect((await request(`/STORE/CARTS/${cartId}/COMPLETE`, {}, true)).status).toBe(403)
     customers.cus_staff.metadata.staff_access_revoked = false
-    expect((await request(`/STORE/CARTS/${cartId}/COMPLETE`, {})).status).toBe(200)
+    expect((await request(`/STORE/CARTS/${cartId}/COMPLETE`, {}, true)).status).toBe(200)
   })
   it("rejects raw fragments before payment provider and stock checks", async () => {
     await prepared(); await add()
@@ -166,6 +167,36 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     expect((await rawRequest("/store/carts/cart_1/complete#x", {})).status).toBe(403)
     expect(paymentRun).not.toHaveBeenCalled()
     expect(completeRun).not.toHaveBeenCalled()
+  })
+  it.each(["log", "enforce"])("allows native Stripe sessions only for signed staff card-at-placement carts in %s mode", async mode => {
+    const cartId = generateEntityId(undefined, "cart")
+    paymentCollectionId = generateEntityId(undefined, "paycol")
+    paymentCartId = cartId
+    carts[cartId] = { id: cartId, customer_id: "cus_target", email: "customer@example.test", items: [], metadata: {} }
+    process.env.GP_STAFF_BOUNDARY_MODE = mode
+    expect((await request(`/STORE/PAYMENT-COLLECTIONS/${paymentCollectionId}/PAYMENT-SESSIONS`, { provider_id: "pp_stripe_stripe" }, true)).status).toBe(403)
+    expect(paymentRun).not.toHaveBeenCalled()
+    process.env.GP_STAFF_BOUNDARY_MODE = "enforce"
+    createRun.mockImplementationOnce(async ({ input }) => {
+      const cart = { ...input, id: cartId, customer_id: "cus_target", items: [], completed_at: null }
+      carts[cartId] = cart; return { result: cart }
+    })
+    await prepared("send_checkout_link")
+    process.env.GP_STAFF_BOUNDARY_MODE = mode
+    expect((await request(`/store/payment-collections/${paymentCollectionId}/payment-sessions`, { provider_id: "pp_stripe_stripe" }, true)).status).toBe(403)
+    expect(paymentRun).not.toHaveBeenCalled()
+  })
+  it("rejects a raw fragment on an otherwise authorized uppercase-ID staff card session", async () => {
+    const cartId = generateEntityId(undefined, "cart")
+    paymentCollectionId = generateEntityId(undefined, "paycol")
+    paymentCartId = cartId
+    createRun.mockImplementationOnce(async ({ input }) => {
+      const cart = { ...input, id: cartId, customer_id: "cus_target", items: [], completed_at: null }
+      carts[cart.id] = cart; return { result: cart }
+    })
+    await prepared("collect_card_now")
+    expect((await rawRequest(`/store/payment-collections/${paymentCollectionId}/payment-sessions#x`, { provider_id: "pp_stripe_stripe" }, true)).status).toBe(403)
+    expect(paymentRun).not.toHaveBeenCalled()
   })
 
   it.each(["list", "select", "validate"])("calendar %s retains staff authority without demanding inventory payment readiness", async action => {
@@ -256,8 +287,8 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     expect((await request("/store/carts/cart_1/customer", {}, false, { authorization: `Bearer ${token("cus_target")}` })).status).toBe(200)
     expect((await request("/store/carts/cart_1/customer", {}, false, { authorization: `Bearer ${token("cus_other")}` })).status).toBe(403)
     expect((await request("/store/carts/cart_1", { email: "other@example.test" })).status).toBe(403)
-    expect((await request("/store/payment-collections/paycol_1/payment-sessions", { provider_id: "pp_stripe_stripe" })).status).toBe(200)
-    expect(paymentRun).toHaveBeenCalledWith({ input: expect.objectContaining({ customer_id: "cus_target" }) })
+    expect((await request("/store/payment-collections/paycol_1/payment-sessions", { provider_id: "pp_stripe_stripe" })).status).toBe(403)
+    expect(paymentRun).not.toHaveBeenCalled()
   })
   it("cannot use a body cart ID to bypass the payment collection's actual staff cart", async () => {
     await prepared(); await add()
@@ -333,6 +364,16 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     carts.cart_1 = { id: "cart_1", customer_id: "cus_target", email: "customer@example.test", items: [], metadata: { staff_phone_order: true } }
     expect((await request("/store/carts/cart_1", undefined, true, { method: "GET" })).status).toBe(200)
     expect((await request("/store/carts/cart_1", { metadata: { [STAFF_CART_AUTHORITY]: "forged" } }, true)).status).toBe(403)
+  })
+  it("rejects customer checkout authority and system payment sessions in log mode", async () => {
+    process.env.GP_STAFF_BOUNDARY_MODE = "log"
+    carts.cart_1 = { id: "cart_1", customer_id: "cus_target", email: "customer@example.test", items: [], metadata: {} }
+    for (const key of ["payment_workflow", "gp_order_promise_snapshot_id", "receipt_contact_snapshot_id"]) {
+      expect((await request("/store/carts/cart_1", { metadata: { [key]: "forged" } })).status).toBe(403)
+    }
+    expect((await request("/store/payment-collections/paycol_1/payment-sessions", { provider_id: "pp_system_default" })).status).toBe(403)
+    expect(paymentRun).not.toHaveBeenCalled()
+    expect(workflow).not.toHaveBeenCalled()
   })
   it("never downgrades an already signed cart after rollback to log", async () => {
     await prepared(); await add()

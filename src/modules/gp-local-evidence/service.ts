@@ -13,6 +13,17 @@ export type PrivateEvidenceOptions = {
   region?: string
   access_key_id?: string
   secret_access_key?: string
+  force_path_style?: string
+}
+
+function evidenceForcePathStyle(endpoint: string, setting?: string) {
+  const value = setting?.trim().toLowerCase()
+  if (value === "true") return true
+  if (value === "false") return false
+  if (value) throw new LocalEvidenceError("private_evidence_provider_unconfigured")
+  // Supabase's S3 path requires the bucket in the URL path. Railway uses
+  // virtual-hosted bucket URLs unless explicitly configured otherwise.
+  return new URL(endpoint).hostname.endsWith(".supabase.co")
 }
 
 const evidenceKey = (key: string) => {
@@ -33,11 +44,12 @@ export default class GpLocalEvidenceFileService extends AbstractFileProviderServ
   private configured() {
     if (process.env.GP_LOCAL_MILESTONES_ENABLED !== "true")
       throw new LocalEvidenceError("local_milestones_disabled")
-    const { bucket, endpoint, region, access_key_id, secret_access_key } = this.options_
+    const { bucket, endpoint, region, access_key_id, secret_access_key, force_path_style } = this.options_
     if (!bucket || bucket === process.env.S3_BUCKET || !endpoint || !region || !access_key_id || !secret_access_key ||
       !/^https:\/\//.test(endpoint)) throw new LocalEvidenceError("private_evidence_provider_unconfigured")
+    const forcePathStyle = evidenceForcePathStyle(endpoint, force_path_style)
     if (!this.client_) this.client_ = new S3Client({
-      region, endpoint, forcePathStyle: true,
+      region, endpoint, forcePathStyle,
       credentials: { accessKeyId: access_key_id, secretAccessKey: secret_access_key },
     })
     return { client: this.client_, bucket }
