@@ -155,12 +155,6 @@ export async function reserveInstitutionalCredit(input: {
   }
   const companyKey = requiredId(input.companyKey)
   const customerListId = requiredId(input.customerListId)
-  if (!input.sourceFresh) {
-    return { status: "hold", reason: "stale_qbd_exposure", projectedCents: null }
-  }
-  if (!validCents(input.limitCents as number) || !input.limitCents) {
-    return { status: "hold", reason: "missing_qbd_credit_limit", projectedCents: null }
-  }
   if (input.commitment.state !== "accepted" || !validCents(input.commitment.amountCents)) {
     throw new Error("Only a valid accepted order can reserve institutional credit")
   }
@@ -170,6 +164,22 @@ export async function reserveInstitutionalCredit(input: {
       `gp_institutional_credit:${companyKey}:${customerListId}`,
     ])
     const existing = await input.store.list(trx, companyKey, customerListId)
+    const sameOrder = existing.filter((row) => row.orderId === input.commitment.orderId)
+    if (sameOrder.length > 1 || (sameOrder.length === 1 &&
+        (sameOrder[0].state !== "accepted" || sameOrder[0].invoiceTxnId))) {
+      return { status: "hold", reason: "existing_commitment_not_reservable", projectedCents: null }
+    }
+    // A held refresh must still retain its actual amount. Otherwise another
+    // order could consume credit that the original order already needs.
+    if (sameOrder.length === 1) {
+      await input.store.reserve(trx, { companyKey, customerListId }, input.commitment)
+    }
+    if (!input.sourceFresh) {
+      return { status: "hold", reason: "stale_qbd_exposure", projectedCents: null }
+    }
+    if (!validCents(input.limitCents as number) || !input.limitCents) {
+      return { status: "hold", reason: "missing_qbd_credit_limit", projectedCents: null }
+    }
     const other = existing.filter((row) => row.orderId !== input.commitment.orderId)
     const exposure = calculateInstitutionalExposure({
       invoices: input.invoices,
@@ -188,7 +198,9 @@ export async function reserveInstitutionalCredit(input: {
     }
     // Same order ID is an idempotent refresh; the store must upsert by stable
     // order ID under this account lock rather than create another commitment.
-    await input.store.reserve(trx, { companyKey, customerListId }, input.commitment)
+    if (sameOrder.length === 0) {
+      await input.store.reserve(trx, { companyKey, customerListId }, input.commitment)
+    }
     return { status: "reserved", projectedCents, exposure }
   })
 }
