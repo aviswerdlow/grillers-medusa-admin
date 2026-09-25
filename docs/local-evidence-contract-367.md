@@ -65,8 +65,8 @@ event. A photo upload alone never advances an order milestone.
    denied, a signed GET works then expires, and delete that object. Post the
    receipts on #367. Activation remains gated by #359, #320 and #332.
 
-If a Supabase target is approved later and its compatibility proof fails
-because of SDK checksum headers, set the private provider's S3 client
+If the production compatibility proof fails because of SDK checksum headers,
+set the private provider's S3 client
 `requestChecksumCalculation` and `responseChecksumValidation` to
 `WHEN_REQUIRED`, then repeat the proof. Do not infer compatibility from unit
 tests or change the public file provider.
