@@ -6,6 +6,13 @@ export function adminRouteCapability(path: string, method: string, body: any = {
   if (!isCanonicalStaffPath(path)) return null
   const p = path
   const read = method === "GET" || method === "HEAD"
+  if (/^\/admin\/grillers\/local-milestones\/orders$/i.test(p) || /^\/admin\/grillers\/local-milestones\/orders\/[^/]+$/i.test(p)) return read ? "milestones.drive" : null
+  if (/^\/admin\/grillers\/local-milestones\/orders\/[^/]+\/evidence$/i.test(p)) return read ? "milestones.drive" : null
+  if (/^\/admin\/grillers\/local-milestones\/orders\/[^/]+\/evidence\/[^/]+$/i.test(p)) return method === "GET" || method === "PUT" ? "milestones.drive" : null
+  if (/^\/admin\/grillers\/local-milestones\/exceptions$/i.test(p)) return read ? "milestones.office" : null
+  if (/^\/admin\/grillers\/local-milestones\/orders\/[^/]+\/events$/i.test(p)) return method === "POST" ? "milestones.drive" : null
+  if (/^\/admin\/grillers\/local-milestones\/orders\/[^/]+\/corrections$/i.test(p)) return method === "POST" ? "milestones.correct" : null
+  if (/^\/admin\/grillers\/local-milestones\/orders\/[^/]+\/assign$/i.test(p)) return method === "POST" ? "milestones.office" : null
   if (/^\/admin\/grillers\/staff-access$/i.test(p)) return read ? "customers.read" : null
   if (/^\/admin\/grillers\/staff-carts$/i.test(p)) return method === "POST" ? "customers.write" : null
   if (/^\/admin\/grillers\/staff-access\/customers\/[^/]+$/i.test(p)) return method === "POST" ? "team.manage" : null

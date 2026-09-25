@@ -41,3 +41,6 @@ if (process.env.TEST_TYPE === "integration:incoming-stock") {
 if (process.env.TEST_TYPE === "integration:order-promise") {
   module.exports.testMatch = ["**/integration-tests/order-promise/*.spec.[jt]s"];
 }
+if (process.env.TEST_TYPE === "integration:local-milestones") {
+  module.exports.testMatch = ["**/integration-tests/local-milestones/*.spec.[jt]s"];
+}

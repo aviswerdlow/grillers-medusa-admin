@@ -1,7 +1,7 @@
 import { configuredIds, STAFF_ROLES, staffAccessStatus, staffCapabilities, staffRole, staffSessionIsCurrent, type StaffRole } from "./staff-access-policy"
 import { StaffAccessDenied, type StaffPrincipal } from "./staff-principal"
 
-const confirmations: Record<StaffRole, string> = { customer: "REMOVE STAFF", staff: "STAFF", office: "OFFICE", picker: "PICKER", packer: "PACKER", manager: "MANAGER", merchandising_reviewer: "MERCHANDISING", super_admin: "SUPER ADMIN" }
+const confirmations: Record<StaffRole, string> = { customer: "REMOVE STAFF", staff: "STAFF", office: "OFFICE", driver: "DRIVER", picker: "PICKER", packer: "PACKER", manager: "MANAGER", merchandising_reviewer: "MERCHANDISING", super_admin: "SUPER ADMIN" }
 export class StaffRoleChangeConflict extends Error {}
 export class InvalidStaffRoleChange extends Error {}
 
@@ -19,6 +19,9 @@ export async function changeStaffRole(db: any, principal: StaffPrincipal, target
     || !Number.isSafeInteger(input.expected_version) || input.expected_version < 0
     || (input.final_charge_enabled !== undefined && typeof input.final_charge_enabled !== "boolean")) {
     throw new InvalidStaffRoleChange("Choose a role, provide the current version, an audit reason and the required confirmation.")
+  }
+  if (role === "driver" && process.env.GP_LOCAL_MILESTONES_ENABLED !== "true") {
+    throw new InvalidStaffRoleChange("The local delivery driver role is not enabled.")
   }
   if (principal.kind !== "operator" && !principal.capabilities.has("team.manage")) throw new StaffAccessDenied("Team administrator access is required.")
   if (!configuredIds("GP_PRIVILEGED_ADMIN_USER_IDS").size) throw new StaffAccessDenied("Configure and rehearse the separate recovery operator before changing staff access.")
@@ -47,7 +50,7 @@ export async function changeStaffRole(db: any, principal: StaffPrincipal, target
       role, final_charge_enabled: charge, previous_version: input.expected_version, version: input.expected_version + 1,
       staff_access_valid_after: cutoff, recovery: principal.kind === "operator" }
     const metadata = { ...previous, gp_staff_role: role, staff_role: role, role, account_role: role,
-      is_staff: role !== "customer", staff: role !== "customer", gp_staff: role !== "customer", staff_access: role !== "customer", phone_order_staff: role !== "customer",
+      is_staff: role !== "customer", staff: role !== "customer", gp_staff: role !== "customer", staff_access: role !== "customer", phone_order_staff: role !== "customer" && role !== "driver",
       staff_super_admin: role === "super_admin", staff_access_revoked: role === "customer", staff_bootstrap_override: true,
       staff_access_updated_at: now.toISOString(), staff_access_version: input.expected_version + 1, staff_access_valid_after: cutoff,
       final_charge_enabled: charge, can_charge_final_orders: charge, staff_final_charge_enabled: charge, catch_weight_charge_enabled: charge,

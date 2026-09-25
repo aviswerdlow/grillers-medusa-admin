@@ -37,10 +37,10 @@ const legacyOfficeRoles = new Set([
   "customer-service", "phone_orders", "phone-orders", "super_admin", "super-admin", "owner",
 ])
 
-export const STAFF_ROLES = ["customer", "staff", "office", "picker", "packer", "manager", "merchandising_reviewer", "super_admin"] as const
+export const STAFF_ROLES = ["customer", "staff", "office", "driver", "picker", "packer", "manager", "merchandising_reviewer", "super_admin"] as const
 export type StaffRole = typeof STAFF_ROLES[number]
 export type StaffCustomer = { id?: string; email?: string | null; first_name?: string | null; last_name?: string | null; metadata?: Record<string, unknown> | null }
-export type StaffCapability = "catalog.read" | "inventory.read" | "inventory.manage" | "orders.read" | "orders.support" | "customers.read" | "customers.write" | "communications" | "accounting" | "pick" | "pack" | "finalize" | "charge" | "fulfill" | "team.manage"
+export type StaffCapability = "catalog.read" | "inventory.read" | "inventory.manage" | "orders.read" | "orders.support" | "customers.read" | "customers.write" | "communications" | "accounting" | "pick" | "pack" | "finalize" | "charge" | "fulfill" | "team.manage" | "milestones.drive" | "milestones.office" | "milestones.correct"
 
 export function configuredIds(name: string): Set<string> {
   return new Set(String(process.env[name] || "").split(",").map(id => id.trim()).filter(Boolean))
@@ -69,7 +69,11 @@ export function staffCapabilities(customer: StaffCustomer | null): Set<StaffCapa
   const role = staffRole(customer)
   const caps = new Set<StaffCapability>()
   if (role === "customer") return caps
+  if (role === "driver") { caps.add("milestones.drive"); return caps }
   caps.add("catalog.read")
+  if (["staff", "office", "manager", "super_admin"].includes(role)) {
+    caps.add("milestones.drive"); caps.add("milestones.office"); caps.add("milestones.correct")
+  }
   if (["staff", "office", "picker", "packer", "manager", "super_admin"].includes(role)) {
     caps.add("inventory.read"); caps.add("orders.read")
   }
