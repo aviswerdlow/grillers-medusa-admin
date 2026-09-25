@@ -45,11 +45,13 @@ import {
   type AvailabilityLineInput,
 } from "../../../../../lib/inventory-allocation";
 import { emitOpsAlert } from "../../../../../lib/ops-alert";
-import { isOfflinePaymentApproved } from "../../../../../lib/gp-offline-payment";
 import {
-  evaluateCreditLimit,
-  creditHoldMetadata,
-} from "../../../../../lib/gp-credit-limit";
+  institutionalCheckoutAuthority,
+  institutionalDollarsToCents,
+  reserveInstitutionalCheckout,
+  type InstitutionalCheckoutAuthority,
+} from "../../../../../lib/gp-institutional-checkout";
+import { withInstitutionalFinalizationWrite } from "../../../../../lib/gp-institutional-finalization-lock";
 import { sanitizeOrderSmsConsentMetadata } from "../../../../../lib/communications/transactional-sms";
 
 import { ShippingInputError } from "../../../../../lib/shipping-weights";
@@ -487,34 +489,7 @@ async function retrieveOrder(req: MedusaRequest, orderId: string) {
   return data?.[0] || null;
 }
 
-/**
- * #286 — sum the customer's OPEN invoice (A/R) balance: the totals of their other invoice_ar
- * orders that are neither cancelled nor already marked paid. Used to enforce the credit limit.
- */
-async function computeOpenInvoiceBalance(
-  req: MedusaRequest,
-  customerId: string,
-  excludeOrderId: string
-): Promise<number> {
-  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY);
-  const { data } = await query.graph({
-    entity: "order",
-    fields: ["id", "total", "status", "metadata"],
-    filters: { customer_id: customerId },
-  });
-  let sum = 0;
-  for (const o of (data || []) as any[]) {
-    if (!o || o.id === excludeOrderId) continue;
-    const meta = metadataObject(o.metadata);
-    if (meta.payment_workflow !== PAYMENT_WORKFLOW_INVOICE_AR) continue;
-    if (o.status === "canceled" || meta.invoice_paid === true) continue;
-    const total = typeof o.total === "number" ? o.total : Number(o.total) || 0;
-    if (Number.isFinite(total) && total > 0) sum += total;
-  }
-  return sum;
-}
-
-/** #286 — the cart's current (estimated) total, used to evaluate the credit limit pre-completion. */
+/** The cart's current estimated total, used for a durable pre-completion reservation. */
 async function getCartTotal(
   req: MedusaRequest,
   cartId: string
@@ -554,7 +529,8 @@ async function placeInvoiceOrder(
     cartId: string;
     customer: any;
     staffTargetCustomerId?: string | null;
-    paymentTerms: string;
+    account: InstitutionalCheckoutAuthority;
+    reservationId: string;
     requireReview: boolean;
     ownedCart: any;
     legacyStaff: boolean;
@@ -564,7 +540,8 @@ async function placeInvoiceOrder(
     cartId,
     customer,
     staffTargetCustomerId,
-    paymentTerms,
+    account,
+    reservationId,
     requireReview,
     ownedCart,
     legacyStaff,
@@ -602,8 +579,6 @@ async function placeInvoiceOrder(
   });
   if (!inventoryReady) return;
 
-  const customerMeta = metadataObject(customer.metadata);
-
   // Invoice markers carried on the cart (copied to the order on completion) AND re-stamped on
   // the order. payment_workflow=INVOICE_AR keeps orderRequiresFinalCharge() false; the rest
   // drives QB A/R routing (#285).
@@ -611,54 +586,19 @@ async function placeInvoiceOrder(
     payment_workflow: PAYMENT_WORKFLOW_INVOICE_AR,
     payment_status: "invoice",
     gp_payment_method: "invoice",
-    gp_payment_terms: paymentTerms,
-    gp_credit_limit: customerMeta.gp_credit_limit ?? null,
+    gp_payment_terms: account.termsName,
+    gp_institutional_commitment_id: reservationId,
+    gp_institutional_source_revision: account.sourceRevision,
+    gp_institutional_source_last_success: account.lastSuccess,
     payment_setup_status: "not_applicable_invoice",
     final_charge_status: "not_applicable_invoice",
     fulfillment_gate_status: "open_invoice",
   };
 
-  // #286 (Codex P1): evaluate the credit limit BEFORE completing the cart, and stamp any hold
-  // onto the CART metadata. Medusa copies cart metadata to the order on completion, so the order
-  // is created already-held — a hold can never be lost in a post-completion failure window.
-  let creditMeta: Record<string, any> = {};
-  try {
-    const [outstanding, cartTotal] = await Promise.all([
-      computeOpenInvoiceBalance(req, customer.id, ""),
-      getCartTotal(req, cartId),
-    ]);
-    const evaluation = evaluateCreditLimit({
-      creditLimit: customerMeta.gp_credit_limit,
-      outstanding,
-      orderTotal: cartTotal,
-    });
-    if (evaluation.requiresSecondApproval) {
-      creditMeta = {
-        ...creditHoldMetadata(evaluation, new Date().toISOString()),
-        fulfillment_hold: {
-          held: true,
-          reason: "credit_limit_exceeded",
-          over_by: evaluation.overBy,
-        },
-      };
-    }
-  } catch {
-    // Fail safe: if exposure can't be computed, hold for review rather than extend credit blindly.
-    creditMeta = {
-      gp_credit_hold: {
-        held: true,
-        reason: "credit_check_unavailable",
-        placed_at: new Date().toISOString(),
-      },
-      fulfillment_hold: { held: true, reason: "credit_check_unavailable" },
-    };
-  }
-
   const checkoutMetadata = appendStaffAudit(
     {
       ...withoutCardPaymentMetadata(existingMetadata),
       ...invoiceFields,
-      ...creditMeta,
     },
     {
       action: "checkout_pay_by_invoice",
@@ -747,16 +687,17 @@ async function placeInvoiceOrder(
 
   // Track catch-weight packing/weighing via a finalization row, but NO payment setup (no card).
   // The final weight is invoiced (Phase 4) rather than charged.
-  const finalization = await ensureFinalizationForOrder(db, order);
+  const finalization = await withInstitutionalFinalizationWrite(
+    db, order, (workDb) => ensureFinalizationForOrder(workDb, order),
+    { readReleased: true }
+  );
 
-  // creditMeta was computed pre-completion and is already on the order via the cart copy; we
-  // re-stamp it here idempotently alongside the finalization fields.
+  // Re-stamp the source-backed reservation alongside the finalization fields.
   const metadata = {
     ...withoutCardPaymentMetadata(
       sanitizeCheckoutOrderSmsConsent(order.metadata, staffTargetCustomerId)
     ),
     ...invoiceFields,
-    ...creditMeta,
     catch_weight_status: "pending_pack",
     finalization_id: finalization.finalization.id,
     finalization_status: finalization.finalization.status,
@@ -799,6 +740,18 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       : await assertReviewOwner(req, ownedCart);
     if (ownedCart.customer_id !== customer.id && !legacyStaff)
       throw new OrderPromiseError("order_review_cart_unavailable", 403);
+    const institutionalCheck = wantsInvoice
+      ? await institutionalCheckoutAuthority(customer.id)
+      : null;
+    if (institutionalCheck && institutionalCheck.status !== "allow") {
+      return jsonError(
+        res,
+        institutionalCheck.status === "deny" ? 403 : 409,
+        institutionalCheck.status === "deny"
+          ? "This account is not approved to pay by invoice."
+          : "Invoice terms need a current account review."
+      );
+    }
     const accepted = requiresOrderReview(ownedCart, body)
       ? await acceptCheckoutReview(
           req.scope,
@@ -814,6 +767,10 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         )
       : null;
     if (accepted?.completed) {
+      // A recovered invoice completion must already have a durable reservation.
+      // Calling completeReviewedCart here without one could create an unfunded order.
+      if (wantsInvoice && !metadataObject(ownedCart.metadata).gp_institutional_commitment_id)
+        throw new OrderPromiseError("institutional_order_reservation_unverified", 409);
       const completion = await completeReviewedCart(req.scope, cartId);
       if (completion.errors?.length)
         throw new OrderPromiseError(
@@ -826,6 +783,8 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           "order_review_completion_recovery_required",
           503
         );
+      if (wantsInvoice && !metadataObject(originalOrder.metadata).gp_institutional_commitment_id)
+        throw new OrderPromiseError("institutional_order_reservation_unverified", 409);
       return res.status(200).json({ type: "order", order: originalOrder });
     }
     // Reviewed orders bind the exact displayed terms. During default-off rollout
@@ -839,24 +798,31 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     // #283: approved B2B accounts can place a no-card invoice order. Fail closed — a
     // non-approved customer asking to pay by invoice is rejected, never silently let through.
     if (wantsInvoice) {
-      if (!isOfflinePaymentApproved((customer as any).metadata)) {
-        return jsonError(
-          res,
-          403,
-          "This account is not approved to pay by invoice."
-        );
-      }
+      if (!institutionalCheck || institutionalCheck.status !== "allow")
+        return jsonError(res, 409, "Invoice terms need a current account review.");
+      const account = institutionalCheck.account;
+      if (accepted && accepted.snapshot.promise.terms.invoice_terms !== account.termsName)
+        return jsonError(res, 409, "The displayed invoice terms have changed. Review the order again.");
+      const amountCents = institutionalDollarsToCents(await getCartTotal(req, cartId));
+      const inventoryReady = await assertCartInventoryAvailable({
+        req, res, cartId, customerId: customer.id,
+      });
+      if (!inventoryReady) return;
+      const reservationId = `cart:${cartId}`;
+      const credit = await reserveInstitutionalCheckout({
+        db: req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION),
+        account,
+        reservationId,
+        amountCents,
+      });
+      if (credit.status !== "reserved")
+        return jsonError(res, 409, "Institutional credit is on hold for review.");
       return await placeInvoiceOrder(req, res, {
         cartId,
         customer,
         staffTargetCustomerId,
-        // Preserve current-main invoice behavior only in the compatibility lane;
-        // required review still rejects approval without actual account terms.
-        paymentTerms: accepted
-          ? accepted.snapshot.promise.terms.invoice_terms!
-          : typeof customer.metadata?.gp_payment_terms === "string"
-          ? customer.metadata.gp_payment_terms
-          : "Net 10",
+        account,
+        reservationId,
         requireReview: Boolean(accepted),
         ownedCart,
         legacyStaff,
@@ -1034,7 +1000,10 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       );
     }
 
-    const finalization = await ensureFinalizationForOrder(db, order);
+    const finalization = await withInstitutionalFinalizationWrite(
+      db, order, (workDb) => ensureFinalizationForOrder(workDb, order),
+      { readReleased: true }
+    );
     await ensurePaymentSetup(db, {
       order,
       cartId,

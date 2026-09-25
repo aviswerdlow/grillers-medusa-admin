@@ -14,6 +14,18 @@ import {
 import { FINALIZATION_PACKED_PENDING_CHARGE_EVENT } from "../../../../../../../lib/auto-finalize-charge"
 import { requestStaffPrincipal } from "../../../../../../../lib/staff-principal"
 import {
+  institutionalCheckoutAuthority,
+  institutionalDollarsToCents,
+  reserveInstitutionalCheckout,
+} from "../../../../../../../lib/gp-institutional-checkout"
+import { withInstitutionalFinalizationWrite } from "../../../../../../../lib/gp-institutional-finalization-lock"
+import { recordDeniedInstitutionalRelease } from "../../../../../../../lib/gp-institutional-override-audit"
+import {
+  institutionalReleaseIntent,
+  persistInstitutionalReleaseIntent,
+  reconcileInstitutionalReleaseIntent,
+} from "../../../../../../../lib/gp-institutional-release-intent"
+import {
   emitFinalizationRouteFailureAlert,
   jsonError,
   loadFinalizationOrderForRoute,
@@ -28,64 +40,120 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   })
   if (!order) return
 
+  let deniedInstitutionalReason: string | null = null
   try {
     const db = req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION)
     const orderModule = req.scope.resolve(Modules.ORDER)
     const body = (req.body || {}) as Record<string, any>
     const staffAudit = staffAuditFields(req, body)
-    let shippingCostMetadata = {}
-    if (isInvoiceOrder(order) && orderRequiresPackageCapture(order)) {
-      const preview = await previewFinalization(db, order)
-      const quoted = await quoteWwexFinalizationShipping({
-        order,
-        preview,
-        logger: req.scope.resolve(ContainerRegistrationKeys.LOGGER),
-      })
-      if (!quoted || quoted.status !== "quoted")
-        throw new Error(
-          "Shipping needs review before this invoice order can be released."
-        )
-      shippingCostMetadata = quoted.metadata
-    }
-    const approved = await approveFinalization(
-      db,
-      order,
-      staffAuditActorId(staffAudit)
-    )
-    // #283 (Codex P2): use the status approveFinalization actually set — invoice orders are
-    // released_to_fulfillment (no card charge), card orders are packed_pending_charge.
-    const approvedStatus = approved.finalization.status
-    // #285: an invoice (A/R) order, on release, stamps the QB invoice-posting envelope so the
-    // resulting order.updated re-posts to the sync and creates the writer job — an UNPAID Invoice
-    // in A/R (no card charge, no ReceivePayment).
-    const metadata = isInvoiceOrder(order)
-      ? invoiceArOrderMetadata({
-          order: {
+    const { approved, approvedStatus } = await withInstitutionalFinalizationWrite(
+      db, order, async (workDb) => {
+        let shippingCostMetadata = {}
+        if (isInvoiceOrder(order) && orderRequiresPackageCapture(order)) {
+          const preview = await previewFinalization(workDb, order)
+          const quoted = await quoteWwexFinalizationShipping({
+            order,
+            preview,
+            logger: req.scope.resolve(ContainerRegistrationKeys.LOGGER),
+          })
+          if (!quoted || quoted.status !== "quoted")
+            throw new Error("Shipping needs review before this invoice order can be released.")
+          shippingCostMetadata = quoted.metadata
+        }
+        let reservedCents: number | null = null
+        if (isInvoiceOrder(order) && process.env.GP_INSTITUTIONAL_TERMS_ENABLED === "true") {
+          const commitmentId = metadataObject(order.metadata).gp_institutional_commitment_id
+          if (typeof commitmentId !== "string" || commitmentId !== `cart:${order.cart_id}` ||
+              typeof order.customer_id !== "string" || !order.customer_id) {
+            throw new Error("Institutional order identity or reservation is unverified.")
+          }
+          const authority = await institutionalCheckoutAuthority(order.customer_id)
+          if (authority.status !== "allow") {
+            deniedInstitutionalReason = authority.reason
+            throw new Error("Institutional terms need a current account review.")
+          }
+          const preview = await previewFinalization(workDb, {
             ...order,
             metadata: { ...metadataObject(order.metadata), ...shippingCostMetadata },
-          },
-          finalization: approved.finalization,
-          lines: approved.lines,
-          packages: approved.packages,
-          actorId: staffAuditActorId(staffAudit),
-          staffAudit,
-        })
-      : appendStaffAudit(
-          {
-            ...metadataObject(order.metadata),
-            finalization_id: approved.finalization.id,
-            finalization_status: approvedStatus,
-            catch_weight_status: approvedStatus,
-            final_total: approved.totals.final_order_total,
-            catch_weight_delta: approved.totals.delta_total,
-          },
-          {
-            action: "catch_weight_finalization_approved",
-            status: approvedStatus,
-            ...staffAudit,
+          })
+          if (preview.errors.length) {
+            throw new Error("Finalization cannot be approved until all line errors are fixed.")
           }
+          reservedCents = institutionalDollarsToCents(preview.totals.final_order_total)
+          const credit = await reserveInstitutionalCheckout({
+            db,
+            transaction: workDb,
+            account: authority.account,
+            reservationId: commitmentId,
+            amountCents: reservedCents,
+          })
+          if (credit.status !== "reserved") {
+            deniedInstitutionalReason = credit.reason
+            throw new Error("Institutional credit is on hold for review.")
+          }
+        }
+        const approved = await approveFinalization(
+          workDb,
+          order,
+          staffAuditActorId(staffAudit)
         )
-    await orderModule.updateOrders(order.id, { metadata })
+        if (reservedCents !== null &&
+            institutionalDollarsToCents(approved.totals.final_order_total) !== reservedCents) {
+          throw new Error("Packed invoice total changed during credit reservation.")
+        }
+        const approvedStatus = approved.finalization.status
+        const metadata = isInvoiceOrder(order)
+          ? invoiceArOrderMetadata({
+              order: {
+                ...order,
+                metadata: { ...metadataObject(order.metadata), ...shippingCostMetadata },
+              },
+              finalization: approved.finalization,
+              lines: approved.lines,
+              packages: approved.packages,
+              actorId: staffAuditActorId(staffAudit),
+              staffAudit,
+            })
+          : appendStaffAudit(
+              {
+                ...metadataObject(order.metadata),
+                finalization_id: approved.finalization.id,
+                finalization_status: approvedStatus,
+                catch_weight_status: approvedStatus,
+                final_total: approved.totals.final_order_total,
+                catch_weight_delta: approved.totals.delta_total,
+              },
+              {
+                action: "catch_weight_finalization_approved",
+                status: approvedStatus,
+                ...staffAudit,
+              }
+            )
+        if (reservedCents !== null) {
+          const intent = institutionalReleaseIntent({
+            orderId: order.id,
+            commitmentId: metadataObject(order.metadata).gp_institutional_commitment_id,
+            baseMetadata: order.metadata,
+            targetMetadata: metadata,
+            amountCents: reservedCents,
+          })
+          await persistInstitutionalReleaseIntent(workDb, approved.finalization.id, intent)
+        } else {
+          await orderModule.updateOrders(order.id, { metadata })
+        }
+        return { approved, approvedStatus }
+      }
+    )
+    if (isInvoiceOrder(order) && process.env.GP_INSTITUTIONAL_TERMS_ENABLED === "true") {
+      // The credit and finalization transaction has committed. Only now may
+      // the order.updated path expose the unpaid invoice to the QBD writer.
+      const result = await reconcileInstitutionalReleaseIntent({
+        db, orderModule, orderId: order.id,
+      })
+      if (result.status !== "applied") {
+        throw new Error("Institutional release needs reconciliation before fulfillment.")
+      }
+    }
 
     // #9/#235: signal the fixed-price auto-charge trigger. Only for card orders now awaiting
     // the final charge (packed_pending_charge) — never invoice orders, which approve releases
@@ -120,6 +188,27 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       ...approved,
     })
   } catch (error) {
+    if (deniedInstitutionalReason) {
+      try {
+        await recordDeniedInstitutionalRelease({
+          db: req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION),
+          orderId: order.id,
+          actorId: staffAuditActorId(staffAuditFields(req)),
+          requestedReason: (req.body as Record<string, unknown> | null)?.institutional_override_reason,
+          authorityReason: deniedInstitutionalReason,
+        })
+      } catch (auditError) {
+        await emitFinalizationRouteFailureAlert({
+          req,
+          action: "institutional_denied_release_audit_failed",
+          error: auditError,
+          order,
+          path: "src/api/admin/grillers/orders/[id]/finalization/approve/route.ts",
+          status: 503,
+        })
+        return jsonError(res, 503, "Institutional release was denied; its audit needs review.")
+      }
+    }
     await emitFinalizationRouteFailureAlert({
       req,
       action: "approve_finalization",

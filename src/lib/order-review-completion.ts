@@ -3,6 +3,7 @@ import { completeCartWorkflow } from "@medusajs/core-flows";
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
 import { bindOrderPromise, OrderPromiseError } from "./order-promise";
 import { ensureFinalizationForOrder } from "./catch-weight-finalization";
+import { withInstitutionalFinalizationWrite } from "./gp-institutional-finalization-lock";
 
 /** Keep the native return object intact: order IDs alone are not completion
  * evidence. If binding fails, replay this same cart; never create a replacement. */
@@ -43,9 +44,11 @@ export async function completeReviewedCart(
           completion
         );
       }
-      await ensureFinalizationForOrder(
+      await withInstitutionalFinalizationWrite(
         scope.resolve(ContainerRegistrationKeys.PG_CONNECTION),
-        data[0]
+        data[0],
+        (db) => ensureFinalizationForOrder(db, data[0]),
+        { readReleased: true }
       );
     } catch {
       throw new OrderPromiseError(

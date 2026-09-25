@@ -6,6 +6,7 @@ import {
   metadataObject,
   returnFinalizationToPacking,
 } from "../../../../../../../lib/catch-weight-finalization"
+import { withInstitutionalFinalizationWrite } from "../../../../../../../lib/gp-institutional-finalization-lock"
 import {
   emitFinalizationRouteFailureAlert,
   jsonError,
@@ -31,23 +32,25 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       ? body.reason.trim()
       : "Front office requested packing correction before charge."
   try {
-    const detail = await returnFinalizationToPacking(db, order, actor, reason)
-
-    const metadata = appendStaffAudit(
-      {
-        ...metadataObject(order.metadata),
-        finalization_id: detail.finalization.id,
-        finalization_status: FINALIZATION_PACKED_PENDING_REVIEW,
-        catch_weight_status: FINALIZATION_PACKED_PENDING_REVIEW,
-      },
-      {
-        action: "catch_weight_returned_to_packing",
-        status: FINALIZATION_PACKED_PENDING_REVIEW,
-        reason,
-        ...staffAudit,
-      }
-    )
-    await orderModule.updateOrders(order.id, { metadata })
+    const detail = await withInstitutionalFinalizationWrite(db, order, async (workDb) => {
+      const detail = await returnFinalizationToPacking(workDb, order, actor, reason)
+      const metadata = appendStaffAudit(
+        {
+          ...metadataObject(order.metadata),
+          finalization_id: detail.finalization.id,
+          finalization_status: FINALIZATION_PACKED_PENDING_REVIEW,
+          catch_weight_status: FINALIZATION_PACKED_PENDING_REVIEW,
+        },
+        {
+          action: "catch_weight_returned_to_packing",
+          status: FINALIZATION_PACKED_PENDING_REVIEW,
+          reason,
+          ...staffAudit,
+        }
+      )
+      await orderModule.updateOrders(order.id, { metadata })
+      return detail
+    })
 
     res.status(200).json({
       order,

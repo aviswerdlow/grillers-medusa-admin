@@ -1476,6 +1476,16 @@ export async function ensureFinalizationForOrder(
     .whereNull("deleted_at")
     .first()
 
+  // A released institutional invoice is an immutable accounting snapshot.
+  // Later reads must not repair its lines or silently recalculate its amount.
+  if (process.env.GP_INSTITUTIONAL_TERMS_ENABLED === "true" &&
+      isInvoiceOrder(order) && existing?.status === FINALIZATION_RELEASED_TO_FULFILLMENT) {
+    const lines = await db("gp_order_finalization_line")
+      .where({ finalization_id: existing.id })
+      .whereNull("deleted_at")
+    return { finalization: existing, lines }
+  }
+
   const breakdown = accepted
     ? {
         estimated_item_total: accepted.promise.lines.reduce(
