@@ -142,12 +142,14 @@ describe("institutional collections (#370 synthetic fixtures)", () => {
     expect(cancelled.invoiceTxnId).toBe("TEST_INVOICE_E")
   })
 
-  it("quarantines an event ID reused with a different payload", () => {
+  it("quarantines an event ID reused with another payment TxnID without double-counting", () => {
     const posted = apply(acceptedInstitutionalOrder("TEST_ORDER_E", 50000), invoice)
-    const conflicted = apply(posted, { ...invoice, finalCents: 60000 })
-    expect(view(conflicted).status).toBe("quarantined")
-    expect(view(conflicted).quarantineReasons).toContain("conflicting_event:TEST_POST_E")
-    expect(conflicted.invoiceCents).toBe(50000)
+    const receipt = { type: "collection_confirmed" as const, eventId: "TEST_REUSED_PAYMENT_EVENT", requestKey: null, paymentTxnId: "TEST_PAYMENT_1", invoiceTxnId: "TEST_INVOICE_E", appliedCents: 20000, sourceRevision: "TEST_REV_2" }
+    const first = apply(posted, receipt)
+    const conflicted = apply(first, { ...receipt, paymentTxnId: "TEST_PAYMENT_2" })
+    expect(view(conflicted)).toMatchObject({ status: "quarantined", confirmedCollectedCents: 20000, appliedReceiptCount: 1 })
+    expect(view(conflicted).quarantineReasons).toContain("conflicting_event:TEST_REUSED_PAYMENT_EVENT")
+    expect(conflicted.receipts).not.toHaveProperty("TEST_PAYMENT_2")
   })
 
   it("quarantines changed or cross-kind collection request keys", () => {
