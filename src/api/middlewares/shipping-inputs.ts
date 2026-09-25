@@ -31,6 +31,12 @@ export function publicShippingProjection(value: any): any {
   if (Array.isArray(value)) return value.map(publicShippingProjection);
   if (!value || typeof value !== "object" || value instanceof Date)
     return value;
+  // Medusa's BigNumber serializes to a number. Copying its enumerable fields
+  // first discards toJSON and exposes { numeric_, raw_, bignumber_ } instead.
+  if (typeof value.toJSON === "function") {
+    const serialized = value.toJSON();
+    if (serialized !== value) return publicShippingProjection(serialized);
+  }
   return Object.fromEntries(
     Object.entries(value)
       .filter(([key]) => !privateKeys.has(key))
