@@ -1,6 +1,6 @@
 import path from "node:path"
-import type { Server } from "node:http"
-import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
+import { request as httpRequest, type Server } from "node:http"
+import { ContainerRegistrationKeys, Modules, generateEntityId } from "@medusajs/framework/utils"
 import middlewares from "../middlewares"
 import { verifiedStaffAuditFields } from "../../lib/staff-principal"
 import { staffBoundaryMode } from "../../lib/staff-boundary-rollout"
@@ -14,6 +14,7 @@ const medusaRoot = path.dirname(require.resolve("@medusajs/medusa/package.json")
 const nativeCapture = require(path.join(medusaRoot, "dist/api/admin/payments/[id]/capture/route.js"))
 const nativeRefresh = require(path.join(medusaRoot, "dist/api/auth/token/refresh/route.js"))
 const nativeSession = require(path.join(medusaRoot, "dist/api/auth/session/route.js"))
+const nativeInviteMiddlewares = require(path.join(medusaRoot, "dist/api/admin/invites/middlewares.js")).adminInviteRoutesMiddlewares
 const { RoutesSorter } = require(path.join(path.dirname(require.resolve("@medusajs/framework/http")), "routes-sorter.js"))
 
 describe("Staff gateway (installed Medusa authentication and native handlers)", () => {
@@ -23,7 +24,8 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
   let customers: Record<string, any>
   const warn = jest.fn()
   const effects = jest.fn(), customerRead = jest.fn(), userRead = jest.fn()
-  const authRead = jest.fn(async () => ({ id: "auth_fixture", app_metadata: { customer_id: "cus_staff" } }))
+  const authRead = jest.fn(async (id: string) => id === "auth_unregistered"
+    ? { id, app_metadata: {} } : { id: "auth_fixture", app_metadata: { customer_id: "cus_staff" } })
   const now = () => Math.floor(Date.now() / 1000)
   const wrap = (fn: any) => (req: any, res: any, next: any) => Promise.resolve(fn(req, res, next)).catch(next)
 
@@ -48,8 +50,12 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     const selected = middlewares.routes!.filter((r: any) => r.matcher === "/admin/*" || r.matcher.startsWith("/admin/customers")
       || r.matcher === "/auth/token/refresh" || r.matcher === "/auth/session" || (r.matcher === "/store/customers/me" && r.methods.includes("GET")))
     for (const route of new RoutesSorter(selected).sort()) {
-      for (const method of route.methods || ["ALL"]) app[method.toLowerCase()](route.matcher, ...route.middlewares.map(wrap))
+      if (!route.methods?.length || route.methods.includes("ALL")) app.use(route.matcher, ...route.middlewares.map(wrap))
+      else for (const method of route.methods) app[method.toLowerCase()](route.matcher, ...route.middlewares.map(wrap))
     }
+    const inviteAccept = nativeInviteMiddlewares.find((r: any) => r.matcher === "/admin/invites/accept" && r.method === "POST")
+    app.post(inviteAccept.matcher, ...inviteAccept.middlewares.map(wrap), (req: any, res: any) =>
+      res.json({ auth_identity_id: req.auth_context?.auth_identity_id, actor_id: req.auth_context?.actor_id || null }))
     app.post("/admin/payments/:id/capture", (req: any, _res: any, next: any) => { req.validatedBody = req.body; next() }, wrap(nativeCapture.POST))
     app.post("/auth/token/refresh", wrap(nativeRefresh.POST))
     app.post("/auth/session", wrap(nativeSession.POST))
@@ -82,6 +88,20 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     if (options.token !== null) headers["x-gp-staff-authorization"] = `Bearer ${options.token || token()}`
     const res = await fetch(baseUrl + route, { method: options.method || "POST", headers, ...(options.method === "GET" ? {} : { body: JSON.stringify(options.body || { staff_actor_customer_id: "forged_owner", staff_actor_email: "forged@example.test", staff_actor_name: "Forged" }) }) })
     return { status: res.status, body: await res.json().catch(() => ({})) as any }
+  }
+  async function rawRequest(route: string, body: any = {}) {
+    return await new Promise<{ status: number; body: any }>((resolve, reject) => {
+      const payload = JSON.stringify(body)
+      const req = httpRequest({ hostname: "127.0.0.1", port: (server.address() as any).port, path: route,
+        method: "POST", headers: { authorization: `Basic ${Buffer.from("sk_unknown:").toString("base64")}`,
+          "content-type": "application/json", "content-length": Buffer.byteLength(payload) } }, res => {
+        let value = ""
+        res.on("data", chunk => { value += chunk })
+        res.on("end", () => resolve({ status: res.statusCode!, body: JSON.parse(value) }))
+      })
+      req.on("error", reject)
+      req.end(payload)
+    })
   }
   const moneyAndIdentityRoutes = ["/admin/payments/pay_fixture/capture", "/admin/grillers/payments/pay_fixture/refund", "/admin/customers/cus_target",
     "/admin/grillers/staff-access/customers/cus_target", "/admin/grillers/orders/order_fixture/accounting-action", "/admin/grillers/orders/order_fixture/finalization/charge-and-release"]
@@ -136,6 +156,68 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     process.env.GP_ADMIN_READ_ONLY_API_KEY_IDS = "apk_gateway"
     expect((await request("/admin/products", { token: null, method: "GET" })).status).toBe(403)
   })
+  it.each(["log", "enforce"])("applies the reader GET allow-list in %s mode", async mode => {
+    process.env.GP_STAFF_BOUNDARY_MODE = mode
+    expect((await request("/admin/products", { key: "sk_reader", token: null, method: "GET" })).status).toBe(200)
+    expect((await request("/admin/invites", { key: "sk_reader", token: null, method: "GET" })).status).toBe(403)
+    expect((await request("/admin/products/", { key: "sk_reader", token: null, method: "GET" })).status).toBe(403)
+  })
+  it.each(["log", "enforce"])("applies the native reader GET allow-list in %s mode", async mode => {
+    process.env.GP_STAFF_BOUNDARY_MODE = mode
+    process.env.GP_ADMIN_READ_ONLY_USER_IDS = "usr_reader"
+    const authorization = `Bearer ${token({ actor_type: "user", actor_id: "usr_reader" })}`
+    expect((await request("/admin/orders?limit=1", { authorization, token: null, method: "GET" })).status).toBe(200)
+    expect((await request("/admin/invites", { authorization, token: null, method: "GET" })).status).toBe(403)
+    expect((await request("/admin/products", { authorization, token: null })).status).toBe(403)
+  })
+  it.each(["log", "enforce"])("blocks native draft conversion while institutional terms are off in %s mode", async mode => {
+    process.env.GP_STAFF_BOUNDARY_MODE = mode
+    delete process.env.GP_INSTITUTIONAL_TERMS_ENABLED
+    const draftId = generateEntityId(undefined, "draft")
+    expect(draftId).toMatch(/[A-Z]/)
+    for (const route of [`/admin/draft-orders/${draftId}/convert-to-order`, `/ADMIN/DRAFT-ORDERS/${draftId}/CONVERT-TO-ORDER`]) {
+      expect((await request(route)).status).toBe(403)
+      expect((await rawRequest(`${route}#x`)).status).toBe(403)
+    }
+    expect(effects).not.toHaveBeenCalled()
+  })
+  it.each(["/admin/%70roducts", "/admin//products", "/admin/products/"])("never grants a reader an ambiguous route %s", async route => {
+    const result = await request(route, { key: "sk_reader", token: null, method: "GET" })
+    expect(result.status).not.toBe(200)
+    expect(effects).not.toHaveBeenCalled()
+  })
+  it.each(["log", "enforce"])("keeps uppercase Medusa IDs usable for owner and service requests in %s mode", async mode => {
+    process.env.GP_STAFF_BOUNDARY_MODE = mode
+    const orderId = generateEntityId(undefined, "order")
+    const productId = generateEntityId(undefined, "prod")
+    const inventoryId = generateEntityId(undefined, "iitem")
+    const locationId = generateEntityId(undefined, "sloc")
+    expect(orderId).toMatch(/[A-Z]/)
+    expect((await request(`/ADMIN/ORDERS/${orderId}`, { method: "GET", token: null,
+      authorization: `Bearer ${token({ actor_type: "user", actor_id: "usr_recovery" })}` })).status).toBe(200)
+    expect((await request(`/admin/orders/${orderId}`, { key: "sk_reader", token: null, method: "GET" })).status).toBe(200)
+    expect((await request(`/admin/inventory-items/${inventoryId}/location-levels`, { key: "sk_reader", token: null, method: "GET" })).status).toBe(200)
+    process.env.GP_QBD_CATALOG_API_KEY_IDS = "apk_unknown"
+    expect((await request(`/ADMIN/PRODUCTS/${productId}`, { key: "sk_unknown", token: null, body: { title: "Fixture" } })).status).toBe(200)
+    expect((await request(`/admin/inventory-items/${inventoryId}/location-levels/${locationId}`, { key: "sk_unknown", token: null, body: {} })).status).toBe(200)
+    delete process.env.GP_QBD_CATALOG_API_KEY_IDS
+    process.env.GP_COMMUNICATIONS_ADMIN_API_KEY_IDS = "apk_unknown"
+    expect((await request(`/admin/orders/${orderId}`, { key: "sk_unknown", token: null,
+      body: { metadata: { review_request_sent_at: "2026-09-21T00:00:00.000Z" } } })).status).toBe(200)
+    delete process.env.GP_COMMUNICATIONS_ADMIN_API_KEY_IDS
+  })
+  it("rejects raw fragments before order-review and customer audit guards in log mode", async () => {
+    process.env.GP_STAFF_BOUNDARY_MODE = "log"
+    process.env.GP_ORDER_REVIEW_ENFORCEMENT = "required"
+    const draftId = generateEntityId(undefined, "draft")
+    expect((await request(`/ADMIN/DRAFT-ORDERS/${draftId}/CONVERT-TO-ORDER`, { key: "sk_unknown", token: null })).status).toBe(403)
+    for (const path of ["/admin/orders#x", "/admin/draft-orders#x", `/ADMIN/DRAFT-ORDERS/${draftId}/CONVERT-TO-ORDER#x`,
+      "/admin/customers/cus_target#/addresses"]) {
+      expect((await rawRequest(path)).status).toBe(403)
+    }
+    expect(effects).not.toHaveBeenCalled()
+    delete process.env.GP_ORDER_REVIEW_ENFORCEMENT
+  })
   it("restricts a parity key to the original-order GET even when also listed as a broad reader", async () => {
     process.env.GP_ADMIN_READ_ONLY_API_KEY_IDS = "apk_reader,apk_parity"
     const route = "/admin/grillers/analytics/order-promises"
@@ -167,6 +249,29 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     expect((await request("/admin/users", { authorization, token: null })).status).toBe(200)
     process.env.GP_PRIVILEGED_ADMIN_USER_IDS = ""
     expect((await request("/admin/users", { authorization, token: null })).status).toBe(403)
+  })
+  it("leaves exactly POST /admin/invites/accept to Medusa's unregistered-user middleware", async () => {
+    const authorization = `Bearer ${token({ actor_type: "user", actor_id: undefined, auth_identity_id: "auth_unregistered" })}`
+    const result = await request("/admin/invites/accept?token=fixture-invite", {
+      authorization, token: null, body: { email: "recovery@example.test" },
+    })
+    expect(result.status).toBe(200)
+    expect(result.body).toEqual({ auth_identity_id: "auth_unregistered", actor_id: null })
+    expect(effects).not.toHaveBeenCalled()
+  })
+  it.each([
+    ["GET", "/admin/invites/accept"], ["POST", "/admin/invites/accept/"],
+    ["POST", "/admin/invites"], ["GET", "/admin/users"],
+    ["GET", "/admin/orders"], ["POST", "/admin/grillers/staff-access/customers/cus_target"],
+  ])("still requires a registered user for %s %s", async (method, route) => {
+    const authorization = `Bearer ${token({ actor_type: "user", actor_id: undefined, auth_identity_id: "auth_unregistered" })}`
+    expect((await request(route, { method, authorization, token: null, body: { email: "recovery@example.test" } })).status).toBe(401)
+    expect(effects).not.toHaveBeenCalled()
+  })
+  it.each(["/ADMIN/invites/accept", "/admin/invites/%61ccept", "/admin//invites/accept"])("does not exempt a nonliteral invite path %s", async route => {
+    const authorization = `Bearer ${token({ actor_type: "user", actor_id: undefined, auth_identity_id: "auth_unregistered" })}`
+    expect((await request(route, { authorization, token: null })).status).not.toBe(200)
+    expect(effects).not.toHaveBeenCalled()
   })
   it("denies when fresh grant lookup is unavailable", async () => {
     customerRead.mockRejectedValueOnce(new Error("isolated database outage"))

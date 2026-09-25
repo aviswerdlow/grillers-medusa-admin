@@ -39,8 +39,24 @@ import {
 
 import { filterPublicCatalog, guardNewCartItems, guardAddedCartItem, guardUpdatedCartItem, guardCompletedCart, guardCartPaymentSession, guardInventoryVariants, guardInventoryResolution } from "./middlewares/public-catalog"
 import { guardCustomerContactWrite, guardCustomerProvenanceCreate } from "./middlewares/customer-contact"
+import { staffRequestPath } from "../lib/staff-request-path"
 
 const MIDDLEWARES_PATH = "src/api/middlewares.ts"
+
+// Native Medusa authenticates this bootstrap route with allowUnregistered.
+// The global admin guard must leave exactly this method and literal path to it.
+function isNativeInviteAcceptance(req: MedusaRequest): boolean {
+  return req.method === "POST" && staffRequestPath(req) === "/admin/invites/accept"
+}
+
+const authenticateAdminUser = authenticate("user", ["session", "bearer", "api-key"])
+function authenticateAdminExceptInvite(req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) {
+  return isNativeInviteAcceptance(req) ? next() : authenticateAdminUser(req, res, next)
+}
+
+function enforceStaffCapabilitiesExceptInvite(req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) {
+  return isNativeInviteAcceptance(req) ? next() : enforceStaffCapabilities(req, res, next)
+}
 
 /**
  * Medusa validates Stripe signatures inside its delayed payment-webhook
@@ -511,6 +527,8 @@ export function extractAddressFromBody(body: unknown): EffectiveAddress | null {
  */
 export function resolveCartIdFromRequest(req: {
   params?: Record<string, any>
+  originalUrl?: string
+  url?: string
   path?: string
 }): string | null {
   const fromParams =
@@ -520,7 +538,7 @@ export function resolveCartIdFromRequest(req: {
     return fromParams.trim()
   }
 
-  const path = typeof req.path === "string" ? req.path : ""
+  const path = staffRequestPath(req)
   const match = path.match(/\/store\/carts\/([^/?]+)/)
   if (match?.[1]) {
     return decodeURIComponent(match[1])
@@ -538,6 +556,8 @@ export function resolveCartIdFromRequest(req: {
 export async function dropUnserviceableShippingMethods(req: {
   scope: { resolve: (key: string) => any }
   params?: Record<string, any>
+  originalUrl?: string
+  url?: string
   path?: string
   body?: unknown
 }): Promise<string[]> {
@@ -694,8 +714,8 @@ export default defineMiddlewares({
     {
       matcher: "/admin/*",
       middlewares: [
-        authenticate("user", ["session", "bearer", "api-key"]),
-        enforceStaffCapabilities,
+        authenticateAdminExceptInvite,
+        enforceStaffCapabilitiesExceptInvite,
       ],
     },
     {
