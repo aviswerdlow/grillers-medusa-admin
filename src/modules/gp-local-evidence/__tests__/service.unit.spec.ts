@@ -9,7 +9,12 @@ const options = {
 
 describe("#367 private Medusa file provider", () => {
   const original = process.env.GP_LOCAL_MILESTONES_ENABLED
+  const originalPublicBucket = process.env.S3_BUCKET
   beforeEach(() => { process.env.GP_LOCAL_MILESTONES_ENABLED = "true" })
+  afterEach(() => {
+    if (originalPublicBucket === undefined) delete process.env.S3_BUCKET
+    else process.env.S3_BUCKET = originalPublicBucket
+  })
   afterAll(() => { if (original === undefined) delete process.env.GP_LOCAL_MILESTONES_ENABLED; else process.env.GP_LOCAL_MILESTONES_ENABLED = original })
 
   it("uploads to a separate bucket with no ACL or public URL", async () => {
@@ -33,5 +38,28 @@ describe("#367 private Medusa file provider", () => {
     await expect(provider.getPresignedDownloadUrl({ fileKey: key, expiresInSeconds: 301 })).rejects.toThrow("invalid_evidence_link_lifetime")
     process.env.GP_LOCAL_MILESTONES_ENABLED = "false"
     await expect(provider.getPresignedDownloadUrl({ fileKey: key })).rejects.toThrow("local_milestones_disabled")
+  })
+
+  it("rejects the public media bucket and each missing private setting", async () => {
+    process.env.S3_BUCKET = options.bucket
+    await expect(new GpLocalEvidenceFileService({}, options)
+      .getPresignedDownloadUrl({ fileKey: key })).rejects.toThrow("private_evidence_provider_unconfigured")
+    delete process.env.S3_BUCKET
+    for (const setting of Object.keys(options) as (keyof typeof options)[]) {
+      const provider = new GpLocalEvidenceFileService({}, { ...options, [setting]: undefined })
+      await expect(provider.getPresignedDownloadUrl({ fileKey: key }))
+        .rejects.toThrow("private_evidence_provider_unconfigured")
+    }
+  })
+
+  it("rejects an oversized provider body before S3 receives it", async () => {
+    const provider = new GpLocalEvidenceFileService({}, options)
+    const send = jest.fn()
+    ;(provider as any).client_ = { send }
+    await expect(provider.upload({
+      filename: key, mimeType: "image/jpeg",
+      content: Buffer.alloc(10 * 1024 * 1024 + 1).toString("binary"), access: "private",
+    })).rejects.toThrow("invalid_evidence_upload")
+    expect(send).not.toHaveBeenCalled()
   })
 })

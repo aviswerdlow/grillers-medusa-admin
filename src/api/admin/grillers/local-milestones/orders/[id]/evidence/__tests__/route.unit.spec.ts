@@ -1,4 +1,5 @@
 import { StaffAccessDenied, resolveStaffPrincipal } from "../../../../../../../../lib/staff-principal"
+import { readEvidenceBytes } from "../../../../../../../../lib/local-evidence-http"
 import { GET } from "../route"
 import { PUT } from "../[uploadId]/route"
 
@@ -40,5 +41,16 @@ describe("#367 evidence route authentication", () => {
     expect(list.statusCode).toBe(404)
     expect(upload.statusCode).toBe(404)
     expect(resolveStaffPrincipal).not.toHaveBeenCalled()
+  })
+
+  it("bounds a chunked raw body before it reaches storage", async () => {
+    const request: any = {
+      async *[Symbol.asyncIterator]() {
+        yield Buffer.alloc(10 * 1024 * 1024)
+        yield Buffer.from([1])
+      },
+    }
+    await expect(readEvidenceBytes(request, 10 * 1024 * 1024 + 1))
+      .rejects.toThrow("evidence_too_large")
   })
 })

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { LocalEvidenceError } from "../local-evidence-contract"
-import { PgLocalEvidenceStorage } from "../local-evidence-storage"
+import { PgLocalEvidenceStorage, pruneExpiredEvidence } from "../local-evidence-storage"
 
 const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3])
 const intent = {
@@ -11,25 +11,56 @@ const intent = {
 /** Narrow SQL double: persists rows across service instances and models unique upload IDs. */
 function ledgerDouble() {
   const rows = new Map<string, any>()
-  const db = (_table: string) => {
-    let match: Record<string, unknown> = {}
-    const selected = () => [...rows.values()].filter(row => Object.entries(match).every(([key, value]) => row[key] === value))
+  const db: any = (_table: string) => {
+    const filters: ((row: any) => boolean)[] = []
+    let sortColumn: string | null = null
+    let take = Infinity
+    const selected = () => {
+      const result = [...rows.values()].filter(row => filters.every(filter => filter(row)))
+      if (sortColumn) result.sort((a, b) => String(a[sortColumn!]).localeCompare(String(b[sortColumn!])))
+      return result.slice(0, take)
+    }
     const query: any = {
-      where(filters: Record<string, unknown>) { match = { ...match, ...filters }; return query },
+      where(key: Record<string, unknown> | string, operator?: string, value?: unknown) {
+        if (typeof key === "string") {
+          filters.push(row => operator === ">" ? row[key] > value! : row[key] <= value!)
+        } else {
+          filters.push(row => Object.entries(key).every(([name, expected]) => row[name] === expected))
+        }
+        return query
+      },
+      forUpdate() { return query },
+      skipLocked() { return query },
+      orderBy(column: string) { sortColumn = column; return query },
+      limit(count: number) { take = count; return query },
       first: async () => selected()[0],
       insert(row: any) { return { onConflict: () => ({ ignore: () => ({ returning: async () => {
         if (rows.has(row.upload_id)) return []
-        rows.set(row.upload_id, { ...row })
-        return [{ ...row }]
+        const inserted = { created_at: new Date(), stored_at: null, retain_until: null, ...row }
+        rows.set(row.upload_id, inserted)
+        return [{ ...inserted }]
       } }) }) } },
-      update(changes: any) { return { returning: async () => {
-        const found = selected()
-        for (const row of found) Object.assign(row, changes)
-        return found.map(row => ({ ...row }))
-      } } },
+      update(changes: any) {
+        let updated: any[] | null = null
+        const apply = () => {
+          if (updated) return updated
+          const found = selected()
+          for (const row of found) Object.assign(row, changes)
+          updated = found.map(row => ({ ...row }))
+          return updated
+        }
+        return {
+          returning: async () => apply(),
+          then: (resolve: (count: number) => unknown, reject: (error: unknown) => unknown) =>
+            Promise.resolve(apply().length).then(resolve, reject),
+        }
+      },
+      then: (resolve: (value: any[]) => unknown, reject: (error: unknown) => unknown) =>
+        Promise.resolve(selected()).then(resolve, reject),
     }
     return query
   }
+  db.transaction = async (work: (tx: any) => Promise<unknown>) => work(db)
   return { db, rows }
 }
 
@@ -63,5 +94,63 @@ describe("#367 durable private evidence upload", () => {
     const signed = await storage.signDownload({ evidenceId: record.evidenceId, actorId: "cus_driver", ttlSeconds: 60 })
     expect(signed.url).toBe("https://signed.fixture.test")
     expect(provider.getPresignedDownloadUrl).toHaveBeenCalledWith(expect.objectContaining({ expiresInSeconds: 60 }))
+  })
+
+  it("applies a later retention policy and drains more than 50 expired and abandoned uploads", async () => {
+    const { db, rows } = ledgerDouble()
+    const provider: any = {
+      upload: jest.fn(async () => ({})), delete: jest.fn(async () => {}),
+      getPresignedDownloadUrl: jest.fn(async () => "https://signed.fixture.test"),
+    }
+    const noPolicy = new PgLocalEvidenceStorage(db, provider, "cus_driver", async () => true, { days: null })
+    const now = new Date("2026-10-10T00:00:00Z")
+    for (let index = 0; index < 51; index++) {
+      const upload = { ...intent, uploadId: `upload_abandoned_${String(index).padStart(3, "0")}` }
+      await noPolicy.prepare(upload)
+      rows.get(upload.uploadId).created_at = new Date("2026-10-01T00:00:00Z")
+    }
+    const old = { ...intent, uploadId: "upload_stored_old" }
+    const { record } = await noPolicy.prepare(old)
+    await noPolicy.complete({ uploadId: old.uploadId, orderId: old.orderId, bytes })
+    Object.assign(rows.get(old.uploadId), {
+      stored_at: new Date("2026-08-01T00:00:00Z"), retain_until: null,
+    })
+    const storedRecent = { ...intent, uploadId: "upload_stored_recent" }
+    await noPolicy.prepare(storedRecent)
+    await noPolicy.complete({ uploadId: storedRecent.uploadId, orderId: storedRecent.orderId, bytes })
+    Object.assign(rows.get(storedRecent.uploadId), {
+      stored_at: new Date("2026-10-01T00:00:00Z"), retain_until: null,
+    })
+    const recent = { ...intent, uploadId: "upload_pending_new" }
+    await noPolicy.prepare(recent)
+    rows.get(recent.uploadId).created_at = new Date("2026-10-09T00:00:00Z")
+
+    const withPolicy = new PgLocalEvidenceStorage(db, provider, "cus_driver", async () => true, { days: 30 })
+    await expect(withPolicy.signDownload({ evidenceId: record.evidenceId, actorId: "cus_driver", ttlSeconds: 60, now }))
+      .rejects.toThrow("evidence_access_denied")
+    expect(provider.getPresignedDownloadUrl).not.toHaveBeenCalled()
+    expect(await pruneExpiredEvidence(db, provider, now, { days: 30 })).toBe(52)
+    expect(provider.delete).toHaveBeenCalledTimes(52)
+    expect(rows.get(old.uploadId).retain_until).toBe("2026-08-31T00:00:00.000Z")
+    expect(rows.get(old.uploadId).status).toBe("deleted")
+    expect(rows.get(storedRecent.uploadId).retain_until).toBe("2026-10-31T00:00:00.000Z")
+    expect(rows.get(storedRecent.uploadId).status).toBe("stored_private")
+    expect(rows.get(recent.uploadId).status).toBe("pending")
+    expect(await pruneExpiredEvidence(db, provider, now, { days: 30 })).toBe(0)
+  })
+
+  it("keeps a failed deletion retryable while pruning later rows", async () => {
+    const { db, rows } = ledgerDouble()
+    const provider: any = { delete: jest.fn().mockRejectedValueOnce(new Error("object store failed")).mockResolvedValue(undefined) }
+    const now = new Date("2026-10-10T00:00:00Z")
+    for (const uploadId of ["upload_failed_01", "upload_later_02"]) {
+      await new PgLocalEvidenceStorage(db, provider, "cus_driver", async () => true, { days: null })
+        .prepare({ ...intent, uploadId })
+      rows.get(uploadId).created_at = new Date("2026-10-01T00:00:00Z")
+    }
+    await expect(pruneExpiredEvidence(db, provider, now, { days: null })).rejects.toThrow("evidence_prune_failed")
+    expect([...rows.values()].filter(row => row.status === "deleted")).toHaveLength(1)
+    expect(await pruneExpiredEvidence(db, provider, now, { days: null })).toBe(1)
+    expect([...rows.values()].filter(row => row.status === "deleted")).toHaveLength(2)
   })
 })

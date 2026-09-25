@@ -32,20 +32,27 @@ bearer link; staff should retrieve it only when needed and never paste it into
 logs or a public ticket.
 
 `GP_LOCAL_EVIDENCE_RETENTION_DAYS` is optional. Unset means no automatic
-deletion while the retention owner/policy remains unresolved. When a valid
-1–3650 day value is configured, the worker deletes expired private objects
-before marking ledger rows deleted. The ledger keeps the order, actor, hash,
-size and timestamps. The retention job also remains off with the master flag.
+deletion of stored photos while the retention owner/policy remains unresolved.
+When a valid 1–3650 day value is configured, expiry is recalculated from each
+photo's `stored_at`, including photos uploaded before the policy was set; the
+worker updates their `retain_until` projections and drains all due rows in
+batches. It deletes each private object before marking its ledger row deleted.
+Pending uploads older than seven days are also swept, even without a photo
+retention policy. A row lock keeps that sweep from racing an in-flight retry;
+a failed object deletion leaves the row retryable on the next run. The ledger
+keeps the order, actor, hash, size and timestamps. The retention job remains
+off with the master flag.
 The photo is order-associated; #359 still controls when a photo is required,
 which no-photo exceptions are permitted, and how it links to a completion
 event. A photo upload alone never advances an order milestone.
 
 ## Release order
 
-1. Review and merge this PR from `main` with green exact-head CI. Leave the
-   master flag off. No bucket or Railway variable changes occur in this PR.
-2. After the release lead merges it, create one **private** bucket in the
-   existing Supabase Storage project. Set only `GP_LOCAL_EVIDENCE_BUCKET`,
+1. Provider PR #62 is merged and its migration applied. Merge the retention
+   follow-up from `main` with green exact-head CI before enabling the master
+   flag. No bucket or Railway variable changes occur in this follow-up.
+2. After Avi confirms the approved Supabase project/account, create one
+   **private** bucket in that project. Set only `GP_LOCAL_EVIDENCE_BUCKET`,
    `GP_LOCAL_EVIDENCE_S3_ENDPOINT`, `GP_LOCAL_EVIDENCE_S3_REGION`,
    `GP_LOCAL_EVIDENCE_S3_ACCESS_KEY_ID` and
    `GP_LOCAL_EVIDENCE_S3_SECRET_ACCESS_KEY` on Railway API and worker. A
@@ -55,7 +62,13 @@ event. A photo upload alone never advances an order milestone.
    denied, a signed GET works then expires, and delete that object. Post the
    receipts on #367. Activation remains gated by #359, #320 and #332.
 
-CI tests cover the no-ACL command, signed TTL, default-off behavior,
-unauthenticated API denial, content checks and retry after a failed provider
-call. The production private-bucket readback and signed-link expiry proof must
-wait until step 2.
+If that Supabase compatibility proof fails because of SDK checksum headers,
+set the private provider's S3 client `requestChecksumCalculation` and
+`responseChecksumValidation` to `WHEN_REQUIRED`, then repeat the proof. Do
+not infer compatibility from unit tests or change the public file provider.
+
+CI tests cover the no-ACL command, signed TTL, default-off behavior, public
+bucket and missing-setting guards, unauthenticated API denial, byte limits,
+content checks, retry after a failed provider call, and retention pruning.
+The production private-bucket readback and signed-link expiry proof must wait
+until step 2.
