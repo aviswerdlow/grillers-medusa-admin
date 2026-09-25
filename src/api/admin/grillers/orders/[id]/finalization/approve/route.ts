@@ -1,4 +1,8 @@
 import { quoteWwexFinalizationShipping } from "../../../../../../../lib/wwex-finalization-shipment"
+import {
+  assertQbdPostingReady,
+  persistQbdPosting,
+} from "../../../../../../../lib/qbd-posting-outbox"
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import {
@@ -33,6 +37,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     const orderModule = req.scope.resolve(Modules.ORDER)
     const body = (req.body || {}) as Record<string, any>
     const staffAudit = staffAuditFields(req, body)
+    if (isInvoiceOrder(order)) await assertQbdPostingReady(db, order.id)
     let shippingCostMetadata = {}
     if (isInvoiceOrder(order) && orderRequiresPackageCapture(order)) {
       const preview = await previewFinalization(db, order)
@@ -60,10 +65,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     // in A/R (no card charge, no ReceivePayment).
     const metadata = isInvoiceOrder(order)
       ? invoiceArOrderMetadata({
-          order: {
-            ...order,
-            metadata: { ...metadataObject(order.metadata), ...shippingCostMetadata },
-          },
+          order,
           finalization: approved.finalization,
           lines: approved.lines,
           packages: approved.packages,
@@ -85,7 +87,26 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
             ...staffAudit,
           }
         )
-    await orderModule.updateOrders(order.id, { metadata })
+    if (isInvoiceOrder(order)) {
+      await persistQbdPosting({
+        db,
+        order,
+        buildMetadata: (current) =>
+          invoiceArOrderMetadata({
+            order: {
+              ...order,
+              metadata: { ...current, ...shippingCostMetadata },
+            },
+            finalization: approved.finalization,
+            lines: approved.lines,
+            packages: approved.packages,
+            actorId: staffAuditActorId(staffAudit),
+            staffAudit,
+          }),
+      })
+    } else {
+      await orderModule.updateOrders(order.id, { metadata })
+    }
 
     // #9/#235: signal the fixed-price auto-charge trigger. Only for card orders now awaiting
     // the final charge (packed_pending_charge) — never invoice orders, which approve releases

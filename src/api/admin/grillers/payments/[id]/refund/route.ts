@@ -1,4 +1,8 @@
 import { verifiedStaffActorId } from "../../../../../../lib/staff-principal"
+import { assertQbdPostingReady, persistQbdPosting, QbdPostingConflict } from "../../../../../../lib/qbd-posting-outbox"
+import { loadQbdOrder } from "../../../../../../lib/qbd-order-metadata"
+import { claimStaffRefundRequest, completeStaffRefundRequest, recordStaffRefundProvider, refundRequestKey, requireStaffRefundReconciliation } from "../../../../../../lib/staff-refund-request"
+import { amountInMinorUnits } from "../../../../../../lib/catch-weight-finalization"
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { releaseAllocationLineQuantities } from "../../../../../../lib/inventory-allocation"
@@ -36,24 +40,6 @@ const refundAmount = (refund: Record<string, any>, fallback?: number): number =>
       ? raw.value
       : raw ?? refund.amount ?? fallback ?? 0
   return Number(value)
-}
-
-const metadataObject = (value: unknown): Record<string, any> => {
-  if (!value) return {}
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value)
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? parsed
-        : {}
-    } catch {
-      return {}
-    }
-  }
-  if (typeof value === "object" && !Array.isArray(value)) {
-    return { ...(value as Record<string, any>) }
-  }
-  return {}
 }
 
 const appendAuditLog = (
@@ -150,81 +136,26 @@ async function orderIdForPaymentCollection(
   return data?.[0]?.order_id || null
 }
 
-async function queueQbdRefundPosting({
-  orderModule,
-  orderId,
-  refund,
-  refundAmountValue,
-  note,
-  actorId,
-  logger,
-}: {
-  orderModule: any
-  orderId: string
+async function queueQbdRefundPosting({ db, order, refund, refundAmountValue, note, actorId }: {
+  db: any
+  order: Record<string, any>
   refund: Record<string, any>
   refundAmountValue: number
   note?: string
   actorId?: string
-  logger?: any
 }) {
-  const order = await orderModule.retrieveOrder(orderId, {
-    select: ["id", "metadata"],
-  })
-  const amountMinor = Math.round(Math.abs(refundAmountValue) * 100)
+  const amountMinor = amountInMinorUnits(Math.abs(refundAmountValue), order.currency_code)
   const requestKey = `refund:${refund.id}`
-  const existingMetadata = metadataObject(order?.metadata)
-  const existingPostingStatus = String(existingMetadata.qbd_posting_status || "")
-  const existingRequestKey = existingMetadata.qbd_posting_request_key
-
-  if (
-    existingPostingStatus.startsWith("pending") &&
-    existingRequestKey &&
-    existingRequestKey !== requestKey
-  ) {
-    // #251: a refund must not silently overwrite an unconsumed QBD posting request.
-    await emitOpsAlert({
-      alertKind: "qbd_pending_posting_overwritten",
-      title: `Refund ${refund.id} overwrote pending QBD posting for order ${orderId}`,
-      path: "src/api/admin/grillers/payments/[id]/refund/route.ts",
-      source: "medusa",
-      severity: "warn",
-      logger,
-      meta: {
-        order_id: orderId,
-        refund_id: refund.id,
-        previous_qbd_posting_status: existingPostingStatus,
-        previous_qbd_posting_request_key: existingRequestKey,
-        next_qbd_posting_request_key: requestKey,
-      },
-    })
-  }
-
-  const metadata = appendAuditLog(
-    {
-      ...existingMetadata,
-      qbd_posting_required: true,
-      qbd_posting_status: "pending_manual",
-      qbd_posting_action: "card_refund_accounting_record",
-      qbd_posting_amount: amountMinor,
-      qbd_posting_request_key: requestKey,
-      qbd_posting_requested_at: new Date().toISOString(),
-      stripe_refund_id: refund.id,
-      stripe_provider_refund_id:
-        refund.provider_refund_id || refund.data?.id || refund.id,
-    },
-    {
-      action: "stripe_refund",
-      status: "queued_for_quickbooks",
-      qbd_posting_action: "card_refund_accounting_record",
-      qbd_posting_request_key: requestKey,
-      qbd_posting_amount: amountMinor,
-      refund_id: refund.id,
-      staff_actor_id: actorId,
-      note: note || null,
-    }
-  )
-
-  await orderModule.updateOrders(orderId, { metadata })
+  await persistQbdPosting({ db, order, buildMetadata: (current) => appendAuditLog({
+    ...current, qbd_posting_required: true, qbd_posting_status: "pending_manual",
+    qbd_posting_action: "card_refund_accounting_record", qbd_posting_amount: amountMinor,
+    qbd_posting_request_key: requestKey, qbd_posting_requested_at: new Date().toISOString(),
+    stripe_refund_id: refund.id, stripe_provider_refund_id: refund.provider_refund_id || refund.data?.id || refund.id,
+    stripe_refund_status: "submitted",
+  }, { action: "stripe_refund", status: "queued_for_quickbooks", qbd_posting_action: "card_refund_accounting_record",
+    qbd_posting_request_key: requestKey, qbd_posting_amount: amountMinor, refund_id: refund.id,
+    staff_actor_id: actorId, note: note || null,
+  }) })
 }
 
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
@@ -235,6 +166,8 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   let orderId: string | null = null
   let refundId: string | null = null
   let refundCompleted = false
+  let refundRequestId: string | undefined
+  let db: any
   let allocationReleaseCount = Array.isArray(body.allocation_releases)
     ? body.allocation_releases.filter((line) => line.line_item_id).length
     : 0
@@ -263,7 +196,8 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     const orderModule = req.scope.resolve(Modules.ORDER)
     const eventBus = req.scope.resolve(Modules.EVENT_BUS)
     const query = req.scope.resolve("query")
-    const db = req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION)
+    db = req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION)
+    const requestKey = refundRequestKey(req)
 
     stage = "retrieve_payment"
     const before = await paymentModule.retrievePayment(paymentId, {
@@ -273,6 +207,17 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     const existingRefundIds = new Set(
       (before.refunds || []).map((refund: Record<string, any>) => refund.id)
     )
+
+    stage = "accounting_preflight"
+    orderId = await orderIdForPaymentCollection(query, before.payment_collection_id)
+    if (!orderId) throw new QbdPostingConflict("Payment is not linked to an order; resolve it before refunding.")
+    if (allocationOrderId && allocationOrderId !== orderId) throw new RefundValidationError("Allocation release must belong to the refunded order.")
+    const accountingOrder = await loadQbdOrder(query, orderId)
+    await assertQbdPostingReady(db, orderId)
+    const intent = await claimStaffRefundRequest(db, { orderId, paymentId, requestKey,
+      amount, currencyCode: before.currency_code, note: body.note, reasonId: body.refund_reason_id, allocationLines })
+    if (intent.replay) return res.status(200).json({ ...intent.replay, already_refunded: true })
+    refundRequestId = intent.id
 
     stage = "refund_payment"
     const payment = await paymentModule.refundPayment({
@@ -290,11 +235,8 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       refunds[refunds.length - 1]
     refundId = refund?.id || null
 
-    stage = "order_link_lookup"
-    orderId = await orderIdForPaymentCollection(
-      query,
-      before.payment_collection_id || payment.payment_collection_id
-    )
+    if (!refund?.id) throw new Error("The payment provider did not return a durable refund identity.")
+    await recordStaffRefundProvider(db, intent.id, refund.id)
 
     if (orderId && refund?.id) {
       const resolvedRefundAmount = refundAmount(refund, amount)
@@ -321,13 +263,12 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
 
       stage = "queue_qbd_refund_posting"
       await queueQbdRefundPosting({
-        orderModule,
-        orderId,
+        db,
+        order: accountingOrder,
         refund,
         refundAmountValue: resolvedRefundAmount,
         note: body.note,
         actorId,
-        logger,
       })
     }
 
@@ -360,8 +301,17 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       })
     }
 
-    res.status(200).json({ payment })
+    // Store only the fields needed to replay the refund result, never provider card data.
+    const response = { payment: { id: payment.id, currency_code: payment.currency_code || before.currency_code,
+      refunds: [{ id: refund.id, amount: refundAmount(refund, amount), provider_refund_id: refund.provider_refund_id || refund.data?.id }],
+    } }
+    await completeStaffRefundRequest(db, intent.id, response)
+    res.status(200).json(response)
   } catch (error) {
+    if (refundRequestId) await requireStaffRefundReconciliation(db, refundRequestId).catch(() => undefined)
+    if (error instanceof QbdPostingConflict && !refundCompleted) {
+      return res.status(409).json({ message: error.message })
+    }
     if (error instanceof RefundValidationError) {
       return res.status(400).json({ message: error.message })
     }
@@ -381,7 +331,9 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     res.status(500).json({
       message: refundCompleted
         ? "Refund was issued, but follow-up recording failed. Do not retry until support checks the order."
-        : "Could not refund payment. Please try again.",
+        : refundRequestId
+          ? "The refund outcome needs reconciliation. Do not submit another refund until support checks the provider and order records."
+          : "Could not refund payment before the provider was called.",
     })
   }
 }

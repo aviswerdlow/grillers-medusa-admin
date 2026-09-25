@@ -5,47 +5,10 @@ import { createHmac } from "node:crypto"
 import { resolveFoodTaxForAddress } from "../modules/ga-tax/rules"
 import { emitOpsAlert } from "../lib/ops-alert"
 import { transitDaysForOrder } from "../lib/packaging-cost"
+import type { QbdOutboxEnvelope } from "../lib/qbd-outbox-delivery"
 
-export const ORDER_FIELDS = [
-  "id",
-  "display_id",
-  "email",
-  "currency_code",
-  "created_at",
-  "updated_at",
-  "customer_id",
-  // #277: carry the customer's alt-contact metadata so the QB CustomerAdd can fill AltPhone.
-  "customer.metadata",
-  "status",
-  "fulfillment_status",
-  "payment_status",
-  "metadata",
-  "total",
-  "subtotal",
-  "item_total",
-  "item_subtotal",
-  "tax_total",
-  "shipping_total",
-  "discount_total",
-  "shipping_subtotal",
-  "shipping_tax_total",
-  "shipping_address.*",
-  "billing_address.*",
-  "items.*",
-  "items.metadata",
-  "items.detail.*",
-  "items.variant.*",
-  "items.variant.metadata",
-  "items.variant.product.*",
-  "items.variant.product.metadata",
-  "shipping_methods.*",
-  "payment_collections.id",
-  "payment_collections.status",
-  "payment_collections.payments.id",
-  "payment_collections.payments.provider_id",
-  "payment_collections.payments.amount",
-  "payment_collections.payments.currency_code",
-]
+import { ORDER_FIELDS } from "../lib/qb-sync-order-fields"
+export { ORDER_FIELDS } from "../lib/qb-sync-order-fields"
 
 const IMPORT_TIMEOUT_MS = 15_000
 type QbdListIdFallbacks = Record<string, string>
@@ -710,11 +673,12 @@ export async function postOrderToQbSync(
   token: string,
   order: Record<string, unknown>,
   fetchFn: typeof fetch = fetch,
-  signingSecret = process.env.QB_SYNC_ORDER_IMPORT_SIGNING_SECRET || token
+  signingSecret = process.env.QB_SYNC_ORDER_IMPORT_SIGNING_SECRET || token,
+  outbox?: QbdOutboxEnvelope
 ): Promise<Response> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), IMPORT_TIMEOUT_MS)
-  const body = JSON.stringify({ order })
+  const body = JSON.stringify({ order, ...(outbox ? { qbd_outbox: outbox } : {}) })
   const timestamp = String(Date.now())
   const headers: Record<string, string> = {
     "Content-Type": "application/json",

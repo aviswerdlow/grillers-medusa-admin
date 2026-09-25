@@ -13,6 +13,11 @@ const mockInvoiceArOrderMetadata = jest.fn((_input: any) => ({
   catch_weight_packages: [{ shipper_qbd_list_id: "SHIPPER-LIST-ID" }],
 }))
 const mockIsInvoiceOrder = jest.fn((_order: any) => false)
+const mockPersistQbdPosting = jest.fn(async ({ order, buildMetadata }: any) => ({ metadata: buildMetadata(order.metadata || {}) }))
+jest.mock("../../../../../../../../lib/qbd-posting-outbox", () => ({
+  assertQbdPostingReady: jest.fn(async () => undefined),
+  persistQbdPosting: (input: any) => mockPersistQbdPosting(input),
+}))
 
 jest.mock("../../../../../../../../lib/catch-weight-finalization", () => ({
   CATCH_WEIGHT_ORDER_FIELDS: ["id", "metadata"],
@@ -128,13 +133,14 @@ describe("approve finalization route", () => {
         ],
       })
     )
-    expect(orderModule.updateOrders).toHaveBeenCalledWith("order_123", {
+    expect(await mockPersistQbdPosting.mock.results[0].value).toEqual({
       metadata: expect.objectContaining({
         payment_workflow: "invoice_ar",
         catch_weight_final_lines: [{ line_item_id: "ordli_1" }],
         catch_weight_packages: [{ shipper_qbd_list_id: "SHIPPER-LIST-ID" }],
       }),
     })
+    expect(orderModule.updateOrders).not.toHaveBeenCalled()
     // Invoice approval releases to A/R. It never emits the card auto-charge event.
     expect(eventBus.emit).not.toHaveBeenCalled()
     expect(res.status).toHaveBeenCalledWith(200)
@@ -190,6 +196,7 @@ describe("approve finalization route", () => {
 it("holds an invoice shipment before approval and A/R release when pricing is incomplete", async () => {
   mockIsInvoiceOrder.mockReturnValue(true)
   mockApproveFinalization.mockClear()
+  mockPersistQbdPosting.mockClear()
   const { scope, query, orderModule } = makeScope()
   query.graph.mockResolvedValueOnce({
     data: [{ id: "order_123", metadata: {}, package_capture_required: true }],
@@ -198,10 +205,12 @@ it("holds an invoice shipment before approval and A/R release when pricing is in
   await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
   expect(res.status).toHaveBeenCalledWith(409)
   expect(mockApproveFinalization).not.toHaveBeenCalled()
+  expect(mockPersistQbdPosting).not.toHaveBeenCalled()
   expect(orderModule.updateOrders).not.toHaveBeenCalled()
 })
 
 it("preserves the accepted shipping cost in the released invoice metadata", async () => {
+  mockPersistQbdPosting.mockClear()
   mockIsInvoiceOrder.mockReturnValue(true)
   mockShippingQuote.mockResolvedValueOnce({ status: "quoted", metadata: { shipping_cost_actual: 18.75 } } as any)
   mockApproveFinalization.mockResolvedValueOnce({
@@ -215,7 +224,8 @@ it("preserves the accepted shipping cost in the released invoice metadata", asyn
   const res = makeRes()
   await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
   expect(res.status).toHaveBeenCalledWith(200)
-  expect(orderModule.updateOrders).toHaveBeenCalledWith("order_123", {
+  expect(orderModule.updateOrders).not.toHaveBeenCalled()
+  expect(await mockPersistQbdPosting.mock.results[0].value).toEqual({
     metadata: expect.objectContaining({
       shipping_cost_actual: 18.75,
       shipping_quote_revision: "accepted-1",

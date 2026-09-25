@@ -15,6 +15,14 @@ const mockEmitFinalizationRouteFailureAlert = jest.fn(async (_input: any) => ({
   ok: true,
 }))
 
+jest.mock("../../../../../../../../lib/qbd-posting-outbox", () => ({
+  assertQbdPostingReady: jest.fn(async () => undefined),
+  persistQbdPosting: jest.fn(async ({ order, buildMetadata }) => ({ metadata: buildMetadata(order.metadata || {}) })),
+}))
+jest.mock("../../../../../../../../lib/qbd-order-metadata", () => ({
+  persistQbdOrderAudit: jest.fn(async (_db, _id, buildMetadata) => buildMetadata({})),
+}))
+
 jest.mock("../../../../../../../../lib/catch-weight-finalization", () => {
   const actual = jest.requireActual(
     "../../../../../../../../lib/catch-weight-finalization"

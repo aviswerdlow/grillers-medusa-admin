@@ -1,10 +1,12 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
-import { Modules } from "@medusajs/framework/utils"
+import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { timingSafeEqual } from "node:crypto"
 import { emitOpsAlert } from "../../../../../../lib/ops-alert"
+import { acknowledgeQbdPosting, QbdPostingConflict, type QbdPostingReceipt } from "../../../../../../lib/qbd-posting-outbox"
 
 type MetadataBody = {
   metadata?: Record<string, unknown>
+  posting_receipt?: QbdPostingReceipt
 }
 
 const ALERT_PATH = "src/api/api/qb-sync/orders/[id]/metadata/route.ts"
@@ -156,6 +158,16 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
 
   const orderId = req.params.id
   const body = (req.body ?? {}) as MetadataBody
+  if (body.posting_receipt) {
+    try {
+      const result = await acknowledgeQbdPosting(req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION), orderId, body.posting_receipt)
+      return res.status(200).json({ ok: true, request_key: body.posting_receipt.request_key, replayed: result.replayed })
+    } catch (error) {
+      if (error instanceof QbdPostingConflict) return res.status(409).json({ error: error.message })
+      await emitQbMetadataRouteFailureAlert({ req, orderId, reason: "metadata_persist", error })
+      return res.status(503).json({ error: "Accounting receipt could not be stored; retry the same receipt." })
+    }
+  }
   const incomingMetadata = metadataObject(body.metadata)
 
   if (!orderId || Object.keys(incomingMetadata).length === 0) {
@@ -170,6 +182,9 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     })
 
     const existingMetadata = metadataObject(order?.metadata)
+    if (existingMetadata.qbd_posting_outbox_version === 1 && touchesQbdPosting(incomingMetadata)) {
+      return res.status(409).json({ error: "Managed accounting actions require an exact posting_receipt; the display metadata cannot acknowledge them." })
+    }
     const existingRequestKey = postingRequestKey(existingMetadata)
     const incomingRequestKey = postingRequestKey(incomingMetadata)
 
