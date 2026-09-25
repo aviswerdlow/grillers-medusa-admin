@@ -2,6 +2,7 @@
 
 import fs from "node:fs"
 import process from "node:process"
+import { hasPositiveCartTotals } from "./lib/positive-cart-totals.mjs"
 
 const DEFAULT_BACKEND_URL =
   "https://grillers-medusa-admin-production.up.railway.app"
@@ -94,10 +95,6 @@ function productVariantCandidates(products) {
     }
   }
   return candidates
-}
-
-function positiveNumber(...values) {
-  return values.some((value) => Number.isFinite(value) && value > 0)
 }
 
 function chooseRegion(regions, countryCode) {
@@ -249,8 +246,8 @@ const item = cart?.items?.[0]
 assert(cart?.id === cartId, "Expected cart add response to return the same cart")
 assert(item?.id, "Expected cart to contain a line item after add-to-cart")
 assert(
-  positiveNumber(cart.subtotal, cart.total, item.unit_price, item.subtotal),
-  "Expected cart add response to include positive live pricing totals"
+  hasPositiveCartTotals(cart),
+  "Expected cart add response to include positive live cart total and subtotal"
 )
 console.log(
   `ok cart create/add (${cartId}, ${
