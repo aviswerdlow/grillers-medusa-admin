@@ -2,6 +2,7 @@ import type { MedusaNextFunction, MedusaRequest, MedusaResponse } from "@medusaj
 import { Modules } from "@medusajs/framework/utils"
 import { isDeepStrictEqual } from "node:util"
 import { isStaffAuthorityMetadataKey } from "../../lib/staff-access-policy"
+import { isCanonicalStaffPath, staffRequestPath } from "../../lib/staff-request-path"
 
 /** Runs on Store customer creation and self-service updates, never Admin writes. */
 export async function protectCustomerStaffAuthority(
@@ -32,7 +33,8 @@ export async function protectCustomerStaffAuthority(
   const auth = (req as any).auth_context
   // Creation never accepts authority. Self-service full snapshots may echo
   // existing fields only after native customer authentication has run.
-  if (req.method !== "POST" || req.path?.replace(/\/+$/, "") !== "/store/customers/me"
+  const path = staffRequestPath(req)
+  if (req.method !== "POST" || !isCanonicalStaffPath(path) || !/^\/store\/customers\/me$/i.test(path)
     || auth?.actor_type !== "customer" || !auth.actor_id) return deny()
   let customer: any
   try {
