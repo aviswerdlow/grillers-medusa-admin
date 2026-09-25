@@ -29,6 +29,24 @@ describe("institutional collections (#370 synthetic fixtures)", () => {
     expect(view(replay)).toMatchObject({ appliedReceiptCount: 1, expectedRemainingCents: 30000, confirmedCollectedCents: 20000 })
   })
 
+  it("quarantines a second payment TxnID for the same collection request key", () => {
+    const posted = apply(acceptedInstitutionalOrder("TEST_ORDER_E", 50000), invoice)
+    const first = apply(posted, { type: "collection_confirmed", eventId: "TEST_PAYMENT_EVENT_1", requestKey: "TEST_REQUEST_1", paymentTxnId: "TEST_PAYMENT_1", invoiceTxnId: "TEST_INVOICE_E", appliedCents: 20000, sourceRevision: "TEST_REV_2" })
+    const duplicate = apply(first, { type: "collection_confirmed", eventId: "TEST_PAYMENT_EVENT_2", requestKey: "TEST_REQUEST_1", paymentTxnId: "TEST_PAYMENT_2", invoiceTxnId: "TEST_INVOICE_E", appliedCents: 20000, sourceRevision: "TEST_REV_3" })
+    expect(view(duplicate)).toMatchObject({ status: "quarantined", confirmedCollectedCents: 20000, appliedReceiptCount: 1 })
+    expect(view(duplicate).quarantineReasons).toContain("conflicting_collection_request_key")
+  })
+
+  it("does not reopen a confirmed request or reuse it for a credit", () => {
+    const posted = apply(acceptedInstitutionalOrder("TEST_ORDER_E", 50000), invoice)
+    const first = apply(posted, { type: "collection_confirmed", eventId: "TEST_PAYMENT_EVENT_1", requestKey: "TEST_REQUEST_1", paymentTxnId: "TEST_PAYMENT_1", invoiceTxnId: "TEST_INVOICE_E", appliedCents: 20000, sourceRevision: "TEST_REV_2" })
+    const delayed = apply(first, { type: "collection_requested", eventId: "TEST_DELAYED_REQUEST", requestKey: "TEST_REQUEST_1", amountCents: 20000 })
+    expect(view(delayed)).toMatchObject({ status: "collection_confirmed", confirmedCollectedCents: 20000 })
+    expect(Object.keys(delayed.pending)).toHaveLength(0)
+    const conflicting = apply(delayed, { type: "credit_requested", eventId: "TEST_CREDIT_REUSE", requestKey: "TEST_REQUEST_1", amountCents: 20000 })
+    expect(view(conflicting).status).toBe("quarantined")
+  })
+
   it("cancelled unposted commitment never claims a QBD invoice changed", () => {
     const state = apply(acceptedInstitutionalOrder("TEST_ORDER_F", 30000), { type: "cancel_unposted", eventId: "TEST_CANCEL_F" })
     expect(view(state)).toMatchObject({ status: "cancelled", expectedRemainingCents: null, verifiedRemainingCents: null })
@@ -123,7 +141,7 @@ describe("institutional collections (#370 synthetic fixtures)", () => {
     expect(view(apply(requested, { ...receipt, appliedCents: 10000 })).quarantineReasons).toContain("collection_amount_mismatch")
     expect(view(apply(requested, { ...receipt, invoiceTxnId: "TEST_OTHER_INVOICE" })).quarantineReasons).toContain("collection_identity_mismatch")
     const confirmed = apply(requested, receipt)
-    expect(view(apply(confirmed, { ...receipt, eventId: "TEST_RECEIPT_CONFLICT", appliedCents: 10000 })).quarantineReasons).toContain("conflicting_payment_txn_id")
+    expect(view(apply(confirmed, { ...receipt, eventId: "TEST_RECEIPT_CONFLICT", requestKey: null, appliedCents: 10000 })).quarantineReasons).toContain("conflicting_payment_txn_id")
     expect(view(confirmed)).toMatchObject({ confirmedCollectedCents: 20000, expectedRemainingCents: 30000 })
   })
 
@@ -134,7 +152,7 @@ describe("institutional collections (#370 synthetic fixtures)", () => {
     expect(view(apply(requested, { ...credit, appliedCents: 10000 })).quarantineReasons).toContain("credit_amount_mismatch")
     expect(view(apply(requested, { ...credit, invoiceTxnId: "TEST_OTHER_INVOICE" })).quarantineReasons).toContain("credit_identity_mismatch")
     const confirmed = apply(requested, credit)
-    expect(view(apply(confirmed, { ...credit, eventId: "TEST_CREDIT_CONFLICT", appliedCents: 10000 })).quarantineReasons).toContain("conflicting_credit_txn_id")
+    expect(view(apply(confirmed, { ...credit, eventId: "TEST_CREDIT_CONFLICT", requestKey: null, appliedCents: 10000 })).quarantineReasons).toContain("conflicting_credit_txn_id")
     expect(view(apply(confirmed, { type: "invoice_readback", eventId: "TEST_OTHER_READ", invoiceTxnId: "TEST_OTHER_INVOICE", remainingCents: 30000, sourceRevision: "TEST_REV_3" })).quarantineReasons).toContain("invoice_readback_identity_mismatch")
     expect(view(confirmed)).toMatchObject({ confirmedCreditCents: 20000, expectedRemainingCents: 30000 })
   })
