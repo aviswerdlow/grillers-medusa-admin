@@ -59,7 +59,10 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     // ApiLoader installs optional customer auth before sorted Store middleware.
     app.use("/store", authenticate("customer", ["bearer", "session"], { allowUnauthenticated: true }))
     const selected = middlewares.routes!.filter((r: any) => r.matcher === "/admin/*" || r.middlewares.includes(enforceStaffCartAuthority))
-    for (const r of new RoutesSorter(selected).sort()) for (const method of r.methods || ["ALL"]) app[method.toLowerCase()](r.matcher, ...r.middlewares.map(wrap))
+    for (const r of new RoutesSorter(selected).sort()) {
+      if (!r.methods?.length || r.methods.includes("ALL")) app.use(r.matcher, ...r.middlewares.map(wrap))
+      else for (const method of r.methods) app[method.toLowerCase()](r.matcher, ...r.middlewares.map(wrap))
+    }
     const post = (url: string, schema: any, handler: any) => app.post(url, ...(schema ? [validateAndTransformBody(schema)] : []), wrap(handler))
     app.post("/admin/grillers/staff-carts", wrap(createStaffCart))
     post("/store/carts", validators.StoreCreateCart, native("carts").POST)
