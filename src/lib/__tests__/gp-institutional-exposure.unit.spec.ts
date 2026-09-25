@@ -191,7 +191,7 @@ describe("atomic institutional credit reservations", () => {
     expect(lockCalls[0]).toContain("pg_advisory_xact_lock")
   })
 
-  it("idempotently refreshes one order and holds an over-limit increase", async () => {
+  it("retains the real amount of a held refresh so a second order cannot spend it", async () => {
     process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
     const { rows, base } = harness()
     const first = await reserveInstitutionalCredit({ ...base, commitment: commitment("TEST_ORDER_A", 20000) })
@@ -202,7 +202,24 @@ describe("atomic institutional credit reservations", () => {
     expect(repeat.status).toBe("reserved")
     expect(larger).toMatchObject({ status: "hold", reason: "credit_limit_exceeded", projectedCents: 105000 })
     expect(rows).toHaveLength(1)
-    expect(rows[0].amountCents).toBe(20000)
+    expect(rows[0].amountCents).toBe(35000)
+    const second = await reserveInstitutionalCredit({ ...base, commitment: commitment("TEST_ORDER_B", 10000) })
+    expect(second).toMatchObject({ status: "hold", reason: "credit_limit_exceeded", projectedCents: 115000 })
+    expect(rows).toHaveLength(1)
+  })
+
+  it("holds a replay of a posted order without dropping its exact invoice link", async () => {
+    process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+    const { rows, base } = harness()
+    rows.push(commitment("TEST_ORDER_A", 20000, "posted", "TEST_INVOICE_A"))
+    const result = await reserveInstitutionalCredit({
+      ...base,
+      invoices: [...base.invoices, invoice("TEST_INVOICE_A", 20000)],
+      commitment: commitment("TEST_ORDER_A", 20000),
+    })
+
+    expect(result).toMatchObject({ status: "hold", reason: "existing_commitment_not_reservable" })
+    expect(rows).toEqual([commitment("TEST_ORDER_A", 20000, "posted", "TEST_INVOICE_A")])
   })
 
   it("uses the caller's finalization transaction for the credit lock and reservation", async () => {
