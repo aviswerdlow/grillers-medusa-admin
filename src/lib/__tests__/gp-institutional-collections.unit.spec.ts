@@ -64,6 +64,14 @@ describe("institutional collections (#370 synthetic fixtures)", () => {
     expect(view(uncertain).quarantineReasons).toContain("uncertain_collection:TEST_REFUND_G")
   })
 
+  it("quarantines a credit that exceeds the remaining invoice balance", () => {
+    const posted = apply(acceptedInstitutionalOrder("TEST_ORDER_E", 50000), invoice)
+    const collected = apply(posted, { type: "collection_confirmed", eventId: "TEST_PAYMENT_BEFORE_CREDIT", requestKey: null, paymentTxnId: "TEST_PAYMENT_BEFORE_CREDIT", invoiceTxnId: "TEST_INVOICE_E", appliedCents: 20000, sourceRevision: "TEST_REV_2" })
+    const overrun = apply(collected, { type: "credit_confirmed", eventId: "TEST_CREDIT_OVERRUN", requestKey: null, creditTxnId: "TEST_CREDIT_OVERRUN", invoiceTxnId: "TEST_INVOICE_E", appliedCents: 40000, sourceRevision: "TEST_REV_3" })
+    expect(view(overrun)).toMatchObject({ status: "quarantined", confirmedCollectedCents: 20000, confirmedCreditCents: 0, verifiedRemainingCents: null })
+    expect(view(overrun).quarantineReasons).toContain("credit_exceeds_invoice")
+  })
+
   it("applies a confirmed QBD credit once and reconciles only after invoice readback", () => {
     const posted = apply(acceptedInstitutionalOrder("TEST_ORDER_G", 40000), {
       ...invoice, eventId: "TEST_POST_G", invoiceTxnId: "TEST_INVOICE_G", finalCents: 40000,
@@ -124,6 +132,22 @@ describe("institutional collections (#370 synthetic fixtures)", () => {
     const posted = apply(acceptedInstitutionalOrder("TEST_ORDER_E", 50000), invoice)
     expect(view(apply(posted, { ...invoice, eventId: "TEST_OTHER_INVOICE", invoiceTxnId: "TEST_INVOICE_OTHER" })).quarantineReasons).toContain("conflicting_invoice_posting")
     expect(view(apply(posted, { ...invoice, eventId: "TEST_OTHER_AMOUNT", finalCents: 60000 })).quarantineReasons).toContain("conflicting_invoice_posting")
+  })
+
+  it("holds cancellation after posting until QBD credit evidence arrives", () => {
+    const posted = apply(acceptedInstitutionalOrder("TEST_ORDER_E", 50000), invoice)
+    const cancelled = apply(posted, { type: "cancel_unposted", eventId: "TEST_CANCEL_AFTER_POSTING" })
+    expect(view(cancelled)).toMatchObject({ status: "quarantined", expectedRemainingCents: 50000, verifiedRemainingCents: null })
+    expect(view(cancelled).quarantineReasons).toContain("posted_cancellation_needs_qbd_credit")
+    expect(cancelled.invoiceTxnId).toBe("TEST_INVOICE_E")
+  })
+
+  it("quarantines an event ID reused with a different payload", () => {
+    const posted = apply(acceptedInstitutionalOrder("TEST_ORDER_E", 50000), invoice)
+    const conflicted = apply(posted, { ...invoice, finalCents: 60000 })
+    expect(view(conflicted).status).toBe("quarantined")
+    expect(view(conflicted).quarantineReasons).toContain("conflicting_event:TEST_POST_E")
+    expect(conflicted.invoiceCents).toBe(50000)
   })
 
   it("quarantines changed or cross-kind collection request keys", () => {
