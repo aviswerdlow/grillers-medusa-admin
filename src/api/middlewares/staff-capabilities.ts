@@ -25,6 +25,10 @@ export async function enforceStaffCapabilities(req: MedusaRequest, res: MedusaRe
     : (readOnlyUser || readOnlyKey) && !isReadOnlyServiceRoute(path, req.method)) {
     return res.status(403).json({ message: "This read-only account cannot access this admin route." })
   }
+  if (req.method === "POST" && /^\/admin\/draft-orders\/[^/]+\/convert-to-order$/.test(path)
+    && process.env.GP_INSTITUTIONAL_TERMS_ENABLED !== "true") {
+    return res.status(403).json({ message: "Native draft conversion is unavailable while institutional terms are off." })
+  }
   // Checkout enforcement is independent of the staff observation switch.
   if (orderReviewEnforcementMode() === "required" && req.method === "POST" && (/^\/admin\/draft-orders(?:\/[^/]+\/convert-to-order)?$/.test(path) || /^\/admin\/orders$/.test(path))) {
     return res.status(403).json({ message: "Create orders through the reviewed customer or staff checkout. Native draft conversion has no accepted-order review." })

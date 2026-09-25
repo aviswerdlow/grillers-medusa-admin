@@ -45,6 +45,18 @@ function guardedMetadata(incoming: unknown, current: unknown, staff: boolean): R
   return patch
 }
 
+function guardedServerMetadata(incoming: unknown, current: unknown): Record<string, any> | undefined {
+  if (incoming === undefined) return undefined
+  if (!incoming || typeof incoming !== "object" || Array.isArray(incoming)) throw new StaffAccessDenied("Cart metadata cannot erase checkout authority.")
+  const previous = record(current), patch = { ...record(incoming) }
+  for (const [key, value] of Object.entries(patch)) {
+    if (!serverOwnedCartKey(key)) continue
+    if (Object.prototype.hasOwnProperty.call(previous, key) && isDeepStrictEqual(value, previous[key])) { delete patch[key]; continue }
+    throw new StaffAccessDenied("Checkout authority cannot be supplied through public cart metadata.")
+  }
+  return patch
+}
+
 function writeMetadata(req: MedusaRequest, value: Record<string, any>) {
   for (const body of new Set([(req as any).body, (req as any).validatedBody])) if (body && typeof body === "object") body.metadata = value
 }
@@ -107,6 +119,20 @@ export async function enforceStaffCartAuthority(req: MedusaRequest, res: MedusaR
     const body = record(req.body)
     const cart = await requestCart(req)
     const marked = cart && cartHasStaffMarkers(cart)
+    // Checkout authority is server-owned in every rollout mode. A client may
+    // echo an unchanged value, but cannot create or replace it.
+    const lineId = path.match(/\/line-items\/([^/]+)$/)?.[1]
+    const isLine = /\/line-items(?:\/[^/]+)?$/.test(path)
+    const currentLine = isLine && cart ? (cart.items || []).find((line: any) => line.id === lineId) : null
+    const currentMetadata = isLine ? currentLine?.metadata : cart?.metadata
+    const serverSafeMetadata = guardedServerMetadata(body.metadata, currentMetadata)
+    if (serverSafeMetadata !== undefined) writeMetadata(req, serverSafeMetadata)
+    for (const line of Array.isArray(body.items) ? body.items : []) guardedServerMetadata(line?.metadata, undefined)
+    const providerId = body.provider_id ?? record((req as any).validatedBody).provider_id
+    if (req.method === "POST" && path.startsWith("/store/payment-collections/") && path.endsWith("/payment-sessions")
+      && providerId !== undefined && providerId !== "pp_stripe_stripe") {
+      throw new StaffAccessDenied("Public checkout accepts card payment sessions only.")
+    }
     // Signed carts never downgrade, even during rollback. Log mode leaves the
     // existing unsigned staff workflow available until both deployments agree.
     if (staffBoundaryMode() === "log" && record(cart?.metadata)[STAFF_CART_AUTHORITY] == null) {
@@ -126,11 +152,7 @@ export async function enforceStaffCartAuthority(req: MedusaRequest, res: MedusaR
       throw new StaffAccessDenied("Create customer-context carts through the staff order action.")
     }
 
-    const lineId = path.match(/\/line-items\/([^/]+)$/)?.[1]
-    const isLine = /\/line-items(?:\/[^/]+)?$/.test(path)
-    const currentLine = isLine && cart ? (cart.items || []).find((line: any) => line.id === lineId) : null
-    const currentMetadata = isLine ? currentLine?.metadata : cart?.metadata
-    const metadata = guardedMetadata(body.metadata, currentMetadata, staff)
+    const metadata = guardedMetadata(serverSafeMetadata, currentMetadata, staff)
     if (metadata !== undefined) writeMetadata(req, metadata)
     for (const line of Array.isArray(body.items) ? body.items : []) guardedMetadata(line?.metadata, undefined, false)
 

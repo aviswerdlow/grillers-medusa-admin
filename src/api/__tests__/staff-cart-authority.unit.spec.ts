@@ -291,6 +291,16 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     expect((await request("/store/carts/cart_1", undefined, true, { method: "GET" })).status).toBe(200)
     expect((await request("/store/carts/cart_1", { metadata: { [STAFF_CART_AUTHORITY]: "forged" } }, true)).status).toBe(403)
   })
+  it("rejects customer checkout authority and system payment sessions in log mode", async () => {
+    process.env.GP_STAFF_BOUNDARY_MODE = "log"
+    carts.cart_1 = { id: "cart_1", customer_id: "cus_target", email: "customer@example.test", items: [], metadata: {} }
+    for (const key of ["payment_workflow", "gp_order_promise_snapshot_id", "receipt_contact_snapshot_id"]) {
+      expect((await request("/store/carts/cart_1", { metadata: { [key]: "forged" } })).status).toBe(403)
+    }
+    expect((await request("/store/payment-collections/paycol_1/payment-sessions", { provider_id: "pp_system_default" })).status).toBe(403)
+    expect(paymentRun).not.toHaveBeenCalled()
+    expect(workflow).not.toHaveBeenCalled()
+  })
   it("never downgrades an already signed cart after rollback to log", async () => {
     await prepared(); await add()
     process.env.GP_STAFF_BOUNDARY_MODE = "log"
