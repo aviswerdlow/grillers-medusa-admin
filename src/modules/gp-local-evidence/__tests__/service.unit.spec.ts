@@ -21,8 +21,13 @@ describe("#367 private Medusa file provider", () => {
     const provider = new GpLocalEvidenceFileService({}, options)
     const send = jest.fn(async (_command: unknown) => ({}))
     ;(provider as any).client_ = { send }
-    const result = await provider.upload({ filename: key, mimeType: "image/jpeg", content: "abc", access: "private" })
+    const abortSignal = AbortSignal.timeout(30_000)
+    const result = await provider.upload(
+      { filename: key, mimeType: "image/jpeg", content: "abc", access: "private" },
+      { abortSignal },
+    )
     const command = send.mock.calls[0][0] as PutObjectCommand
+    expect(send).toHaveBeenCalledWith(command, { abortSignal })
     expect(command.input).toMatchObject({ Bucket: options.bucket, Key: key, ContentType: "image/jpeg", CacheControl: "private, no-store" })
     expect(command.input).not.toHaveProperty("ACL")
     expect(result).toEqual({ key, url: "" })

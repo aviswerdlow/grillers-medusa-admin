@@ -12,6 +12,7 @@ const extension: Record<string, string> = {
 const DAY_MS = 24 * 60 * 60 * 1000
 const PENDING_GRACE_DAYS = 7
 const PRUNE_BATCH_SIZE = 100
+const S3_UPLOAD_TIMEOUT_MS = 30_000
 
 export function configuredEvidenceRetention(): EvidenceRetention {
   const raw = process.env.GP_LOCAL_EVIDENCE_RETENTION_DAYS?.trim()
@@ -76,7 +77,7 @@ export class PgLocalEvidenceStorage implements LocalEvidenceStorage {
       await this.provider.upload({
         filename: row.object_key, mimeType: row.content_type,
         content: Buffer.from(input.bytes).toString("binary"), access: "private",
-      })
+      }, { abortSignal: AbortSignal.timeout(S3_UPLOAD_TIMEOUT_MS) })
       const storedAt = new Date()
       const rows = await tx("gp_local_evidence")
         .where({ upload_id: input.uploadId, status: "pending" })

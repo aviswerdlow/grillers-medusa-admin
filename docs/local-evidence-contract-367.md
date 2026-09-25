@@ -27,13 +27,16 @@ signature, then calls the private provider. It stores a pending ledger row
 before reading bytes. A disconnected or failed upload remains pending for
 retry with the same upload ID; an existing ID with changed metadata is a
 conflict. A completed retry checks bytes and returns the same evidence ID.
+The S3 upload receives a 30-second abort signal while `complete()` holds the
+ledger row lock, so a stalled upload does not hold a database connection
+indefinitely. An interrupted upload keeps its pending identity for retry.
 No upload response contains a public URL or object key. The signed link is a
 bearer link; staff should retrieve it only when needed and never paste it into
 logs or a public ticket.
 
 `GP_LOCAL_EVIDENCE_RETENTION_DAYS` is optional. Unset means no automatic
 deletion of stored photos while the retention owner/policy remains unresolved.
-When a valid 1–3650 day value is configured, expiry is recalculated from each
+When a valid 120–3650 day value is configured, expiry is recalculated from each
 photo's `stored_at`, including photos uploaded before the policy was set; the
 worker updates their `retain_until` projections and drains all due rows in
 batches. It deletes each private object before marking its ledger row deleted.

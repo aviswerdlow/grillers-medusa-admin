@@ -68,7 +68,7 @@ describe("#367 durable private evidence upload", () => {
   it("retains pending identity after a failed provider call and completes one retry", async () => {
     const { db, rows } = ledgerDouble()
     const provider: any = { upload: jest.fn().mockRejectedValueOnce(new Error("storage timeout")).mockResolvedValue({ key: "private", url: "" }) }
-    const storage = new PgLocalEvidenceStorage(db, provider, "cus_driver", async () => true, { days: 30 })
+    const storage = new PgLocalEvidenceStorage(db, provider, "cus_driver", async () => true, { days: 120 })
     const first = await storage.prepare(intent)
     expect(first.record.status).toBe("pending")
     await expect(storage.complete({ uploadId: intent.uploadId, orderId: intent.orderId, bytes })).rejects.toThrow("storage timeout")
@@ -81,6 +81,27 @@ describe("#367 durable private evidence upload", () => {
     expect(provider.upload).toHaveBeenCalledTimes(2)
     await expect(storage.prepare({ ...intent, sha256: "a".repeat(64) })).rejects.toThrow("evidence_upload_id_conflict")
     await expect(storage.complete({ uploadId: intent.uploadId, orderId: intent.orderId, bytes: Buffer.from([1, 2]) })).rejects.toThrow("evidence_content_mismatch")
+  })
+
+  it("bounds the S3 upload while holding the row lock and leaves a timeout retryable", async () => {
+    const { db, rows } = ledgerDouble()
+    const signal = AbortSignal.abort(new Error("storage timeout"))
+    const deadline = jest.spyOn(AbortSignal, "timeout").mockReturnValue(signal)
+    const provider: any = { upload: jest.fn(async (_file: unknown, options: { abortSignal: AbortSignal }) => {
+      expect(options.abortSignal).toBe(signal)
+      throw options.abortSignal.reason
+    }) }
+    const storage = new PgLocalEvidenceStorage(db, provider, "cus_driver", async () => true, { days: 120 })
+    try {
+      await storage.prepare(intent)
+      await expect(storage.complete({ uploadId: intent.uploadId, orderId: intent.orderId, bytes }))
+        .rejects.toThrow("storage timeout")
+      expect(deadline).toHaveBeenCalledWith(30_000)
+      expect(provider.upload).toHaveBeenCalledTimes(1)
+      expect(rows.get(intent.uploadId).status).toBe("pending")
+    } finally {
+      deadline.mockRestore()
+    }
   })
 
   it("denies an unauthorized evidence link before signing", async () => {
@@ -103,11 +124,11 @@ describe("#367 durable private evidence upload", () => {
       getPresignedDownloadUrl: jest.fn(async () => "https://signed.fixture.test"),
     }
     const noPolicy = new PgLocalEvidenceStorage(db, provider, "cus_driver", async () => true, { days: null })
-    const now = new Date("2026-10-10T00:00:00Z")
+    const now = new Date("2026-12-10T00:00:00Z")
     for (let index = 0; index < 51; index++) {
       const upload = { ...intent, uploadId: `upload_abandoned_${String(index).padStart(3, "0")}` }
       await noPolicy.prepare(upload)
-      rows.get(upload.uploadId).created_at = new Date("2026-10-01T00:00:00Z")
+      rows.get(upload.uploadId).created_at = new Date("2026-12-01T00:00:00Z")
     }
     const old = { ...intent, uploadId: "upload_stored_old" }
     const { record } = await noPolicy.prepare(old)
@@ -119,24 +140,27 @@ describe("#367 durable private evidence upload", () => {
     await noPolicy.prepare(storedRecent)
     await noPolicy.complete({ uploadId: storedRecent.uploadId, orderId: storedRecent.orderId, bytes })
     Object.assign(rows.get(storedRecent.uploadId), {
-      stored_at: new Date("2026-10-01T00:00:00Z"), retain_until: null,
+      stored_at: new Date("2026-12-01T00:00:00Z"), retain_until: null,
     })
     const recent = { ...intent, uploadId: "upload_pending_new" }
     await noPolicy.prepare(recent)
-    rows.get(recent.uploadId).created_at = new Date("2026-10-09T00:00:00Z")
+    rows.get(recent.uploadId).created_at = new Date("2026-12-09T00:00:00Z")
 
-    const withPolicy = new PgLocalEvidenceStorage(db, provider, "cus_driver", async () => true, { days: 30 })
+    const withPolicy = new PgLocalEvidenceStorage(db, provider, "cus_driver", async () => true, { days: 120 })
     await expect(withPolicy.signDownload({ evidenceId: record.evidenceId, actorId: "cus_driver", ttlSeconds: 60, now }))
       .rejects.toThrow("evidence_access_denied")
     expect(provider.getPresignedDownloadUrl).not.toHaveBeenCalled()
-    expect(await pruneExpiredEvidence(db, provider, now, { days: 30 })).toBe(52)
+    await expect(pruneExpiredEvidence(db, provider, now, { days: 119 }))
+      .rejects.toThrow("invalid_evidence_retention")
+    expect(provider.delete).not.toHaveBeenCalled()
+    expect(await pruneExpiredEvidence(db, provider, now, { days: 120 })).toBe(52)
     expect(provider.delete).toHaveBeenCalledTimes(52)
-    expect(rows.get(old.uploadId).retain_until).toBe("2026-08-31T00:00:00.000Z")
+    expect(rows.get(old.uploadId).retain_until).toBe("2026-11-29T00:00:00.000Z")
     expect(rows.get(old.uploadId).status).toBe("deleted")
-    expect(rows.get(storedRecent.uploadId).retain_until).toBe("2026-10-31T00:00:00.000Z")
+    expect(rows.get(storedRecent.uploadId).retain_until).toBe("2027-03-31T00:00:00.000Z")
     expect(rows.get(storedRecent.uploadId).status).toBe("stored_private")
     expect(rows.get(recent.uploadId).status).toBe("pending")
-    expect(await pruneExpiredEvidence(db, provider, now, { days: 30 })).toBe(0)
+    expect(await pruneExpiredEvidence(db, provider, now, { days: 120 })).toBe(0)
   })
 
   it("keeps a failed deletion retryable while pruning later rows", async () => {
