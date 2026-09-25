@@ -1,9 +1,6 @@
 import { createHash } from "node:crypto"
 
-/**
- * Design contract for a dedicated private evidence bucket. No runtime adapter,
- * upload route, provider setting, or public object URL is supplied here.
- */
+/** Contract shared by the private provider, durable upload ledger and tests. */
 export type EvidenceContentType = "image/jpeg" | "image/png" | "image/webp" | "image/heic"
 export type EvidenceStatus = "pending" | "stored_private"
 
@@ -24,7 +21,7 @@ export type EvidenceRecord = EvidenceUpload & {
 
 export type EvidenceRetention = { days: number | null }
 
-/** The eventual adapter must write without an ACL header into a private bucket. */
+/** The adapter writes without an ACL header into a dedicated private bucket. */
 export interface PrivateEvidenceObjectStore {
   readonly access: "private"
   putObject(input: { key: string; bytes: Uint8Array; contentType: EvidenceContentType }): Promise<void>
