@@ -57,8 +57,10 @@ these routes or create business milestones.
 
 ## Pending boundaries
 
-Photo evidence remains an in-memory interface/test design until #367 records
-the private bucket and compatible provider go. The phone page must omit the
-photo control until then. The #359 action/notice map, #320 driver identities,
-and #332 real-device walkthrough remain activation requirements. A green source
-PR does not satisfy those runtime gates.
+The private evidence provider is under review in backend PR #62 after Avi's
+scoped storage go. Its bucket, Railway variables and production denial/signed
+link proof wait for the release lead to merge that PR. This event PR also
+depends on #438's mounted-path fix; its tests register `app.use` as Medusa does.
+The #359 action/notice/photo-exception map, #320 driver identities, and #332
+real-device walkthrough remain activation requirements. A green source PR does
+not satisfy those runtime gates.

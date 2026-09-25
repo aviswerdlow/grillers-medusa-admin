@@ -7,6 +7,8 @@ export function adminRouteCapability(path: string, method: string, body: any = {
   const p = path
   const read = method === "GET" || method === "HEAD"
   if (p === "/admin/grillers/local-milestones/orders" || /^\/admin\/grillers\/local-milestones\/orders\/[^/]+$/.test(p)) return read ? "milestones.drive" : null
+  if (/^\/admin\/grillers\/local-milestones\/orders\/[^/]+\/evidence$/.test(p)) return read ? "milestones.drive" : null
+  if (/^\/admin\/grillers\/local-milestones\/orders\/[^/]+\/evidence\/[^/]+$/.test(p)) return method === "GET" || method === "PUT" ? "milestones.drive" : null
   if (p === "/admin/grillers/local-milestones/exceptions") return read ? "milestones.office" : null
   if (/^\/admin\/grillers\/local-milestones\/orders\/[^/]+\/events$/.test(p)) return method === "POST" ? "milestones.drive" : null
   if (/^\/admin\/grillers\/local-milestones\/orders\/[^/]+\/corrections$/.test(p)) return method === "POST" ? "milestones.correct" : null
