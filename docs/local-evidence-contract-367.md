@@ -5,8 +5,8 @@ file-provider implementation for delivery photos. Medusa 2.10.3's FILE module
 requires exactly one provider, so the existing public S3 provider and its
 customer-media variables remain unchanged. The evidence module uses a dedicated
 private bucket and rejects a bucket name equal to the public-media bucket.
-The upload command omits ACL entirely because Supabase's S3 compatibility
-endpoint rejects `x-amz-acl`.
+The upload command omits ACL entirely. This is required for Supabase
+compatibility and also avoids public-object grants on Railway Storage.
 
 ## API and custody
 
@@ -51,21 +51,25 @@ event. A photo upload alone never advances an order milestone.
 1. Provider PR #62 is merged and its migration applied. Merge the retention
    follow-up from `main` with green exact-head CI before enabling the master
    flag. No bucket or Railway variable changes occur in this follow-up.
-2. After Avi confirms the approved Supabase project/account, create one
-   **private** bucket in that project. Set only `GP_LOCAL_EVIDENCE_BUCKET`,
+2. Avi approved a Railway Storage Bucket in the `grillers` project on #367.
+   After provider path-style PR #79 merges, create one **private** bucket in
+   the production environment. Set only `GP_LOCAL_EVIDENCE_BUCKET`,
    `GP_LOCAL_EVIDENCE_S3_ENDPOINT`, `GP_LOCAL_EVIDENCE_S3_REGION`,
    `GP_LOCAL_EVIDENCE_S3_ACCESS_KEY_ID` and
    `GP_LOCAL_EVIDENCE_S3_SECRET_ACCESS_KEY` on Railway API and worker. A
-   retention value requires the recorded owner/policy. Read back variable
-   **names**, bucket privacy and triggered deploy without posting values.
+   retention value requires the recorded owner/policy. The optional
+   `GP_LOCAL_EVIDENCE_S3_FORCE_PATH_STYLE` defaults to `false` for Railway;
+   PR #79 supplies this behavior. Read back variable **names**, bucket privacy
+   and triggered deploy without posting values.
 3. With a controlled test object, prove an unauthenticated public GET is
    denied, a signed GET works then expires, and delete that object. Post the
    receipts on #367. Activation remains gated by #359, #320 and #332.
 
-If that Supabase compatibility proof fails because of SDK checksum headers,
-set the private provider's S3 client `requestChecksumCalculation` and
-`responseChecksumValidation` to `WHEN_REQUIRED`, then repeat the proof. Do
-not infer compatibility from unit tests or change the public file provider.
+If a Supabase target is approved later and its compatibility proof fails
+because of SDK checksum headers, set the private provider's S3 client
+`requestChecksumCalculation` and `responseChecksumValidation` to
+`WHEN_REQUIRED`, then repeat the proof. Do not infer compatibility from unit
+tests or change the public file provider.
 
 CI tests cover the no-ACL command, signed TTL, default-off behavior, public
 bucket and missing-setting guards, unauthenticated API denial, byte limits,
