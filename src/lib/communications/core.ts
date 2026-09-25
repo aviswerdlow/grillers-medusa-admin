@@ -160,6 +160,25 @@ export function normalizeEmail(value: unknown): string {
     .toLowerCase()
 }
 
+export const CC_EMAIL_CONSENT_SOURCE = "constant_contact_import_2026_09_24"
+export const CC_EMAIL_DECISION_REF =
+  "https://github.com/aviswerdlow/grillers-pride-strategy/issues/341#issuecomment-5820987104"
+
+export function hasQualifyingEmailMarketingConsent(
+  profile: Record<string, any> | null | undefined,
+  destination: unknown
+): boolean {
+  if (!profile?.email_consent || normalizeEmail(profile.email) !== normalizeEmail(destination)) return false
+  if (profile.email_consent_at) return true
+  const metadata = jsonObject(profile.metadata)
+  // Avi's email-only C04 policy is an explicit decision, not an invented
+  // historical opt-in timestamp. The protected import stores its provenance.
+  return metadata.consent_source === CC_EMAIL_CONSENT_SOURCE &&
+    metadata.consent_decision_ref === CC_EMAIL_DECISION_REF &&
+    typeof metadata.consent_batch_id === "string" && metadata.consent_batch_id.length > 0 &&
+    typeof metadata.consent_manifest_sha256 === "string" && /^[a-f0-9]{64}$/.test(metadata.consent_manifest_sha256)
+}
+
 export function newPreferenceToken(): string {
   return crypto.randomBytes(24).toString("base64url")
 }
@@ -1053,7 +1072,7 @@ export async function sendTrackedEmail(
   if (
     !input.staff_test &&
     requiresMarketingConsent(purpose) &&
-    (normalizeEmail(profile?.email) !== emailLower || !profile?.email_consent || !profile?.email_consent_at)
+    !hasQualifyingEmailMarketingConsent(profile, emailLower)
   ) {
     await recordCommunicationEvent(db, {
       event_name: "email_suppressed",

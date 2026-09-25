@@ -4,6 +4,7 @@ const ImportRun = model
   .define("gp_import_run", {
     id: model.id({ prefix: "gpimprt" }).primaryKey(),
     source: model.text(),
+    batch_id: model.text().nullable(),
     status: model.text().default("pending"),
     started_at: model.dateTime().nullable(),
     completed_at: model.dateTime().nullable(),
@@ -19,6 +20,12 @@ const ImportRun = model
       name: "IDX_gp_import_run_source_status",
       on: ["source", "status"],
       where: "deleted_at IS NULL",
+    },
+    {
+      name: "UQ_gp_import_run_source_batch",
+      on: ["source", "batch_id"],
+      unique: true,
+      where: "batch_id IS NOT NULL",
     },
   ])
 
