@@ -40,6 +40,7 @@ export class LocalEvidenceError extends Error {
 
 const MAX_SIZE_BYTES = 10 * 1024 * 1024
 const MAX_SIGNED_LINK_SECONDS = 300
+const MIN_RETENTION_DAYS = 120
 const types: EvidenceContentType[] = ["image/jpeg", "image/png", "image/webp", "image/heic"]
 
 export function validateEvidenceUpload(input: EvidenceUpload) {
@@ -69,7 +70,7 @@ export function validateEvidenceBytes(input: EvidenceUpload, bytes: Uint8Array) 
 
 export function evidenceRetentionUntil(storedAt: Date, policy: EvidenceRetention): string | null {
   if (policy.days === null) return null
-  if (!Number.isSafeInteger(policy.days) || policy.days < 1 || policy.days > 3650)
+  if (!Number.isSafeInteger(policy.days) || policy.days < MIN_RETENTION_DAYS || policy.days > 3650)
     throw new LocalEvidenceError("invalid_evidence_retention")
   return new Date(storedAt.getTime() + policy.days * 24 * 60 * 60 * 1000).toISOString()
 }

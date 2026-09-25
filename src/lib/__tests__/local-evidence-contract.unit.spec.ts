@@ -108,7 +108,8 @@ describe("#367 private evidence contract (in-memory only)", () => {
 
   it("defaults to no deletion date and accepts a configured retention period", async () => {
     expect(evidenceRetentionUntil(new Date("2026-09-24T00:00:00Z"), { days: null })).toBeNull()
-    expect(evidenceRetentionUntil(new Date("2026-09-24T00:00:00Z"), { days: 30 })).toBe("2026-10-24T00:00:00.000Z")
+    expect(evidenceRetentionUntil(new Date("2026-09-24T00:00:00Z"), { days: 120 })).toBe("2027-01-22T00:00:00.000Z")
+    expect(() => evidenceRetentionUntil(new Date(), { days: 119 })).toThrow("invalid_evidence_retention")
     expect(() => evidenceRetentionUntil(new Date(), { days: 0 })).toThrow("invalid_evidence_retention")
   })
 })

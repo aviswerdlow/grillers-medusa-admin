@@ -55,7 +55,10 @@ export default class GpLocalEvidenceFileService extends AbstractFileProviderServ
     return { client: this.client_, bucket }
   }
 
-  async upload(file: FileTypes.ProviderUploadFileDTO): Promise<FileTypes.ProviderFileResultDTO> {
+  async upload(
+    file: FileTypes.ProviderUploadFileDTO,
+    options?: { abortSignal?: AbortSignal },
+  ): Promise<FileTypes.ProviderFileResultDTO> {
     const key = evidenceKey(file.filename)
     if (file.access === "public" || !["image/jpeg", "image/png", "image/webp", "image/heic"].includes(file.mimeType))
       throw new LocalEvidenceError("invalid_evidence_upload")
@@ -67,7 +70,7 @@ export default class GpLocalEvidenceFileService extends AbstractFileProviderServ
       Bucket: bucket, Key: key, Body: body, ContentType: file.mimeType,
       CacheControl: "private, no-store",
       // Supabase's S3 endpoint rejects x-amz-acl, even for private objects.
-    }))
+    }), options?.abortSignal ? { abortSignal: options.abortSignal } : {})
     // There is deliberately no public object URL to persist or return.
     return { key, url: "" }
   }
