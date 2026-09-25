@@ -73,6 +73,7 @@ export function serverOwnedCartKey(key: string): boolean {
     || key.startsWith("final_charge_") || key.startsWith("finalization_") || key.startsWith("catch_weight_final") || key.startsWith("fulfillment_gate_")
     || key.startsWith("qbd_posting_") || key.startsWith("quickbooks_posting_") || key.startsWith("gp_credit_")
     || key.startsWith("gp_payment_") || key.startsWith("gp_offline_") || key.startsWith("gp_order_promise_")
+    || key === "receipt_contact_snapshot_id" || key.startsWith("receipt_contact_") || key.startsWith("gp_receipt_")
 }
 
 export function staffCartMetadataKey(key: string, value?: unknown): boolean {
