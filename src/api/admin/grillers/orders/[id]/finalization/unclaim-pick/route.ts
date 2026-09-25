@@ -6,6 +6,7 @@ import {
   metadataObject,
   unclaimFinalizationPick,
 } from "../../../../../../../lib/catch-weight-finalization"
+import { withInstitutionalFinalizationWrite } from "../../../../../../../lib/gp-institutional-finalization-lock"
 import {
   emitFinalizationRouteFailureAlert,
   jsonError,
@@ -32,22 +33,25 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       : "Picker released the claimed pick."
 
   try {
-    const detail = await unclaimFinalizationPick(db, order, actor, reason)
-    const metadata = appendStaffAudit(
-      {
-        ...metadataObject(order.metadata),
-        finalization_id: detail.finalization.id,
-        finalization_status: FINALIZATION_PENDING_PICK,
-        catch_weight_status: FINALIZATION_PENDING_PICK,
-      },
-      {
-        action: "catch_weight_pick_unclaimed",
-        status: FINALIZATION_PENDING_PICK,
-        reason,
-        ...staffAudit,
-      }
-    )
-    await orderModule.updateOrders(order.id, { metadata })
+    const detail = await withInstitutionalFinalizationWrite(db, order, async (workDb) => {
+      const detail = await unclaimFinalizationPick(workDb, order, actor, reason)
+      const metadata = appendStaffAudit(
+        {
+          ...metadataObject(order.metadata),
+          finalization_id: detail.finalization.id,
+          finalization_status: FINALIZATION_PENDING_PICK,
+          catch_weight_status: FINALIZATION_PENDING_PICK,
+        },
+        {
+          action: "catch_weight_pick_unclaimed",
+          status: FINALIZATION_PENDING_PICK,
+          reason,
+          ...staffAudit,
+        }
+      )
+      await orderModule.updateOrders(order.id, { metadata })
+      return detail
+    })
 
     res.status(200).json({
       order,

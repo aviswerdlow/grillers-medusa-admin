@@ -11,6 +11,7 @@ export function adminRouteCapability(path: string, method: string, body: any = {
   if (/^\/admin\/grillers\/staff-access\/customers\/[^/]+$/i.test(p)) return method === "POST" ? "team.manage" : null
   if (/^\/admin\/customers(?:\/[^/]+)?(?:\/addresses(?:\/[^/]+)?)?$/i.test(p)) return read ? "customers.read" : method === "POST" || (method === "DELETE" && /\/addresses\//i.test(p)) ? "customers.write" : null
   if (/^\/admin\/grillers\/customers$/i.test(p) || /^\/admin\/grillers\/customers\/[^/]+\/offline-payment$/i.test(p)) return "customers.write"
+  if (/^\/admin\/grillers\/customers\/[^/]+\/institutional-terms$/i.test(p)) return read ? "customers.read" : null
   if (/^\/admin\/grillers\/communications(?:\/|$)/i.test(p)) return "communications"
   if (/^\/admin\/grillers\/quickbooks-sync(?:\/|$)/i.test(p) || /^\/admin\/grillers\/orders\/[^/]+\/accounting-action$/i.test(p)) return "accounting"
   if (/^\/admin\/grillers\/inventory\/(availability|allocations)$/i.test(p)) return "inventory.read"
