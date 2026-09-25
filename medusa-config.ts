@@ -172,6 +172,7 @@ module.exports = defineConfig({
         region: process.env.GP_LOCAL_EVIDENCE_S3_REGION,
         access_key_id: process.env.GP_LOCAL_EVIDENCE_S3_ACCESS_KEY_ID,
         secret_access_key: process.env.GP_LOCAL_EVIDENCE_S3_SECRET_ACCESS_KEY,
+        force_path_style: process.env.GP_LOCAL_EVIDENCE_S3_FORCE_PATH_STYLE,
       },
     },
     {
