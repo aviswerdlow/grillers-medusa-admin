@@ -38,6 +38,9 @@ if (process.env.TEST_TYPE === "integration:catalog") {
 if (process.env.TEST_TYPE === "integration:incoming-stock") {
   module.exports.testMatch = ["**/integration-tests/incoming-stock/*.spec.[jt]s"];
 }
+if (process.env.TEST_TYPE === "integration:local-notices") {
+  module.exports.testMatch = ["**/integration-tests/local-notices/*.spec.[jt]s"];
+}
 if (process.env.TEST_TYPE === "integration:order-promise") {
   module.exports.testMatch = ["**/integration-tests/order-promise/*.spec.[jt]s"];
 }
