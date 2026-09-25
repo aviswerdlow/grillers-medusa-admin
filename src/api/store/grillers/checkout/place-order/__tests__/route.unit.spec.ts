@@ -172,6 +172,33 @@ describe("place-order route ops alerting", () => {
     ])
   })
 
+  it("denies a direct invoice request with the institutional flag off, even for locally approved metadata", async () => {
+    const previous = process.env.GP_INSTITUTIONAL_TERMS_ENABLED
+    delete process.env.GP_INSTITUTIONAL_TERMS_ENABLED
+    try {
+      ;(getPaymentContextCustomer as jest.Mock).mockResolvedValueOnce({
+        customer: {
+          id: "medusa_institution_01",
+          metadata: { gp_offline_payment_approved: true },
+        },
+        staffTargetCustomerId: null,
+      })
+      const { req, res, cartModule } = makeReqRes()
+      req.body = { cart_id: "cart_test_123", payment_method: "invoice" }
+
+      await POST(req, res)
+
+      expect(res.status).toHaveBeenCalledWith(403)
+      expect(res.json).toHaveBeenCalledWith({ message: "Pay by invoice is unavailable online." })
+      expect(cartModule.updateCarts).not.toHaveBeenCalled()
+      expect(completeCartWorkflow).not.toHaveBeenCalled()
+      expect(createPaymentSessionsWorkflow).not.toHaveBeenCalled()
+    } finally {
+      if (previous === undefined) delete process.env.GP_INSTITUTIONAL_TERMS_ENABLED
+      else process.env.GP_INSTITUTIONAL_TERMS_ENABLED = previous
+    }
+  })
+
   it("strips otherwise-valid order SMS consent from staff proxy checkout", () => {
     const metadata = {
       keep_me: true,
