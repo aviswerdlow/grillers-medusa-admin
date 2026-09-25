@@ -19,11 +19,11 @@ const input = () => ({
 })
 
 describe("source-backed institutional collection projection", () => {
-  it("moves from accepted on terms to reconciled partial collection", () => {
+  it("moves from accepted on terms to verified partial collection", () => {
     expect(project({ ...input(), invoiceTxnId: null, finalCents: null }))
       .toMatchObject({ status: "accepted_on_terms", confirmedCollectedCents: 0 })
     expect(project(input())).toMatchObject({
-      status: "reconciled", confirmedCollectedCents: 20000,
+      status: "balance_verified", confirmedCollectedCents: 20000,
       verifiedRemainingCents: 30000, appliedReceiptCount: 1,
     })
   })
