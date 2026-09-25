@@ -70,6 +70,18 @@ describe("institutional document exposure (#370 fixtures)", () => {
     expect(result.reasons).toContain("posted_cancellation_waiting_for_qbd:TEST_ORDER_G")
   })
 
+  it("holds a cancelled posted order even while its invoice remains in the QBD read", () => {
+    const result = calculateInstitutionalExposure({
+      invoices: [invoice("TEST_INVOICE_G", 40000)],
+      commitments: [commitment("TEST_ORDER_G", 40000, "cancelled", "TEST_INVOICE_G")],
+    })
+
+    expect(result.totalCents).toBe(40000)
+    expect(result.commitmentCents).toBe(0)
+    expect(result.quarantined).toBe(true)
+    expect(result.reasons).toContain("posted_cancellation_waiting_for_qbd:TEST_ORDER_G")
+  })
+
   it("quarantines uncertain credits and a posted order lacking invoice identity", () => {
     const result = calculateInstitutionalExposure({
       invoices: [],
@@ -208,6 +220,23 @@ describe("atomic institutional credit reservations", () => {
 
     expect(result).toMatchObject({ status: "hold", reason: "existing_commitment_not_reservable" })
     expect(rows).toEqual([commitment("TEST_ORDER_A", 20000, "posted", "TEST_INVOICE_A")])
+  })
+
+  it("uses the caller's finalization transaction for the credit lock and reservation", async () => {
+    process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+    const { base, rows } = harness()
+    const transaction = { raw: jest.fn(async () => undefined) }
+    const db = { transaction: jest.fn(async () => { throw new Error("nested transaction") }) }
+    const result = await reserveInstitutionalCredit({
+      ...base, db, transaction, commitment: commitment("TEST_ORDER_A", 20000),
+    })
+    expect(result.status).toBe("reserved")
+    expect(db.transaction).not.toHaveBeenCalled()
+    expect(transaction.raw).toHaveBeenCalledWith(
+      expect.stringContaining("pg_advisory_xact_lock"),
+      ["gp_institutional_credit:TEST_COMPANY_A:TEST_LIST_001"]
+    )
+    expect(rows).toHaveLength(1)
   })
 
   it("holds stale source, missing limit, and uncertain QBD credits", async () => {
