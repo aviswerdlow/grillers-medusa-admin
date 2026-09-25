@@ -60,6 +60,8 @@ function confirmedRequest(state: InstitutionalCollectionState, requestKey: strin
   const credit = Object.entries(state.credits).find(([, value]) => value.requestKey === requestKey)
   if (credit) return { kind: "credit" as const, txnId: credit[0], amountCents: credit[1].appliedCents }
   return null
+}
+
 function canonicalEvent(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalEvent)
   if (value !== null && typeof value === "object") {
