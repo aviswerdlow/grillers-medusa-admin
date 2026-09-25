@@ -34,6 +34,18 @@ function exactId(value: unknown): value is string {
   return typeof value === "string" && value !== "" && value.trim() === value
 }
 
+function validTimestampCalendar(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.exec(value)
+  if (!match) return false
+  const [year, month, day, hour, minute, second] = match.slice(1).map(Number)
+  const calendar = new Date(0)
+  calendar.setUTCFullYear(year, month - 1, day)
+  calendar.setUTCHours(hour, minute, second, 0)
+  return calendar.getUTCFullYear() === year && calendar.getUTCMonth() + 1 === month &&
+    calendar.getUTCDate() === day && calendar.getUTCHours() === hour &&
+    calendar.getUTCMinutes() === minute && calendar.getUTCSeconds() === second
+}
+
 export function authorizeInstitutionalTerms(input: {
   featureEnabled: boolean
   expectedTestCompanyKey: string
@@ -65,7 +77,7 @@ export function authorizeInstitutionalTerms(input: {
     return { status: "deny", reason: "qbd_identity_mismatch" }
   }
   if (!exactId(snapshot.sourceRevision) || !exactId(snapshot.lastSuccess) ||
-      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(snapshot.lastSuccess) ||
+      !validTimestampCalendar(snapshot.lastSuccess) ||
       !Number.isSafeInteger(input.maxAgeMs) || input.maxAgeMs <= 0 ||
       !Number.isFinite(input.now.getTime())) {
     return { status: "hold", reason: "qbd_source_unverified" }

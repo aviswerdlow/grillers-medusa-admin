@@ -145,6 +145,14 @@ describe("institutional terms source authority (#370 synthetic fixtures)", () =>
     } }).status).toBe("allow")
   })
 
+  it("holds an impossible last-success calendar date even when Date.parse normalizes it", () => {
+    expect(authorizeInstitutionalTerms({
+      ...baseline,
+      now: new Date("2026-03-02T12:01:00Z"),
+      snapshot: { ...snapshot, lastSuccess: "2026-02-30T12:00:00Z" },
+    })).toEqual({ status: "hold", reason: "qbd_source_unverified" })
+  })
+
   it("holds an explicitly held QBD account", () => {
     expect(authorizeInstitutionalTerms({ ...baseline, snapshot: { ...snapshot, onHold: true } }))
       .toEqual({ status: "hold", reason: "qbd_account_on_hold" })
