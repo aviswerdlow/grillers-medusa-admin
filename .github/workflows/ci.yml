@@ -35,6 +35,8 @@ jobs:
       - run: yarn install --frozen-lockfile
       - name: Unit tests
         run: yarn test:unit
+      - name: Production smoke amount parser tests
+        run: node --test src/scripts/lib/__tests__/positive-cart-totals.test.mjs
       - name: Public catalog database and guard tests
         env:
           CATALOG_TEST_DATABASE_URL: postgres://gp_launch_test:isolated_fixture@127.0.0.1:5432/gp_launch
