@@ -73,6 +73,8 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     post("/store/carts/:id/line-items/:line_id", validators.StoreUpdateCartLineItem, native("carts/[id]/line-items/[line_id]").POST)
     post("/store/carts/:id/complete", null, native("carts/[id]/complete").POST)
     post("/store/payment-collections/:id/payment-sessions", null, native("payment-collections/[id]/payment-sessions").POST)
+    app.get("/store/carts/:id", (req: any, res: any) => carts[req.params.id]
+      ? res.json({ cart: carts[req.params.id] }) : res.status(404).json({ message: "Cart not found" }))
     app.all("/store/*", (req: any, res: any) => { otherEffects(req.path, req.body); res.json({ cart: carts.cart_1, ok: true }) })
     app.use((e: Error, _req: any, res: any, _next: any) => res.status(500).json({ message: e.message }))
     server = await new Promise(resolve => { const s = app.listen(0, "127.0.0.1", () => resolve(s)) })
@@ -159,6 +161,12 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     expect((await request(`/STORE/CARTS/${cartId}/COMPLETE`, {}, true)).status).toBe(403)
     customers.cus_staff.metadata.staff_access_revoked = false
     expect((await request(`/STORE/CARTS/${cartId}/COMPLETE`, {}, true)).status).toBe(200)
+  })
+  it.each(["log", "enforce"])("leaves an unknown public cart to the native 404 but denies a claimed staff cart in %s mode", async mode => {
+    process.env.GP_STAFF_BOUNDARY_MODE = mode
+    const cartId = generateEntityId(undefined, "cart")
+    expect((await request(`/store/carts/${cartId}`, undefined, false, { method: "GET" })).status).toBe(404)
+    expect((await request(`/store/carts/${cartId}`, undefined, true, { method: "GET" })).status).toBe(403)
   })
   it("rejects raw fragments before payment provider and stock checks", async () => {
     await prepared(); await add()

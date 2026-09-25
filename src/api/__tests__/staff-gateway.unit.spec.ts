@@ -86,7 +86,7 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
   async function request(route: string, options: { method?: string; body?: any; key?: string; token?: string | null; authorization?: string } = {}) {
     const headers: Record<string, string> = { "content-type": "application/json", authorization: options.authorization || `Basic ${Buffer.from(`${options.key || "sk_gateway"}:`).toString("base64")}` }
     if (options.token !== null) headers["x-gp-staff-authorization"] = `Bearer ${options.token || token()}`
-    const res = await fetch(baseUrl + route, { method: options.method || "POST", headers, ...(options.method === "GET" ? {} : { body: JSON.stringify(options.body || { staff_actor_customer_id: "forged_owner", staff_actor_email: "forged@example.test", staff_actor_name: "Forged" }) }) })
+    const res = await fetch(baseUrl + route, { method: options.method || "POST", headers, ...(["GET", "HEAD"].includes(options.method || "") ? {} : { body: JSON.stringify(options.body || { staff_actor_customer_id: "forged_owner", staff_actor_email: "forged@example.test", staff_actor_name: "Forged" }) }) })
     return { status: res.status, body: await res.json().catch(() => ({})) as any }
   }
   async function rawRequest(route: string, body: any = {}) {
@@ -156,17 +156,20 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     process.env.GP_ADMIN_READ_ONLY_API_KEY_IDS = "apk_gateway"
     expect((await request("/admin/products", { token: null, method: "GET" })).status).toBe(403)
   })
-  it.each(["log", "enforce"])("applies the reader GET allow-list in %s mode", async mode => {
+  it.each(["log", "enforce"])("applies the reader GET/HEAD allow-list in %s mode", async mode => {
     process.env.GP_STAFF_BOUNDARY_MODE = mode
     expect((await request("/admin/products", { key: "sk_reader", token: null, method: "GET" })).status).toBe(200)
+    expect((await request("/admin/products", { key: "sk_reader", token: null, method: "HEAD" })).status).toBe(200)
     expect((await request("/admin/invites", { key: "sk_reader", token: null, method: "GET" })).status).toBe(403)
+    expect((await request("/admin/invites", { key: "sk_reader", token: null, method: "HEAD" })).status).toBe(403)
     expect((await request("/admin/products/", { key: "sk_reader", token: null, method: "GET" })).status).toBe(403)
   })
-  it.each(["log", "enforce"])("applies the native reader GET allow-list in %s mode", async mode => {
+  it.each(["log", "enforce"])("applies the native reader GET/HEAD allow-list in %s mode", async mode => {
     process.env.GP_STAFF_BOUNDARY_MODE = mode
     process.env.GP_ADMIN_READ_ONLY_USER_IDS = "usr_reader"
     const authorization = `Bearer ${token({ actor_type: "user", actor_id: "usr_reader" })}`
     expect((await request("/admin/orders?limit=1", { authorization, token: null, method: "GET" })).status).toBe(200)
+    expect((await request("/admin/orders?limit=1", { authorization, token: null, method: "HEAD" })).status).toBe(200)
     expect((await request("/admin/invites", { authorization, token: null, method: "GET" })).status).toBe(403)
     expect((await request("/admin/products", { authorization, token: null })).status).toBe(403)
   })
@@ -218,10 +221,11 @@ describe("Staff gateway (installed Medusa authentication and native handlers)", 
     expect(effects).not.toHaveBeenCalled()
     delete process.env.GP_ORDER_REVIEW_ENFORCEMENT
   })
-  it("restricts a parity key to the original-order GET even when also listed as a broad reader", async () => {
+  it("restricts a parity key to the original-order read even when also listed as a broad reader", async () => {
     process.env.GP_ADMIN_READ_ONLY_API_KEY_IDS = "apk_reader,apk_parity"
     const route = "/admin/grillers/analytics/order-promises"
     expect((await request(route, { key: "sk_parity", token: null, method: "GET" })).status).toBe(200)
+    expect((await request(route, { key: "sk_parity", token: null, method: "HEAD" })).status).toBe(200)
     for (const path of ["/admin/orders", "/admin/orders/o", "/admin/customers", "/admin/products", "/admin/grillers/inventory/allocations"]) {
       expect((await request(path, { key: "sk_parity", token: null, method: "GET" })).status).toBe(403)
     }

@@ -9,6 +9,6 @@ export function staffRequestPath(req: { originalUrl?: unknown; url?: unknown; pa
 /** Keep ID segments literal; callers match only fixed route parts case-insensitively. */
 export function isCanonicalStaffPath(path: string): boolean {
   return path.startsWith("/") && path.length > 1 && !path.endsWith("/")
-    && !/[#;%]/.test(path) && !path.includes("//")
+    && !/[#;%\\]/.test(path) && !path.includes("//")
     && !path.split("/").some(segment => segment === "." || segment === "..")
 }

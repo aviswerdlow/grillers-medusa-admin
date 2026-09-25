@@ -26,7 +26,12 @@ async function requestCart(req: MedusaRequest): Promise<any | null> {
   }
   if (!id) return null
   const { data } = await query.graph({ entity: "cart", fields: cartFields, filters: { id } })
-  if (!data?.[0]) throw new StaffAccessDenied("The cart is unavailable.")
+  if (!data?.[0]) {
+    // A public request for an unknown cart should reach Medusa's native 404.
+    // Keep the fail-closed response when the caller claims staff authority.
+    if (!req.headers[STAFF_AUTHORIZATION_HEADER] && !req.headers["x-gp-staff-target-customer-id"]) return null
+    throw new StaffAccessDenied("The cart is unavailable.")
+  }
   return data[0]
 }
 

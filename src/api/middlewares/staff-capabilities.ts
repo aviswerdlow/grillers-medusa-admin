@@ -21,8 +21,8 @@ export async function enforceStaffCapabilities(req: MedusaRequest, res: MedusaRe
   const readOnlyUser = transport?.actor_type === "user" && configuredIds("GP_ADMIN_READ_ONLY_USER_IDS").has(transportId)
   const readOnlyKey = transport?.actor_type === "api-key" && configuredIds("GP_ADMIN_READ_ONLY_API_KEY_IDS").has(transportId)
   // These dedicated credentials have no legacy traffic to preserve. Apply the
-  // narrow GET list before log mode can turn a would-deny into an admission.
-  if (parityReader ? req.method !== "GET" || !isOrderPromiseReadPath(path)
+  // narrow read list before log mode can turn a would-deny into an admission.
+  if (parityReader ? (req.method !== "GET" && req.method !== "HEAD") || !isOrderPromiseReadPath(path)
     : (readOnlyUser || readOnlyKey) && !isReadOnlyServiceRoute(path, req.method)) {
     return res.status(403).json({ message: "This read-only account cannot access this admin route." })
   }
@@ -41,8 +41,8 @@ export async function enforceStaffCapabilities(req: MedusaRequest, res: MedusaRe
     const nativeReadOnlyUser = principal.kind === "service" && principal.auth.actor_type === "user" && principal.service_role === "read_only"
     const allowed = principal.kind === "operator"
       || (principal.kind === "service" ? principal.service_scope === "parity"
-        ? req.method === "GET" && isOrderPromiseReadPath(path)
-        : (!nativeReadOnlyUser || req.method === "GET") && isServiceRoute(principal.service_role, path, req.method, (req as any).validatedBody || req.body) : capability && principal.capabilities.has(capability))
+        ? (req.method === "GET" || req.method === "HEAD") && isOrderPromiseReadPath(path)
+        : (!nativeReadOnlyUser || req.method === "GET" || req.method === "HEAD") && isServiceRoute(principal.service_role, path, req.method, (req as any).validatedBody || req.body) : capability && principal.capabilities.has(capability))
     if (!allowed) throw new StaffAccessDenied("Your current staff permissions do not allow this action.")
     ;(req as any).gp_staff_principal = principal
     // Native order/payment workflows copy auth_context.actor_id into canceled_by,

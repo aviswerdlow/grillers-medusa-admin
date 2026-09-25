@@ -14,6 +14,7 @@ describe("staff request path", () => {
     "/admin/orders#x", "/admin/orders?limit=1#x", "/admin/orders;other",
     "/admin/./orders", "/admin/../orders", "/admin/orders/.", "/admin/orders/..",
     "/admin//orders", "/admin/%6frders", "/admin/orders/",
+    "/admin/orders\\order_01KX", "/store/carts\\cart_01KX/complete",
   ])("rejects ambiguous request target %s", originalUrl => {
     expect(isCanonicalStaffPath(staffRequestPath({ originalUrl }))).toBe(false)
   })
