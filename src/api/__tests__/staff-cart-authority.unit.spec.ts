@@ -168,18 +168,21 @@ describe("Staff cart boundary through installed Medusa validators and handlers",
     expect(paymentRun).not.toHaveBeenCalled()
     expect(completeRun).not.toHaveBeenCalled()
   })
-  it("allows native Stripe sessions only for signed staff card-at-placement carts, including uppercase IDs", async () => {
+  it.each(["log", "enforce"])("allows native Stripe sessions only for signed staff card-at-placement carts in %s mode", async mode => {
     const cartId = generateEntityId(undefined, "cart")
     paymentCollectionId = generateEntityId(undefined, "paycol")
     paymentCartId = cartId
     carts[cartId] = { id: cartId, customer_id: "cus_target", email: "customer@example.test", items: [], metadata: {} }
+    process.env.GP_STAFF_BOUNDARY_MODE = mode
     expect((await request(`/STORE/PAYMENT-COLLECTIONS/${paymentCollectionId}/PAYMENT-SESSIONS`, { provider_id: "pp_stripe_stripe" }, true)).status).toBe(403)
     expect(paymentRun).not.toHaveBeenCalled()
+    process.env.GP_STAFF_BOUNDARY_MODE = "enforce"
     createRun.mockImplementationOnce(async ({ input }) => {
       const cart = { ...input, id: cartId, customer_id: "cus_target", items: [], completed_at: null }
       carts[cartId] = cart; return { result: cart }
     })
     await prepared("send_checkout_link")
+    process.env.GP_STAFF_BOUNDARY_MODE = mode
     expect((await request(`/store/payment-collections/${paymentCollectionId}/payment-sessions`, { provider_id: "pp_stripe_stripe" }, true)).status).toBe(403)
     expect(paymentRun).not.toHaveBeenCalled()
   })
