@@ -15,11 +15,11 @@ const cartFields = ["id", "email", "customer_id", "metadata", "completed_at", "i
 
 async function requestCart(req: MedusaRequest): Promise<any | null> {
   const path = staffRequestPath(req)
-  const cartMatch = path.match(/^\/store\/carts\/([^/]+)/)
+  const cartMatch = path.match(/^\/store\/carts\/([^/]+)/i)
   let id = cartMatch?.[1] || (req.body as any)?.cart_id
   const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
-  if (path.startsWith("/store/payment-collections/")) {
-    const paymentId = path.split("/")[3]
+  if (/^\/store\/payment-collections\//i.test(path)) {
+    const paymentId = path.match(/^\/store\/payment-collections\/([^/]+)/i)?.[1]
     const { data } = await query.graph({ entity: "cart_payment_collection", fields: ["cart.id"], filters: { payment_collection_id: paymentId } })
     id = data?.[0]?.cart?.id
     if (!id) throw new StaffAccessDenied("This payment collection has no verified cart.")
@@ -84,7 +84,7 @@ async function assertCurrentCartAuthority(req: MedusaRequest, cart: any, proof: 
   if (Object.prototype.hasOwnProperty.call(body, "email") && normalizedCartEmail(body.email) !== proof.email) throw new StaffAccessDenied("Prepare a new staff cart to change its customer.")
   // Native cart transfer assigns auth_context.actor_id. Never assign the staff
   // account to the customer's cart or switch to a different customer.
-  if (path.endsWith("/customer")) {
+  if (/\/customer$/i.test(path)) {
     const customerAuth = signedCustomerContext(req, req.headers.authorization)
     if (!proof.customer_id || customerAuth?.actor_id !== proof.customer_id) throw new StaffAccessDenied("This cart is already bound to its customer.")
   }
@@ -121,17 +121,21 @@ export async function enforceStaffCartAuthority(req: MedusaRequest, res: MedusaR
     const marked = cart && cartHasStaffMarkers(cart)
     // Checkout authority is server-owned in every rollout mode. A client may
     // echo an unchanged value, but cannot create or replace it.
-    const lineId = path.match(/\/line-items\/([^/]+)$/)?.[1]
-    const isLine = /\/line-items(?:\/[^/]+)?$/.test(path)
+    const lineId = path.match(/\/line-items\/([^/]+)$/i)?.[1]
+    const isLine = /\/line-items(?:\/[^/]+)?$/i.test(path)
     const currentLine = isLine && cart ? (cart.items || []).find((line: any) => line.id === lineId) : null
     const currentMetadata = isLine ? currentLine?.metadata : cart?.metadata
     const serverSafeMetadata = guardedServerMetadata(body.metadata, currentMetadata)
     if (serverSafeMetadata !== undefined) writeMetadata(req, serverSafeMetadata)
     for (const line of Array.isArray(body.items) ? body.items : []) guardedServerMetadata(line?.metadata, undefined)
     const providerId = body.provider_id ?? record((req as any).validatedBody).provider_id
-    if (req.method === "POST" && path.startsWith("/store/payment-collections/") && path.endsWith("/payment-sessions")
-      && providerId !== undefined && providerId !== "pp_stripe_stripe") {
-      throw new StaffAccessDenied("Public checkout accepts card payment sessions only.")
+    if (req.method === "POST" && /^\/store\/payment-collections\/[^/]+\/payment-sessions$/i.test(path)) {
+      // A native Stripe webhook can complete its linked cart without entering
+      // place-order. Only a verified staff card-at-placement cart may create
+      // a public native session; retail cards use place-order.
+      const sessionProof = marked && verifiedStaffCartAuthority(cart, staffCartSigningSecret(req.scope))
+      if (providerId !== "pp_stripe_stripe" || !sessionProof || sessionProof.payment_mode !== "collect_card_now")
+        throw new StaffAccessDenied("Native payment sessions require a verified staff card-at-placement cart.")
     }
     // Signed carts never downgrade, even during rollback. Log mode leaves the
     // existing unsigned staff workflow available until both deployments agree.
@@ -156,7 +160,7 @@ export async function enforceStaffCartAuthority(req: MedusaRequest, res: MedusaR
     if (metadata !== undefined) writeMetadata(req, metadata)
     for (const line of Array.isArray(body.items) ? body.items : []) guardedMetadata(line?.metadata, undefined, false)
 
-    if (staff && proof && cart && req.method === "POST" && (metadata !== undefined || isLine || path === `/store/carts/${cart.id}`)) {
+    if (staff && proof && cart && req.method === "POST" && (metadata !== undefined || isLine || path.match(/^\/store\/carts\/([^/]+)$/i)?.[1] === cart.id)) {
       const canonical = { ...(metadata || {}), ...staffCartActorFields(proof), staff_last_action_at: new Date().toISOString() }
       if (metadata?.staff_payment_completed_by_customer_id !== undefined) {
         ;(canonical as any).staff_payment_completed_by_customer_id = proof.actor_id
@@ -180,15 +184,15 @@ export async function enforceStaffCartAuthority(req: MedusaRequest, res: MedusaR
 
     // Calendar list/select/validate only return quotes. Staff identity still
     // applies above; date-bound ATP and override receipts apply at payment.
-    const isCalendarQuote = path === "/store/grillers/checkout/fulfillment-calendar"
-    const isPayment = !isCalendarQuote && req.method === "POST" && (path.endsWith("/complete") || path.startsWith("/store/payment-collections")
-      || path.endsWith("/payment-collection") || path.startsWith("/store/grillers/checkout/"))
+    const isCalendarQuote = /^\/store\/grillers\/checkout\/fulfillment-calendar$/i.test(path)
+    const isPayment = !isCalendarQuote && req.method === "POST" && (/\/complete$/i.test(path) || /^\/store\/payment-collections(?:\/|$)/i.test(path)
+      || /\/payment-collection$/i.test(path) || /^\/store\/grillers\/checkout\//i.test(path))
     if (proof && isPayment) {
-      if (cart.completed_at && !path.endsWith("/complete") && !path.endsWith("/place-order")) throw new StaffAccessDenied("This cart already has an order.")
+      if (cart.completed_at && !/\/(complete|place-order)$/i.test(path)) throw new StaffAccessDenied("This cart already has an order.")
       // Native completion is idempotent. A retry must retrieve the same order,
       // not reject it because that order now owns the stock reservation.
       if (!cart.completed_at) await checkStaffCartBeforePayment(req, cart, proof, secret!)
-      if (path.endsWith("/payment-sessions")) {
+      if (/\/payment-sessions$/i.test(path)) {
         if (body.provider_id !== "pp_stripe_stripe") throw new StaffAccessDenied("Use the card checkout or the approved invoice action.")
         // Native payment creation consumes actor_id as its account holder.
         // The cart receipt authorizes this buyer, never the Office account.
