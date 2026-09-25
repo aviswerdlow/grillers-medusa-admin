@@ -165,6 +165,17 @@ module.exports = defineConfig({
       resolve: "./src/modules/gp-catch-weight",
     },
     {
+      resolve: "./src/modules/gp-local-evidence",
+      options: {
+        bucket: process.env.GP_LOCAL_EVIDENCE_BUCKET,
+        endpoint: process.env.GP_LOCAL_EVIDENCE_S3_ENDPOINT,
+        region: process.env.GP_LOCAL_EVIDENCE_S3_REGION,
+        access_key_id: process.env.GP_LOCAL_EVIDENCE_S3_ACCESS_KEY_ID,
+        secret_access_key: process.env.GP_LOCAL_EVIDENCE_S3_SECRET_ACCESS_KEY,
+        force_path_style: process.env.GP_LOCAL_EVIDENCE_S3_FORCE_PATH_STYLE,
+      },
+    },
+    {
       resolve: "./src/modules/gp-communications",
     },
     {

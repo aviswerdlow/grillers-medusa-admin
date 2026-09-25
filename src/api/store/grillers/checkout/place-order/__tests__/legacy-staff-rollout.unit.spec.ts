@@ -39,11 +39,14 @@ jest.mock("../../../../../../lib/order-review-checkout", () => ({
 }));
 
 const clone = (value: any) => JSON.parse(JSON.stringify(value));
-const prior = { review: process.env.GP_ORDER_REVIEW_ENFORCEMENT, staff: process.env.GP_STAFF_BOUNDARY_MODE };
+const prior = { review: process.env.GP_ORDER_REVIEW_ENFORCEMENT, staff: process.env.GP_STAFF_BOUNDARY_MODE, institutional: process.env.GP_INSTITUTIONAL_TERMS_ENABLED };
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.GP_ORDER_REVIEW_ENFORCEMENT;
   delete process.env.GP_STAFF_BOUNDARY_MODE;
+  // These tests exercise the pre-existing invoice path and staff/cart guards.
+  // The separate #370 route test proves invoice denial with this flag unset.
+  process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true";
   (assertPaymentMethodBelongsToCustomer as jest.Mock).mockResolvedValue(true);
   (checkInventoryAvailability as jest.Mock).mockResolvedValue([{ variant_id: "variant_fixture", decision: "available" }]);
   (acceptCheckoutReview as jest.Mock).mockResolvedValue({ completed: false, snapshot: { promise: { terms: {
@@ -53,7 +56,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   jest.restoreAllMocks();
-  for (const [name, value] of [["GP_ORDER_REVIEW_ENFORCEMENT", prior.review], ["GP_STAFF_BOUNDARY_MODE", prior.staff]]) {
+  for (const [name, value] of [["GP_ORDER_REVIEW_ENFORCEMENT", prior.review], ["GP_STAFF_BOUNDARY_MODE", prior.staff], ["GP_INSTITUTIONAL_TERMS_ENABLED", prior.institutional]]) {
     if (value === undefined) delete process.env[name!]; else process.env[name!] = value;
   }
 });
