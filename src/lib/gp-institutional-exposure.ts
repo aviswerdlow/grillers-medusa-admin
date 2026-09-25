@@ -78,7 +78,14 @@ export function calculateInstitutionalExposure(
 
     // The exact QBD document replaces its local commitment once it appears in
     // a complete source read. Retaining both would consume the same credit twice.
-    if (invoiceTxnId && invoiceIds.has(invoiceTxnId)) continue
+    if (invoiceTxnId && invoiceIds.has(invoiceTxnId)) {
+      // QBD still owns the receivable, but a cancelled posted order also
+      // needs an explicit credit/readback before further terms are offered.
+      if (commitment.state === "cancelled") {
+        reasons.push(`posted_cancellation_waiting_for_qbd:${orderId}`)
+      }
+      continue
+    }
 
     // Cancelling an unposted order releases its commitment. A posted cancellation
     // remains outstanding until QBD confirms the corresponding credit/payment.
