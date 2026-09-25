@@ -74,6 +74,21 @@ export function institutionalDollarsToCents(amount: unknown): number {
   return cents
 }
 
+/** Finalization must keep the QBD terms that the customer accepted at checkout. */
+export function institutionalOrderTermsMatch(
+  metadata: unknown,
+  account: Pick<InstitutionalCheckoutAuthority, "termsListId" | "termsName">
+): boolean {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return false
+  const fields = metadata as Record<string, unknown>
+  return typeof fields.gp_institutional_terms_list_id === "string" &&
+    fields.gp_institutional_terms_list_id !== "" &&
+    fields.gp_institutional_terms_list_id === account.termsListId &&
+    typeof fields.gp_payment_terms === "string" &&
+    fields.gp_payment_terms !== "" &&
+    fields.gp_payment_terms === account.termsName
+}
+
 /** The cart ID is a stable pre-order reservation ID; it travels on the order. */
 export async function reserveInstitutionalCheckout(input: {
   db: any

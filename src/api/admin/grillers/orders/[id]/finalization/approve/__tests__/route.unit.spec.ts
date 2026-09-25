@@ -38,6 +38,7 @@ jest.mock("../../../../../../../../lib/ops-alert", () => ({
 jest.mock("../../../../../../../../lib/gp-institutional-checkout", () => ({
   institutionalCheckoutAuthority: jest.fn(),
   institutionalDollarsToCents: jest.requireActual("../../../../../../../../lib/gp-institutional-checkout").institutionalDollarsToCents,
+  institutionalOrderTermsMatch: jest.requireActual("../../../../../../../../lib/gp-institutional-checkout").institutionalOrderTermsMatch,
   reserveInstitutionalCheckout: jest.fn(),
 }))
 jest.mock("../../../../../../../../lib/gp-institutional-release-intent", () => ({
@@ -90,7 +91,13 @@ function makeScope() {
 }
 
 describe("approve finalization route", () => {
-  const priorInstitutionalFlag = process.env.GP_INSTITUTIONAL_TERMS_ENABLED
+const priorInstitutionalFlag = process.env.GP_INSTITUTIONAL_TERMS_ENABLED
+const acceptedTerms = {
+  gp_institutional_commitment_id: "cart:cart_123",
+  gp_institutional_terms_list_id: "TEST_TERMS_NET10",
+  gp_payment_terms: "Net 10",
+}
+const sourceTerms = { termsListId: "TEST_TERMS_NET10", termsName: "Net 10" }
   beforeEach(() => {
     jest.clearAllMocks()
     mockIsInvoiceOrder.mockReturnValue(false)
@@ -256,13 +263,41 @@ it("keeps release denied and pages when the denied-attempt audit cannot be store
   }))
 })
 
+it.each([
+  ["ListID", { termsListId: "TEST_TERMS_NET30", termsName: "Net 10" }],
+  ["displayed terms", { termsListId: "TEST_TERMS_NET10", termsName: "Net 30" }],
+])("holds finalization when current QBD %s differs from checkout", async (_label, changedTerms) => {
+  process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+  mockIsInvoiceOrder.mockReturnValue(true)
+  ;(institutionalCheckoutAuthority as jest.Mock).mockResolvedValueOnce({
+    status: "allow", account: {
+      companyKey: "TEST_SHA", customerListId: "TEST_LIST", creditLimitCents: 100000,
+      invoices: [], ...changedTerms,
+    },
+  })
+  const { scope, query, auditInsert, orderModule } = makeScope()
+  query.graph.mockResolvedValueOnce({ data: [{
+    id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
+    metadata: acceptedTerms,
+  }] } as any)
+  const res = makeRes()
+  await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
+  expect(res.status).toHaveBeenCalledWith(409)
+  expect(reserveInstitutionalCheckout).not.toHaveBeenCalled()
+  expect(mockApproveFinalization).not.toHaveBeenCalled()
+  expect(orderModule.updateOrders).not.toHaveBeenCalled()
+  expect(auditInsert).toHaveBeenCalledWith(expect.objectContaining({
+    authority_reason: "qbd_terms_changed", decision: "denied",
+  }))
+})
+
 it("audits an over-limit release attempt after its credit transaction is denied", async () => {
   process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
   mockIsInvoiceOrder.mockReturnValue(true)
   ;(institutionalCheckoutAuthority as jest.Mock).mockResolvedValueOnce({
     status: "allow", account: {
       companyKey: "TEST_SHA", customerListId: "TEST_LIST", creditLimitCents: 100000,
-      invoices: [],
+      invoices: [], ...sourceTerms,
     },
   })
   ;(previewFinalization as jest.Mock).mockResolvedValueOnce({
@@ -274,7 +309,7 @@ it("audits an over-limit release attempt after its credit transaction is denied"
   const { scope, query, auditInsert } = makeScope()
   query.graph.mockResolvedValueOnce({ data: [{
     id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
-    metadata: { gp_institutional_commitment_id: "cart:cart_123" },
+    metadata: acceptedTerms,
   }] } as any)
   const res = makeRes()
   await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
@@ -288,7 +323,7 @@ it("audits an over-limit release attempt after its credit transaction is denied"
 it("reserves the packed invoice total in the approval transaction before A/R release", async () => {
   process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
   mockIsInvoiceOrder.mockReturnValue(true)
-  const account = { companyKey: "TEST_SHA", customerListId: "TEST_LIST", creditLimitCents: 100000, invoices: [] }
+  const account = { companyKey: "TEST_SHA", customerListId: "TEST_LIST", creditLimitCents: 100000, invoices: [], ...sourceTerms }
   ;(institutionalCheckoutAuthority as jest.Mock).mockResolvedValueOnce({ status: "allow", account })
   ;(reserveInstitutionalCheckout as jest.Mock).mockResolvedValueOnce({ status: "reserved", projectedCents: 50000 })
   ;(previewFinalization as jest.Mock).mockResolvedValueOnce({ errors: [], totals: { final_order_total: 500 } })
@@ -309,7 +344,7 @@ it("reserves the packed invoice total in the approval transaction before A/R rel
   })
   query.graph.mockResolvedValueOnce({ data: [{
     id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
-    metadata: { gp_institutional_commitment_id: "cart:cart_123" },
+    metadata: acceptedTerms,
   }] } as any)
   const res = makeRes()
   await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
@@ -331,7 +366,7 @@ it("rolls back approval when the packed total differs from the reserved amount",
   process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
   mockIsInvoiceOrder.mockReturnValue(true)
   ;(institutionalCheckoutAuthority as jest.Mock).mockResolvedValueOnce({ status: "allow", account: {
-    companyKey: "TEST_SHA", customerListId: "TEST_LIST", creditLimitCents: 100000, invoices: [],
+    companyKey: "TEST_SHA", customerListId: "TEST_LIST", creditLimitCents: 100000, invoices: [], ...sourceTerms,
   } })
   ;(reserveInstitutionalCheckout as jest.Mock).mockResolvedValueOnce({ status: "reserved" })
   ;(previewFinalization as jest.Mock).mockResolvedValueOnce({ errors: [], totals: { final_order_total: 500 } })
@@ -342,7 +377,7 @@ it("rolls back approval when the packed total differs from the reserved amount",
   const { scope, query, orderModule } = makeScope()
   query.graph.mockResolvedValueOnce({ data: [{
     id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
-    metadata: { gp_institutional_commitment_id: "cart:cart_123" },
+    metadata: acceptedTerms,
   }] } as any)
   const res = makeRes()
   await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)

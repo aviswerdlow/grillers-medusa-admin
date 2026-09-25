@@ -16,6 +16,7 @@ import { requestStaffPrincipal } from "../../../../../../../lib/staff-principal"
 import {
   institutionalCheckoutAuthority,
   institutionalDollarsToCents,
+  institutionalOrderTermsMatch,
   reserveInstitutionalCheckout,
 } from "../../../../../../../lib/gp-institutional-checkout"
 import { withInstitutionalFinalizationWrite } from "../../../../../../../lib/gp-institutional-finalization-lock"
@@ -71,6 +72,10 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           if (authority.status !== "allow") {
             deniedInstitutionalReason = authority.reason
             throw new Error("Institutional terms need a current account review.")
+          }
+          if (!institutionalOrderTermsMatch(order.metadata, authority.account)) {
+            deniedInstitutionalReason = "qbd_terms_changed"
+            throw new Error("Institutional terms changed after checkout and need a new review.")
           }
           const preview = await previewFinalization(workDb, {
             ...order,

@@ -587,6 +587,7 @@ async function placeInvoiceOrder(
     payment_status: "invoice",
     gp_payment_method: "invoice",
     gp_payment_terms: account.termsName,
+    gp_institutional_terms_list_id: account.termsListId,
     gp_institutional_commitment_id: reservationId,
     gp_institutional_source_revision: account.sourceRevision,
     gp_institutional_source_last_success: account.lastSuccess,
