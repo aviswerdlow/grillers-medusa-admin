@@ -75,12 +75,12 @@ it("stays off by default without an order or bridge read", async () => {
   expect(req.scope.resolve).not.toHaveBeenCalled()
 })
 
-it("shows staff one exact posted invoice's reconciled partial collection", async () => {
+it("shows staff one exact posted invoice's verified partial collection", async () => {
   const { req, res, db } = request()
   await GET(req, res)
   expect(res.status).toHaveBeenCalledWith(200)
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
-    status: "reconciled", invoiceTxnId: "TEST_INVOICE_E",
+    status: "balance_verified", invoiceTxnId: "TEST_INVOICE_E",
     collection: expect.objectContaining({ confirmedCollectedCents: 20000, verifiedRemainingCents: 30000 }),
   }))
   expect(db).toHaveBeenCalledWith("gp_institutional_credit_commitment")
