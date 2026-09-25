@@ -35,6 +35,8 @@
     "test:incoming-stock": "TEST_TYPE=integration:incoming-stock NODE_OPTIONS=--experimental-vm-modules jest --runInBand --forceExit"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.556.0",
+    "@aws-sdk/s3-request-presigner": "^3.556.0",
     "@clickhouse/client": "^1.18.5",
     "@hebcal/core": "^5.10.1",
     "@medusajs/admin-sdk": "2.10.3",
