@@ -40,6 +40,8 @@ describe("institutional terms source authority (#370 synthetic fixtures)", () =>
   it("requires the feature flag even for a verified test account", () => {
     expect(authorizeInstitutionalTerms({ ...baseline, featureEnabled: false }))
       .toEqual({ status: "deny", reason: "feature_disabled" })
+    expect(authorizeInstitutionalTerms({ ...baseline, featureEnabled: "false" as unknown as boolean }))
+      .toEqual({ status: "deny", reason: "feature_disabled" })
   })
 
   it("accepts the exact verified QBD test account without backup card terms", () => {
@@ -58,8 +60,37 @@ describe("institutional terms source authority (#370 synthetic fixtures)", () =>
       .toEqual({ status: "deny", reason: "no_verified_account_link" })
   })
 
+  it("denies a different requester even when the verified link and snapshot agree", () => {
+    expect(authorizeInstitutionalTerms({ ...baseline, customerId: "medusa_institution_02" }))
+      .toEqual({ status: "deny", reason: "no_verified_account_link" })
+  })
+
+  it("requires a verified link for the configured test company", () => {
+    for (const changedLink of [
+      { ...link, status: "pending_source_read" as const },
+      { ...link, status: "quarantined" as const },
+      { ...link, companyKey: "TEST_COMPANY_B" },
+    ]) {
+      expect(authorizeInstitutionalTerms({ ...baseline, link: changedLink }))
+        .toEqual({ status: "deny", reason: "no_verified_account_link" })
+    }
+  })
+
+  it("requires the snapshot to name the verified test source and linked customer", () => {
+    expect(authorizeInstitutionalTerms({ ...baseline, snapshot: {
+      ...snapshot, source: "quickbooks_desktop_production" as InstitutionalQbdSnapshot["source"],
+    } })).toEqual({ status: "deny", reason: "qbd_identity_mismatch" })
+    expect(authorizeInstitutionalTerms({ ...baseline, snapshot: {
+      ...snapshot, medusaCustomerId: "medusa_institution_02",
+    } })).toEqual({ status: "deny", reason: "qbd_identity_mismatch" })
+  })
+
   it("denies an unflagged or unverified QBD account", () => {
-    for (const change of [{ approvalValue: "No" }, { approvalVerified: false }, { approvalField: "Other" }]) {
+    for (const change of [
+      { approvalValue: "No" }, { approvalValue: "YES" }, { approvalValue: "Yes " },
+      { approvalVerified: false }, { approvalVerified: "false" as unknown as boolean },
+      { approvalField: "Other" },
+    ]) {
       expect(authorizeInstitutionalTerms({ ...baseline, snapshot: { ...snapshot, ...change } }))
         .toEqual({ status: "deny", reason: "qbd_approval_missing" })
     }
@@ -80,7 +111,7 @@ describe("institutional terms source authority (#370 synthetic fixtures)", () =>
   })
 
   it("holds missing terms or a missing credit limit without a default Net term", () => {
-    for (const change of [{ termsListId: null }, { creditLimitCents: null }]) {
+    for (const change of [{ termsListId: null }, { creditLimitCents: null }, { creditLimitCents: 0 }]) {
       expect(authorizeInstitutionalTerms({ ...baseline, snapshot: { ...snapshot, ...change } }))
         .toEqual({ status: "hold", reason: "qbd_terms_or_limit_missing" })
     }
@@ -102,6 +133,16 @@ describe("institutional terms source authority (#370 synthetic fixtures)", () =>
     expect(authorizeInstitutionalTerms({
       ...baseline, sourceStatus: "unavailable", link: null, snapshot: null,
     })).toEqual({ status: "hold", reason: "qbd_source_unavailable" })
+  })
+
+  it("requires a valid last-success timestamp with an explicit timezone", () => {
+    for (const lastSuccess of ["not-a-date", "2026-09-22T12:00:00", "2026-09-22"]) {
+      expect(authorizeInstitutionalTerms({ ...baseline, snapshot: { ...snapshot, lastSuccess } }))
+        .toEqual({ status: "hold", reason: "qbd_source_unverified" })
+    }
+    expect(authorizeInstitutionalTerms({ ...baseline, snapshot: {
+      ...snapshot, lastSuccess: "2026-09-22T08:00:00-04:00",
+    } }).status).toBe("allow")
   })
 
   it("holds an explicitly held QBD account", () => {

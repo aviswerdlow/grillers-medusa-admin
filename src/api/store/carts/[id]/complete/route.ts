@@ -17,6 +17,11 @@ import { OrderPromiseError } from "../../../../../lib/order-promise";
  * unchanged. Customer saved-card and invoice use the dedicated place route. */
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   try {
+    // Only the staff card-at-placement receipt is authorized to use this
+    // public native route. place-order invokes completion internally after
+    // its saved-card or institutional checks; clients cannot set this proof.
+    if ((req as any).gp_staff_cart?.payment_mode !== "collect_card_now")
+      throw new OrderPromiseError("checkout_place_order_required", 403);
     const cart = await reviewCart(req.scope, req.params.id);
     const identifiers = {
       review_id: req.headers["x-gp-order-review-id"],
