@@ -29,7 +29,7 @@ export type InstitutionalCollectionState = {
 }
 
 export type InstitutionalCollectionView = {
-  status: "accepted_on_terms" | "invoice_outstanding" | "collection_pending" | "collection_confirmed" | "reconciled" | "cancelled" | "quarantined"
+  status: "accepted_on_terms" | "invoice_outstanding" | "collection_pending" | "collection_confirmed" | "balance_verified" | "paid_in_full" | "cancelled" | "quarantined"
   confirmedCollectedCents: number
   confirmedCreditCents: number
   expectedRemainingCents: number | null
@@ -60,6 +60,20 @@ function confirmedRequest(state: InstitutionalCollectionState, requestKey: strin
   const credit = Object.entries(state.credits).find(([, value]) => value.requestKey === requestKey)
   if (credit) return { kind: "credit" as const, txnId: credit[0], amountCents: credit[1].appliedCents }
   return null
+function canonicalEvent(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalEvent)
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([key, child]) => [key, canonicalEvent(child)]))
+  }
+  return value
+}
+
+function eventFingerprint(event: unknown): string {
+  const fingerprint = JSON.stringify(canonicalEvent(event))
+  if (typeof fingerprint !== "string") throw new Error("Malformed institutional event")
+  return fingerprint
 }
 
 export function acceptedInstitutionalOrder(orderId: string, acceptedCents: number): InstitutionalCollectionState {
@@ -75,14 +89,16 @@ export function applyInstitutionalCollectionEvent(
   state: InstitutionalCollectionState,
   event: InstitutionalCollectionEvent
 ): InstitutionalCollectionState {
-  const eventId = id(event.eventId)
-  const fingerprint = JSON.stringify(event)
-  if (state.seenEvents[eventId] === fingerprint) return state
-  if (state.seenEvents[eventId]) return quarantine(state, `conflicting_event:${eventId}`)
-  const next = { ...state, seenEvents: { ...state.seenEvents, [eventId]: fingerprint } }
-  if (state.quarantineReasons.length) return quarantine(next, "event_after_quarantine")
+  let next = state
+  try {
+    const eventId = id(event.eventId)
+    const fingerprint = eventFingerprint(event)
+    if (state.seenEvents[eventId] === fingerprint) return state
+    if (state.seenEvents[eventId]) return quarantine(state, `conflicting_event:${eventId}`)
+    next = { ...state, seenEvents: { ...state.seenEvents, [eventId]: fingerprint } }
+    if (state.quarantineReasons.length) return quarantine(next, "event_after_quarantine")
 
-  switch (event.type) {
+    switch (event.type) {
     case "invoice_posted": {
       const invoiceTxnId = id(event.invoiceTxnId)
       const sourceRevision = id(event.sourceRevision)
@@ -220,6 +236,11 @@ export function applyInstitutionalCollectionEvent(
         : { ...next, cancelled: true }
     case "outcome_uncertain":
       return quarantine(next, `uncertain_collection:${id(event.requestKey)}`)
+    default:
+      return quarantine(next, "unknown_event_type")
+    }
+  } catch {
+    return quarantine(next, "malformed_event")
   }
 }
 
@@ -236,7 +257,7 @@ export function institutionalCollectionView(state: InstitutionalCollectionState)
     : state.cancelled ? "cancelled"
     : !state.invoiceTxnId ? "accepted_on_terms"
     : Object.keys(state.pending).length ? "collection_pending"
-    : state.lastReadback ? "reconciled"
+    : state.lastReadback ? (state.lastReadback.remainingCents === 0 ? "paid_in_full" : "balance_verified")
     : confirmedCollectedCents || confirmedCreditCents ? "collection_confirmed"
     : "invoice_outstanding"
   return {

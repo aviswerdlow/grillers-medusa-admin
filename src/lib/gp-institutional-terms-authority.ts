@@ -44,7 +44,7 @@ export function authorizeInstitutionalTerms(input: {
   now: Date
   maxAgeMs: number
 }): InstitutionalTermsDecision {
-  if (!input.featureEnabled) return { status: "deny", reason: "feature_disabled" }
+  if (input.featureEnabled !== true) return { status: "deny", reason: "feature_disabled" }
   if (input.sourceStatus !== "success") {
     return { status: "hold", reason: "qbd_source_unavailable" }
   }
@@ -65,6 +65,7 @@ export function authorizeInstitutionalTerms(input: {
     return { status: "deny", reason: "qbd_identity_mismatch" }
   }
   if (!exactId(snapshot.sourceRevision) || !exactId(snapshot.lastSuccess) ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(snapshot.lastSuccess) ||
       !Number.isSafeInteger(input.maxAgeMs) || input.maxAgeMs <= 0 ||
       !Number.isFinite(input.now.getTime())) {
     return { status: "hold", reason: "qbd_source_unverified" }
@@ -75,7 +76,7 @@ export function authorizeInstitutionalTerms(input: {
     return { status: "hold", reason: "qbd_source_stale" }
   }
   if (snapshot.approvalField !== "Pay By Check Approval" ||
-      !snapshot.approvalVerified || snapshot.approvalValue !== "Yes") {
+      snapshot.approvalVerified !== true || snapshot.approvalValue !== "Yes") {
     return { status: "deny", reason: "qbd_approval_missing" }
   }
   if (snapshot.onHold !== false) return { status: "hold", reason: "qbd_account_on_hold" }
