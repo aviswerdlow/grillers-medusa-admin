@@ -314,4 +314,28 @@ describe("reviewed physical weights and box space", () => {
       secret: true,
     });
   });
+
+  test("public projection preserves Medusa amount JSON while removing private fields", () => {
+    const amount = (numeric: number) => ({
+      numeric_: numeric,
+      raw_: { value: numeric.toFixed(2), precision: 20 },
+      bignumber_: { c: [numeric] },
+      toJSON() { return numeric; },
+    });
+    const body = {
+      cart: {
+        subtotal: amount(6.15),
+        total: amount(6.38),
+        items: [{ unit_price: amount(6.15) }],
+        metadata: { [SHIPPING_PACKING_PLAN_KEY]: { secret: true } },
+      },
+    };
+
+    const serialized = JSON.parse(JSON.stringify(publicShippingProjection(body)));
+    expect(serialized.cart.subtotal).toBe(6.15);
+    expect(serialized.cart.total).toBe(6.38);
+    expect(serialized.cart.items[0].unit_price).toBe(6.15);
+    expect(serialized.cart.metadata).not.toHaveProperty(SHIPPING_PACKING_PLAN_KEY);
+    expect(JSON.stringify(serialized)).not.toContain("numeric_");
+  });
 });
