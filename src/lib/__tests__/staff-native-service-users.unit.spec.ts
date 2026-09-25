@@ -58,7 +58,7 @@ describe("native service-user staff boundary", () => {
     expect(userRead).toHaveBeenCalledWith("usr_gateway")
   })
 
-  it("limits the native reader to enumerated GETs even if also listed as an operator", async () => {
+  it("limits the native reader to enumerated GET and HEAD reads even if also listed as an operator", async () => {
     process.env.GP_PRIVILEGED_ADMIN_USER_IDS = "usr_reader,usr_recovery"
     const get = request("usr_reader", "GET", "/admin/products")
     const allowed = await boundary(get)
@@ -66,7 +66,8 @@ describe("native service-user staff boundary", () => {
     expect(allowed.next).toHaveBeenCalledTimes(1)
     expect(get.gp_staff_principal).toMatchObject({ kind: "service", service_role: "read_only", transport_id: "usr_reader" })
 
-    for (const method of ["HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
+    expect((await boundary(request("usr_reader", "HEAD", "/admin/products"))).next).toHaveBeenCalledTimes(1)
+    for (const method of ["POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
       const denied = await boundary(request("usr_reader", method, "/admin/products"))
       expect(denied.res.code).toBe(403)
       expect(denied.next).not.toHaveBeenCalled()
@@ -75,9 +76,9 @@ describe("native service-user staff boundary", () => {
     expect((await boundary(request("usr_reader", "GET", "/admin/products", true))).res.code).toBe(403)
   })
 
-  it("refuses every non-GET method for a native reader while the wider boundary is in log mode", async () => {
+  it("refuses every non-read method for a native reader while the wider boundary is in log mode", async () => {
     process.env.GP_STAFF_BOUNDARY_MODE = "log"
-    for (const method of ["HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
+    for (const method of ["POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
       for (const path of ["/admin/products", "/admin/orders", "/admin/users"]) {
         const denied = await boundary(request("usr_reader", method, path))
         expect(denied.res.code).toBe(403)
@@ -85,6 +86,8 @@ describe("native service-user staff boundary", () => {
       }
     }
     expect((await boundary(request("usr_reader", "GET", "/admin/products"))).next).toHaveBeenCalledTimes(1)
+    expect((await boundary(request("usr_reader", "HEAD", "/admin/products"))).next).toHaveBeenCalledTimes(1)
+    expect((await boundary(request("usr_reader", "HEAD", "/admin/users"))).res.code).toBe(403)
   })
 
   it("does not activate an unconfigured or deleted native service user", async () => {

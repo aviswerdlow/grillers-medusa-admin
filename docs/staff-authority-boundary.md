@@ -58,8 +58,8 @@ Source: `src/lib/staff-cart-authority.ts`, `src/api/middlewares/staff-cart-autho
 | --- | --- |
 | `GP_STAFF_GATEWAY_API_KEY_ID` | ID of the dedicated key used by storefront `MEDUSA_ADMIN_API_TOKEN`, never its secret token |
 | `GP_STAFF_GATEWAY_USER_ID` | ID of the dedicated native service user used as the staff gateway; its login credential stays in 1Password and still requires the signed customer JWT |
-| `GP_ADMIN_READ_ONLY_API_KEY_IDS` | IDs of approved GET-only integrations, including #316's reader and storefront background reader |
-| `GP_ADMIN_READ_ONLY_USER_IDS` | IDs of dedicated native service users limited to enumerated admin GET routes; no non-GET method or staff JWT |
+| `GP_ADMIN_READ_ONLY_API_KEY_IDS` | IDs of approved GET/HEAD-only integrations, including #316's reader and storefront background reader |
+| `GP_ADMIN_READ_ONLY_USER_IDS` | IDs of dedicated native service users limited to enumerated admin GET/HEAD routes; no write method or staff JWT |
 | `GP_PRIVILEGED_ADMIN_USER_IDS` | Existing native user IDs for separate privileged operations/recovery |
 | `GP_STAFF_BOOTSTRAP_CUSTOMER_IDS` | Approved existing customer IDs for initial owners after identity/grant review |
 | `GP_INVOICE_APPROVER_CUSTOMER_IDS` | Approved invoice approver customer IDs, alongside the existing email allowlist |

@@ -40,9 +40,9 @@ export function adminRouteCapability(path: string, method: string, body: any = {
   return null
 }
 
-/** Actual GET-only discovery used by the QBD reader and catalog/baseline tools. */
+/** Actual read-only discovery used by the QBD reader and catalog/baseline tools. */
 export function isReadOnlyServiceRoute(path: string, method: string): boolean {
-  if (method !== "GET" || !isCanonicalStaffPath(path)) return false
+  if ((method !== "GET" && method !== "HEAD") || !isCanonicalStaffPath(path)) return false
   const p = path
   return /^\/admin\/(products|product-variants|inventory-items|stock-locations|reservations|orders|customers)(?:\/[^/]+)?$/i.test(p)
     || /^\/admin\/inventory-items\/[^/]+\/location-levels$/i.test(p)
