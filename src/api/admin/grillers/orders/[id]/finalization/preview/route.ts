@@ -5,6 +5,7 @@ import {
   metadataObject,
   previewFinalization,
 } from "../../../../../../../lib/catch-weight-finalization"
+import { withInstitutionalFinalizationWrite } from "../../../../../../../lib/gp-institutional-finalization-lock"
 import {
   emitFinalizationRouteFailureAlert,
   jsonError,
@@ -25,30 +26,33 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   const orderModule = req.scope.resolve(Modules.ORDER)
 
   try {
-    const preview = await previewFinalization(db, order, {
-      persist,
-    })
-
-    if (persist) {
-      const status = preview.finalization.status || "packed_pending_review"
-      const metadata = appendStaffAudit(
-        {
-          ...metadataObject(order.metadata),
-          finalization_id: preview.finalization.id,
-          finalization_status: status,
-          catch_weight_status: status,
-          final_total: preview.totals.final_order_total,
-          catch_weight_delta: preview.totals.delta_total,
-        },
-        {
-          action: "catch_weight_finalization_previewed",
-          status,
-          error_count: preview.errors.length,
-          ...staffAuditFields(req, body),
+    const preview = await withInstitutionalFinalizationWrite(
+      db, order, async (workDb) => {
+        const preview = await previewFinalization(workDb, order, { persist })
+        if (persist) {
+          const status = preview.finalization.status || "packed_pending_review"
+          const metadata = appendStaffAudit(
+            {
+              ...metadataObject(order.metadata),
+              finalization_id: preview.finalization.id,
+              finalization_status: status,
+              catch_weight_status: status,
+              final_total: preview.totals.final_order_total,
+              catch_weight_delta: preview.totals.delta_total,
+            },
+            {
+              action: "catch_weight_finalization_previewed",
+              status,
+              error_count: preview.errors.length,
+              ...staffAuditFields(req, body),
+            }
+          )
+          await orderModule.updateOrders(order.id, { metadata })
         }
-      )
-      await orderModule.updateOrders(order.id, { metadata })
-    }
+        return preview
+      },
+      { readReleased: !persist }
+    )
 
     res.status(200).json({
       order,

@@ -54,6 +54,14 @@ function quarantine(state: InstitutionalCollectionState, reason: string): Instit
   return { ...state, quarantineReasons: [...new Set([...state.quarantineReasons, reason])] }
 }
 
+function confirmedRequest(state: InstitutionalCollectionState, requestKey: string) {
+  const receipt = Object.entries(state.receipts).find(([, value]) => value.requestKey === requestKey)
+  if (receipt) return { kind: "collection" as const, txnId: receipt[0], amountCents: receipt[1].appliedCents }
+  const credit = Object.entries(state.credits).find(([, value]) => value.requestKey === requestKey)
+  if (credit) return { kind: "credit" as const, txnId: credit[0], amountCents: credit[1].appliedCents }
+  return null
+}
+
 function canonicalEvent(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalEvent)
   if (value !== null && typeof value === "object") {
@@ -113,6 +121,11 @@ export function applyInstitutionalCollectionEvent(
           (state.pending[requestKey].kind !== "collection" || state.pending[requestKey].amountCents !== amountCents)) {
         return quarantine(next, "conflicting_collection_request")
       }
+      const confirmed = confirmedRequest(state, requestKey)
+      if (confirmed) {
+        return confirmed.kind === "collection" && confirmed.amountCents === amountCents
+          ? next : quarantine(next, "conflicting_collection_request")
+      }
       return { ...next, pending: { ...state.pending, [requestKey]: { kind: "collection", amountCents } } }
     }
     case "credit_requested": {
@@ -125,6 +138,11 @@ export function applyInstitutionalCollectionEvent(
           (state.pending[requestKey].kind !== "credit" || state.pending[requestKey].amountCents !== amountCents)) {
         return quarantine(next, "conflicting_credit_request")
       }
+      const confirmed = confirmedRequest(state, requestKey)
+      if (confirmed) {
+        return confirmed.kind === "credit" && confirmed.amountCents === amountCents
+          ? next : quarantine(next, "conflicting_credit_request")
+      }
       return { ...next, pending: { ...state.pending, [requestKey]: { kind: "credit", amountCents } } }
     }
     case "collection_confirmed": {
@@ -135,6 +153,11 @@ export function applyInstitutionalCollectionEvent(
       const requestKey = event.requestKey === null ? null : id(event.requestKey)
       if (!state.invoiceTxnId || state.invoiceTxnId !== invoiceTxnId || appliedCents === 0) {
         return quarantine(next, "collection_identity_mismatch")
+      }
+      const claimed = requestKey ? confirmedRequest(state, requestKey) : null
+      if (claimed && (claimed.kind !== "collection" || claimed.txnId !== paymentTxnId ||
+          claimed.amountCents !== appliedCents)) {
+        return quarantine(next, "conflicting_collection_request_key")
       }
       const prior = state.receipts[paymentTxnId]
       if (prior) {
@@ -167,6 +190,11 @@ export function applyInstitutionalCollectionEvent(
       const requestKey = event.requestKey === null ? null : id(event.requestKey)
       if (!state.invoiceTxnId || state.invoiceTxnId !== invoiceTxnId || appliedCents === 0) {
         return quarantine(next, "credit_identity_mismatch")
+      }
+      const claimed = requestKey ? confirmedRequest(state, requestKey) : null
+      if (claimed && (claimed.kind !== "credit" || claimed.txnId !== creditTxnId ||
+          claimed.amountCents !== appliedCents)) {
+        return quarantine(next, "conflicting_credit_request_key")
       }
       const prior = state.credits[creditTxnId]
       if (prior) {
