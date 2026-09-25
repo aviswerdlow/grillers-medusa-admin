@@ -15,6 +15,8 @@
   "scripts": {
     "build": "medusa build",
     "seed": "medusa exec ./src/scripts/seed.ts",
+    "seed:catalog:export": "ts-node --transpile-only src/scripts/seed.ts catalog-export",
+    "seed:catalog:import": "ts-node --transpile-only src/scripts/seed.ts catalog-import",
     "email:preview": "ts-node --transpile-only src/scripts/preview-emails.ts",
     "communications:worker": "medusa exec ./src/scripts/communications-worker.ts",
     "communications:phone-intelligence": "medusa exec ./src/scripts/customer-phone-intelligence.ts",
