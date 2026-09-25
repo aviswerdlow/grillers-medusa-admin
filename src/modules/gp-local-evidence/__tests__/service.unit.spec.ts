@@ -28,10 +28,30 @@ describe("#367 private Medusa file provider", () => {
   it("signs only bounded GET links and remains off without the master flag", async () => {
     const provider = new GpLocalEvidenceFileService({}, options)
     const url = new URL(await provider.getPresignedDownloadUrl({ fileKey: key, expiresInSeconds: 60 }))
+    expect((provider as any).client_.config.forcePathStyle).toBe(true)
     expect(url.searchParams.get("X-Amz-Expires")).toBe("60")
     expect(url.pathname).toContain(`/${options.bucket}/`)
     await expect(provider.getPresignedDownloadUrl({ fileKey: key, expiresInSeconds: 301 })).rejects.toThrow("invalid_evidence_link_lifetime")
     process.env.GP_LOCAL_MILESTONES_ENABLED = "false"
     await expect(provider.getPresignedDownloadUrl({ fileKey: key })).rejects.toThrow("local_milestones_disabled")
+  })
+
+  it("uses virtual-hosted URLs for Railway and accepts an explicit path-style override", async () => {
+    const railway = { ...options, endpoint: "https://s3.railway.fixture.test" }
+    const provider = new GpLocalEvidenceFileService({}, railway)
+    await provider.getPresignedDownloadUrl({ fileKey: key })
+    expect((provider as any).client_.config.forcePathStyle).toBe(false)
+
+    const overridden = new GpLocalEvidenceFileService({}, { ...railway, force_path_style: "true" })
+    await overridden.getPresignedDownloadUrl({ fileKey: key })
+    expect((overridden as any).client_.config.forcePathStyle).toBe(true)
+
+    const supabaseOverride = new GpLocalEvidenceFileService({}, { ...options, force_path_style: "false" })
+    await supabaseOverride.getPresignedDownloadUrl({ fileKey: key })
+    expect((supabaseOverride as any).client_.config.forcePathStyle).toBe(false)
+
+    const invalid = new GpLocalEvidenceFileService({}, { ...railway, force_path_style: "maybe" })
+    await expect(invalid.getPresignedDownloadUrl({ fileKey: key }))
+      .rejects.toThrow("private_evidence_provider_unconfigured")
   })
 })
