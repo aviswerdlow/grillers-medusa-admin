@@ -48,6 +48,7 @@ export function isExcludedTable(name: string): boolean {
 export function assertSafeTarget(sourceUrl: string, targetUrl: string, sourceIdentity?: string, targetIdentity?: string) {
   const source = new URL(sourceUrl), target = new URL(targetUrl)
   if (!/^postgres(?:ql)?:$/.test(source.protocol) || !/^postgres(?:ql)?:$/.test(target.protocol)) throw new Error("Both database URLs must be PostgreSQL URLs.")
+  if (source.search || target.search || source.hash || target.hash) throw new Error("Database URLs must not contain query parameters or fragments.")
   if (!source.hostname || !target.hostname || !source.port || !target.port) throw new Error("Both database URLs require explicit hosts and ports.")
   if (source.host.toLowerCase() === target.host.toLowerCase()) throw new Error("The target endpoint is the production database endpoint.")
   if (sourceIdentity && targetIdentity && sourceIdentity === targetIdentity) throw new Error("The target resolves to the production database, despite its different URL.")
@@ -72,20 +73,27 @@ async function ids(db: Queryable, sql: string, params: any[] = []): Promise<stri
   return unique(textIds((await db.query(sql, params)).rows))
 }
 
-function assertNoSecretMetadata(value: unknown, path = "metadata") {
+function assertNoCatalogCredential(value: unknown, path: string) {
+  if (typeof value === "string") {
+    if (/(?:\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]+|-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|\bBearer\s+[A-Za-z0-9._-]{16,})/i.test(value)) {
+      throw new Error(`Potential credential value in catalog ${path}; export stopped.`)
+    }
+    return
+  }
   if (!value || typeof value !== "object") return
   for (const [key, nested] of Object.entries(value)) {
     if (/(?:secret|password|private.?key|access.?token|api.?key|credential)/i.test(key)) throw new Error(`Potential credential field in catalog ${path}.${key}; export stopped.`)
-    assertNoSecretMetadata(nested, `${path}.${key}`)
+    assertNoCatalogCredential(nested, `${path}.${key}`)
   }
 }
 
 export function sanitizeCatalogRow(table: string, original: Record<string, any>): Record<string, any> {
   const row = { ...original }
-  if (row.metadata) assertNoSecretMetadata(row.metadata)
+  assertNoCatalogCredential(row, table)
   if (table === "inventory_level") {
     // Live reservations belong to production orders and cannot enter rehearsal.
-    row.reserved_quantity = 0
+    // PostgreSQL numeric columns read back as strings through node-postgres.
+    row.reserved_quantity = "0"
     row.raw_reserved_quantity = { ...(row.raw_reserved_quantity || { precision: 20 }), value: "0" }
   }
   return row
@@ -160,7 +168,7 @@ function snapshotIsValid(value: any): asserts value is CatalogSnapshot {
     if (!Array.isArray(entry?.columns) || !Array.isArray(entry?.rows) || value.export_counts[table] !== entry.rows.length) throw new Error(`Invalid count or shape for ${table}.`)
     for (const row of entry.rows) {
       if (!row || typeof row !== "object" || Object.keys(row).some(name => !entry.columns.some((c: Column) => c.name === name))) throw new Error(`Unexpected column in ${table}.`)
-      if (row.metadata) assertNoSecretMetadata(row.metadata)
+      assertNoCatalogCredential(row, table)
     }
   }
   if (Object.values(value.excluded_counts).some(count => count !== 0)) throw new Error("Excluded table count in the snapshot is nonzero.")
@@ -180,11 +188,12 @@ export function assertExcludedEmpty(counts: Record<string, number>) {
   if (occupied.length) throw new Error(`Excluded rehearsal tables are not empty: ${occupied.map(([table]) => table).join(", ")}.`)
 }
 
-function orderedRows(table: string, rows: Record<string, any>[]) {
+export function orderedRows(table: string, rows: Record<string, any>[]) {
   if (table !== "product_category" && table !== "tax_region") return rows
   const pending = [...rows], ordered: Record<string, any>[] = [], seen = new Set<string>()
+  const parentKey = table === "product_category" ? "parent_category_id" : "parent_id"
   while (pending.length) {
-    const index = pending.findIndex(row => !row.parent_id || seen.has(String(row.parent_id)))
+    const index = pending.findIndex(row => !row[parentKey] || seen.has(String(row[parentKey])))
     if (index < 0) throw new Error(`Circular or missing parent in ${table}.`)
     const [row] = pending.splice(index, 1)
     ordered.push(row)
@@ -198,10 +207,21 @@ async function insertRows(db: Queryable, table: string, entry: Table) {
   const names = entry.columns.map(column => column.name)
   for (let offset = 0; offset < rows.length; offset += 40) {
     const batch = rows.slice(offset, offset + 40)
-    const values = batch.flatMap(row => names.map(name => row[name] ?? null))
+    const values = batch.flatMap(row => entry.columns.map(column => serializeCatalogValue(column.type, row[column.name])))
     const tuples = batch.map((_, rowIndex) => `(${names.map((_, colIndex) => `$${rowIndex * names.length + colIndex + 1}`).join(",")})`)
     await db.query(`INSERT INTO public.${quoted(table)} (${names.map(quoted).join(",")}) VALUES ${tuples.join(",")}`, values)
   }
+}
+
+export function serializeCatalogValue(type: string, value: unknown): unknown {
+  if (value == null) return null
+  // node-postgres treats JS arrays as PostgreSQL arrays and strings as raw
+  // JSON input. Serialize every json/jsonb value to preserve its JSON type.
+  return type === "json" || type === "jsonb" ? JSON.stringify(value) : value
+}
+
+function rowHash(rows: Record<string, any>[]): string {
+  return sha256(rows.map(row => JSON.stringify(row)).sort().join("\n"))
 }
 
 async function tableIdHash(db: Queryable, table: string): Promise<string> {
@@ -236,13 +256,26 @@ export async function importCatalogRows(target: Queryable, snapshot: CatalogSnap
     const expected = sha256(snapshot.tables[table].rows.map(row => String(row.id)).sort().join("\n"))
     if (await tableIdHash(target, table) !== expected) throw new Error(`Original ${table} IDs were not preserved.`)
   }
+  // Counts and IDs can match even if a JSON string became a boolean or a
+  // JSON array was transformed. Compare every source row after PostgreSQL
+  // has parsed the imported values, before committing the target transaction.
+  const verifiedRowHashes: Record<string, string> = {}
+  for (const table of CATALOG_TABLES) {
+    const names = snapshot.tables[table].columns.map(column => column.name)
+    const seededRows = (await target.query(`SELECT ${names.map(quoted).join(", ")} FROM public.${quoted(table)} ORDER BY 1`)).rows
+    const expected = rowHash(snapshot.tables[table].rows)
+    const actual = rowHash(seededRows)
+    if (actual !== expected) throw new Error(`Seeded row content differs for ${table}.`)
+    verifiedRowHashes[table] = actual
+  }
   const afterExcluded = await excludedTableCounts(target, Object.keys(snapshot.excluded_counts))
   assertExcludedEmpty(afterExcluded)
-  return { seeded_counts: seededCounts, excluded_counts: afterExcluded }
+  return { seeded_counts: seededCounts, verified_row_hashes: verifiedRowHashes, excluded_counts: afterExcluded }
 }
 
 function databaseClient(url: string) {
   const parsed = new URL(url)
+  if (parsed.search || parsed.hash) throw new Error("Database URLs must not contain query parameters or fragments.")
   const local = ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname)
   const ca = process.env.GP_CATALOG_DB_CA_PEM
   if (!local && !ca && process.env.GP_CATALOG_ALLOW_RAILWAY_SELF_SIGNED_SSL !== "yes") {
