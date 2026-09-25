@@ -8,9 +8,11 @@ import {
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import {
   finalChargeSucceeded,
+  isInvoiceOrder,
   metadataObject,
   orderRequiresFinalCharge,
 } from "../lib/catch-weight-finalization"
+import { institutionalFulfillmentDecision } from "../lib/gp-institutional-fulfillment"
 import {
   isDestinationServiceable,
   resolveServiceCodeFromMethod,
@@ -171,7 +173,7 @@ export async function blockFulfillmentBeforeFinalCharge(
     const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
     const { data } = await query.graph({
       entity: "order",
-      fields: ["id", "metadata"],
+      fields: ["id", "cart_id", "metadata"],
       filters: { id: orderId },
     })
     const order = data?.[0]
@@ -203,6 +205,17 @@ export async function blockFulfillmentBeforeFinalCharge(
           "This catch-weight order cannot be fulfilled until the final pre-shipment card charge succeeds.",
       })
       return
+    }
+    if (process.env.GP_INSTITUTIONAL_TERMS_ENABLED === "true" && isInvoiceOrder(verifiedOrder)) {
+      const db = req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION)
+      const decision = await institutionalFulfillmentDecision({ db, order: verifiedOrder })
+      if (decision.status !== "allow") {
+        res.status(409).json({
+          type: "institutional_terms_hold",
+          message: "This invoice order needs a verified release before fulfillment.",
+        })
+        return
+      }
     }
   } catch (error) {
     res.status(503).json({
@@ -759,6 +772,11 @@ export default defineMiddlewares({
     {
       matcher: "/store/customers/me/receipt-email",
       method: ["GET", "POST"],
+      middlewares: [authenticate("customer", ["session", "bearer"])],
+    },
+    {
+      matcher: "/store/customers/me/institutional-terms",
+      method: "GET",
       middlewares: [authenticate("customer", ["session", "bearer"])],
     },
     {
