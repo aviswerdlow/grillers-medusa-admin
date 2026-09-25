@@ -6,6 +6,7 @@ import {
   metadataObject,
   returnFinalizationToPicking,
 } from "../../../../../../../lib/catch-weight-finalization"
+import { withInstitutionalFinalizationWrite } from "../../../../../../../lib/gp-institutional-finalization-lock"
 import {
   emitFinalizationRouteFailureAlert,
   jsonError,
@@ -31,23 +32,25 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       ? body.reason.trim()
       : "Packer found a mismatch during packing."
   try {
-    const detail = await returnFinalizationToPicking(db, order, actor, reason)
-
-    const metadata = appendStaffAudit(
-      {
-        ...metadataObject(order.metadata),
-        finalization_id: detail.finalization.id,
-        finalization_status: FINALIZATION_PICKING,
-        catch_weight_status: FINALIZATION_PICKING,
-      },
-      {
-        action: "catch_weight_returned_to_picking",
-        status: FINALIZATION_PICKING,
-        reason,
-        ...staffAudit,
-      }
-    )
-    await orderModule.updateOrders(order.id, { metadata })
+    const detail = await withInstitutionalFinalizationWrite(db, order, async (workDb) => {
+      const detail = await returnFinalizationToPicking(workDb, order, actor, reason)
+      const metadata = appendStaffAudit(
+        {
+          ...metadataObject(order.metadata),
+          finalization_id: detail.finalization.id,
+          finalization_status: FINALIZATION_PICKING,
+          catch_weight_status: FINALIZATION_PICKING,
+        },
+        {
+          action: "catch_weight_returned_to_picking",
+          status: FINALIZATION_PICKING,
+          reason,
+          ...staffAudit,
+        }
+      )
+      await orderModule.updateOrders(order.id, { metadata })
+      return detail
+    })
 
     res.status(200).json({
       order,

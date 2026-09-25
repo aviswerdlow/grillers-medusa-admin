@@ -4,6 +4,9 @@ jest.mock("../../../../../../../../lib/wwex-finalization-shipment", () => ({
 }))
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { emitOpsAlert } from "../../../../../../../../lib/ops-alert"
+import { previewFinalization } from "../../../../../../../../lib/catch-weight-finalization"
+import { institutionalCheckoutAuthority, reserveInstitutionalCheckout } from "../../../../../../../../lib/gp-institutional-checkout"
+import { persistInstitutionalReleaseIntent, reconcileInstitutionalReleaseIntent } from "../../../../../../../../lib/gp-institutional-release-intent"
 
 const mockApproveFinalization = jest.fn()
 const mockInvoiceArOrderMetadata = jest.fn((_input: any) => ({
@@ -32,6 +35,17 @@ jest.mock("../../../../../../../../lib/catch-weight-finalization", () => ({
 jest.mock("../../../../../../../../lib/ops-alert", () => ({
   emitOpsAlert: jest.fn(async () => ({ ok: true, skipped: false })),
 }))
+jest.mock("../../../../../../../../lib/gp-institutional-checkout", () => ({
+  institutionalCheckoutAuthority: jest.fn(),
+  institutionalDollarsToCents: jest.requireActual("../../../../../../../../lib/gp-institutional-checkout").institutionalDollarsToCents,
+  institutionalOrderTermsMatch: jest.requireActual("../../../../../../../../lib/gp-institutional-checkout").institutionalOrderTermsMatch,
+  reserveInstitutionalCheckout: jest.fn(),
+}))
+jest.mock("../../../../../../../../lib/gp-institutional-release-intent", () => ({
+  institutionalReleaseIntent: jest.fn(() => ({ status: "prepared", requestKey: "invoice_ar:order_123" })),
+  persistInstitutionalReleaseIntent: jest.fn(async () => undefined),
+  reconcileInstitutionalReleaseIntent: jest.fn(async () => ({ status: "applied" })),
+}))
 
 import { POST } from "../route"
 
@@ -51,7 +65,13 @@ function makeScope() {
       data: [{ id: "order_123", metadata: {} }],
     })),
   }
-  const db = jest.fn()
+  const auditInsert = jest.fn(async () => undefined)
+  const db: any = jest.fn(() => ({ insert: auditInsert }))
+  const trx: any = jest.fn(() => ({
+    where: () => ({ whereNull: () => ({ first: async () => ({ status: "packed_pending_review" }) }) }),
+  }))
+  trx.raw = jest.fn(async () => ({ rows: [] }))
+  db.transaction = jest.fn(async (run) => run(trx))
   const orderModule = {
     updateOrders: jest.fn(async () => undefined),
   }
@@ -67,13 +87,25 @@ function makeScope() {
     },
   }
 
-  return { db, eventBus, logger, orderModule, query, scope }
+  return { auditInsert, db, trx, eventBus, logger, orderModule, query, scope }
 }
 
 describe("approve finalization route", () => {
+const priorInstitutionalFlag = process.env.GP_INSTITUTIONAL_TERMS_ENABLED
+const acceptedTerms = {
+  gp_institutional_commitment_id: "cart:cart_123",
+  gp_institutional_terms_list_id: "TEST_TERMS_NET10",
+  gp_payment_terms: "Net 10",
+}
+const sourceTerms = { termsListId: "TEST_TERMS_NET10", termsName: "Net 10" }
   beforeEach(() => {
     jest.clearAllMocks()
     mockIsInvoiceOrder.mockReturnValue(false)
+    delete process.env.GP_INSTITUTIONAL_TERMS_ENABLED
+  })
+  afterAll(() => {
+    if (priorInstitutionalFlag === undefined) delete process.env.GP_INSTITUTIONAL_TERMS_ENABLED
+    else process.env.GP_INSTITUTIONAL_TERMS_ENABLED = priorInstitutionalFlag
   })
 
   it("passes finalized lines and shipper packages into the A/R envelope without starting a charge", async () => {
@@ -185,6 +217,173 @@ describe("approve finalization route", () => {
       })
     )
   })
+it("holds a flagged invoice before release when its source is stale", async () => {
+  process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+  mockIsInvoiceOrder.mockReturnValue(true)
+  ;(institutionalCheckoutAuthority as jest.Mock).mockResolvedValueOnce({ status: "hold", reason: "stale_source" })
+  const { scope, query, orderModule, auditInsert, db } = makeScope()
+  query.graph.mockResolvedValueOnce({ data: [{
+    id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
+    metadata: { gp_institutional_commitment_id: "cart:cart_123" },
+  }] } as any)
+  const res = makeRes()
+  await POST({ scope, params: { id: "order_123" }, body: {
+    institutional_override_reason: "staff_clicked_release",
+  } } as any, res)
+  expect(res.status).toHaveBeenCalledWith(409)
+  expect(mockApproveFinalization).not.toHaveBeenCalled()
+  expect(reserveInstitutionalCheckout).not.toHaveBeenCalled()
+  expect(orderModule.updateOrders).not.toHaveBeenCalled()
+  expect(db).toHaveBeenCalledWith("gp_institutional_override_attempt")
+  expect(auditInsert).toHaveBeenCalledWith(expect.objectContaining({
+    order_id: "order_123", reason_code: "staff_clicked_release",
+    authority_reason: "stale_source", named_capability: null, decision: "denied",
+  }))
+})
+
+it("keeps release denied and pages when the denied-attempt audit cannot be stored", async () => {
+  process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+  mockIsInvoiceOrder.mockReturnValue(true)
+  ;(institutionalCheckoutAuthority as jest.Mock).mockResolvedValueOnce({
+    status: "hold", reason: "credit_limit_exceeded",
+  })
+  const { scope, query, auditInsert } = makeScope()
+  auditInsert.mockRejectedValueOnce(new Error("audit table unavailable"))
+  query.graph.mockResolvedValueOnce({ data: [{
+    id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
+    metadata: { gp_institutional_commitment_id: "cart:cart_123" },
+  }] } as any)
+  const res = makeRes()
+  await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
+  expect(res.status).toHaveBeenCalledWith(503)
+  expect(mockApproveFinalization).not.toHaveBeenCalled()
+  expect(emitOpsAlert).toHaveBeenCalledWith(expect.objectContaining({
+    severity: "page",
+    meta: expect.objectContaining({ action: "institutional_denied_release_audit_failed" }),
+  }))
+})
+
+it.each([
+  ["ListID", { termsListId: "TEST_TERMS_NET30", termsName: "Net 10" }],
+  ["displayed terms", { termsListId: "TEST_TERMS_NET10", termsName: "Net 30" }],
+])("holds finalization when current QBD %s differs from checkout", async (_label, changedTerms) => {
+  process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+  mockIsInvoiceOrder.mockReturnValue(true)
+  ;(institutionalCheckoutAuthority as jest.Mock).mockResolvedValueOnce({
+    status: "allow", account: {
+      companyKey: "TEST_SHA", customerListId: "TEST_LIST", creditLimitCents: 100000,
+      invoices: [], ...changedTerms,
+    },
+  })
+  const { scope, query, auditInsert, orderModule } = makeScope()
+  query.graph.mockResolvedValueOnce({ data: [{
+    id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
+    metadata: acceptedTerms,
+  }] } as any)
+  const res = makeRes()
+  await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
+  expect(res.status).toHaveBeenCalledWith(409)
+  expect(reserveInstitutionalCheckout).not.toHaveBeenCalled()
+  expect(mockApproveFinalization).not.toHaveBeenCalled()
+  expect(orderModule.updateOrders).not.toHaveBeenCalled()
+  expect(auditInsert).toHaveBeenCalledWith(expect.objectContaining({
+    authority_reason: "qbd_terms_changed", decision: "denied",
+  }))
+})
+
+it("audits an over-limit release attempt after its credit transaction is denied", async () => {
+  process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+  mockIsInvoiceOrder.mockReturnValue(true)
+  ;(institutionalCheckoutAuthority as jest.Mock).mockResolvedValueOnce({
+    status: "allow", account: {
+      companyKey: "TEST_SHA", customerListId: "TEST_LIST", creditLimitCents: 100000,
+      invoices: [], ...sourceTerms,
+    },
+  })
+  ;(previewFinalization as jest.Mock).mockResolvedValueOnce({
+    errors: [], totals: { final_order_total: 500 },
+  })
+  ;(reserveInstitutionalCheckout as jest.Mock).mockResolvedValueOnce({
+    status: "hold", reason: "credit_limit_exceeded", projectedCents: 105000,
+  })
+  const { scope, query, auditInsert } = makeScope()
+  query.graph.mockResolvedValueOnce({ data: [{
+    id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
+    metadata: acceptedTerms,
+  }] } as any)
+  const res = makeRes()
+  await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
+  expect(res.status).toHaveBeenCalledWith(409)
+  expect(mockApproveFinalization).not.toHaveBeenCalled()
+  expect(auditInsert).toHaveBeenCalledWith(expect.objectContaining({
+    authority_reason: "credit_limit_exceeded", decision: "denied",
+  }))
+})
+
+it("reserves the packed invoice total in the approval transaction before A/R release", async () => {
+  process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+  mockIsInvoiceOrder.mockReturnValue(true)
+  const account = { companyKey: "TEST_SHA", customerListId: "TEST_LIST", creditLimitCents: 100000, invoices: [], ...sourceTerms }
+  ;(institutionalCheckoutAuthority as jest.Mock).mockResolvedValueOnce({ status: "allow", account })
+  ;(reserveInstitutionalCheckout as jest.Mock).mockResolvedValueOnce({ status: "reserved", projectedCents: 50000 })
+  ;(previewFinalization as jest.Mock).mockResolvedValueOnce({ errors: [], totals: { final_order_total: 500 } })
+  mockApproveFinalization.mockResolvedValueOnce({
+    finalization: { id: "fin_123", status: "released_to_fulfillment" },
+    totals: { final_order_total: 500, delta_total: 50 }, lines: [], packages: [],
+  })
+  const { scope, query, db, trx, orderModule } = makeScope()
+  let transactionCommitted = false
+  db.transaction.mockImplementationOnce(async (run: any) => {
+    const result = await run(trx)
+    transactionCommitted = true
+    return result
+  })
+  ;(reconcileInstitutionalReleaseIntent as jest.Mock).mockImplementationOnce(async () => {
+    expect(transactionCommitted).toBe(true)
+    return { status: "applied" }
+  })
+  query.graph.mockResolvedValueOnce({ data: [{
+    id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
+    metadata: acceptedTerms,
+  }] } as any)
+  const res = makeRes()
+  await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
+  expect(reserveInstitutionalCheckout).toHaveBeenCalledWith(expect.objectContaining({
+    account, reservationId: "cart:cart_123", amountCents: 50000, transaction: trx,
+  }))
+  expect(mockApproveFinalization).toHaveBeenCalledTimes(1)
+  expect(persistInstitutionalReleaseIntent).toHaveBeenCalledWith(
+    trx, "fin_123", expect.objectContaining({ requestKey: "invoice_ar:order_123" })
+  )
+  expect(reconcileInstitutionalReleaseIntent).toHaveBeenCalledWith(
+    expect.objectContaining({ orderId: "order_123" })
+  )
+  expect(orderModule.updateOrders).not.toHaveBeenCalled()
+  expect(res.status).toHaveBeenCalledWith(200)
+})
+
+it("rolls back approval when the packed total differs from the reserved amount", async () => {
+  process.env.GP_INSTITUTIONAL_TERMS_ENABLED = "true"
+  mockIsInvoiceOrder.mockReturnValue(true)
+  ;(institutionalCheckoutAuthority as jest.Mock).mockResolvedValueOnce({ status: "allow", account: {
+    companyKey: "TEST_SHA", customerListId: "TEST_LIST", creditLimitCents: 100000, invoices: [], ...sourceTerms,
+  } })
+  ;(reserveInstitutionalCheckout as jest.Mock).mockResolvedValueOnce({ status: "reserved" })
+  ;(previewFinalization as jest.Mock).mockResolvedValueOnce({ errors: [], totals: { final_order_total: 500 } })
+  mockApproveFinalization.mockResolvedValueOnce({
+    finalization: { id: "fin_123", status: "released_to_fulfillment" },
+    totals: { final_order_total: 501 }, lines: [], packages: [],
+  })
+  const { scope, query, orderModule } = makeScope()
+  query.graph.mockResolvedValueOnce({ data: [{
+    id: "order_123", cart_id: "cart_123", customer_id: "cus_123",
+    metadata: acceptedTerms,
+  }] } as any)
+  const res = makeRes()
+  await POST({ scope, params: { id: "order_123" }, body: {} } as any, res)
+  expect(res.status).toHaveBeenCalledWith(409)
+  expect(orderModule.updateOrders).not.toHaveBeenCalled()
+})
 })
 
 it("holds an invoice shipment before approval and A/R release when pricing is incomplete", async () => {

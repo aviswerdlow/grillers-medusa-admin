@@ -1,6 +1,7 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { previewFinalization } from "../../../../../../lib/catch-weight-finalization"
+import { withInstitutionalFinalizationWrite } from "../../../../../../lib/gp-institutional-finalization-lock"
 import {
   emitFinalizationRouteFailureAlert,
   jsonError,
@@ -18,7 +19,11 @@ export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
     }
 
     const db = req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION)
-    const detail = await previewFinalization(db, order, { persist: false })
+    const detail = await withInstitutionalFinalizationWrite(
+      db, order,
+      (workDb) => previewFinalization(workDb, order!, { persist: false }),
+      { readReleased: true }
+    )
 
     res.status(200).json({
       order,
